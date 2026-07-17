@@ -9,6 +9,7 @@ import { absolute, relative } from './format';
 import {
   buildFacets,
   groupByRule,
+  type AssessmentFacet,
   type FacetRow,
   type Facets,
   type FindingRow,
@@ -19,7 +20,7 @@ import { type FindingFilters } from './query';
 
 // Re-exported so consumers have one import site for the DTOs: they are this layer's contract,
 // even though the shapes and the grouping over them live next door in group.ts.
-export type { Facets, FindingRow, ResourceRef, RuleGroup } from './group';
+export type { AssessmentFacet, Facets, FindingRow, ResourceRef, RuleGroup } from './group';
 
 /* Findings Data Access Layer.
  *
@@ -54,24 +55,23 @@ const DB_STATUSES_OF: Record<UiStatus, FindingStatus[]> = {
   muted: ['suppressed', 'accepted'],
 };
 
-/** The minimal slice of a PostgREST builder these queries chain. Declaring the methods to return
- * the same shape is what keeps `.in`/`.like` visible after the first call — supabase-js hands back
- * the same builder each time, so the `as T` at the end is sound. */
-type Filterable = {
-  in(column: string, values: readonly string[]): Filterable;
-  like(column: string, pattern: string): Filterable;
-};
-
 /** Apply every finding filter EXCEPT assessment. Shared by the list query and the two assessment
  * head-counts, so the coverage-gap facet is counted with the other facets applied but not its own
- * — the standard faceted semantics (see buildFacets). The list query layers assessment on top. */
-function sharedFindingFilters<T extends Filterable>(q: T, filters: FindingFilters): T {
-  let out: Filterable = q;
+ * — the standard faceted semantics (see buildFacets). The list query layers assessment on top.
+ *
+ * `T` is a FREE generic, deliberately unconstrained: supabase-js builders carry very deep generic
+ * types, and constraining T against a structural builder shape makes TS give up (TS2589 "type
+ * instantiation is excessively deep"). Instead the body casts to a tiny local chain shape — every
+ * filter method returns the same builder, so this is sound — and returns back as T, which at the
+ * call site is the real builder with `.in`/`.eq`/etc. still available. */
+function sharedFindingFilters<T>(q: T, filters: FindingFilters): T {
+  type Chain = { in(c: string, v: readonly string[]): Chain; like(c: string, p: string): Chain };
+  let out = q as unknown as Chain;
   if (filters.severity.length) out = out.in('severity', filters.severity);
   if (filters.status.length) out = out.in('status', filters.status.flatMap((s) => DB_STATUSES_OF[s]));
   if (filters.system) out = out.like('rule_id', `${filters.system}.%`);
   if (filters.rule) out = out.like('rule_id', `${filters.rule}%`);
-  return out as T;
+  return out as unknown as T;
 }
 
 /* The shape PostgREST returns for the list select below. Written out rather than inferred
@@ -90,9 +90,6 @@ type ListRowRaw = {
   /** PostgREST returns an aggregate embed as an array: `[{ count: 3 }]`, or `[]` for none. */
   observations: { count: number }[] | null;
 };
-
-/** One value of the assessment facet, counted exactly (head query, not a truncatable row fetch). */
-export type AssessmentFacet = { key: Assessment; count: number };
 
 export type FindingsView =
   | { state: 'error'; message: string }

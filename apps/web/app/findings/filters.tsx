@@ -6,8 +6,7 @@ import { useEffect, useState, useTransition } from 'react';
 import { SeverityBadge } from '@/components/ui/severity';
 import type { Assessment, Severity, UiStatus } from '@/lib/types';
 import { ASSESSMENT_LABEL, NotAssessedBadge } from './assessment';
-import type { AssessmentFacet } from './data';
-import type { Facets } from './group';
+import type { AssessmentFacet, Facets } from './group';
 import { StatusPill } from './status';
 import { findingsHref, toggle, type FindingFilters } from './query';
 

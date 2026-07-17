@@ -13,7 +13,21 @@ import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
  * `connections.config` is deliberately never selected: it carries credential references, and a
  * column that is never fetched cannot be leaked by a later refactor that passes a row to a
  * client component. RLS scopes every read; no query filters by tenant_id on purpose.
+ *
+ * COUNTS. The per-connection resource and open-finding tallies used to come from two tenant-wide
+ * unbounded fetches (every resource, every open finding) reduced in JS. PostgREST caps an
+ * unbounded response at Max Rows (1000 hosted), so past the cap every connection's numbers were
+ * silently low — the most dangerous kind of wrong on a page whose whole job is coverage honesty.
+ * Connections are FEW (a human connects each one), so the fix is per-connection queries: exact
+ * head-counts for resources, and a per-connection scoped read for open findings with an exact
+ * count. No count crosses the wire unbounded, and no SECURITY DEFINER RPC/view (which would run as
+ * postgres/BYPASSRLS and leak every tenant).
  */
+
+/** Bound on the per-connection open-finding sample used only to pick the worst severity badge; the
+ * open COUNT beside it is count:'exact' and is never truncated, so the number is always right even
+ * when the sample is capped. */
+const LIST_LIMIT = 500;
 
 type ConnectionRow = {
   id: string;
@@ -49,26 +63,19 @@ function absolute(iso: string): string {
 export default async function ConnectionsPage() {
   const supabase = await createClient();
 
-  const [connectionsRes, resourcesRes, findingsRes] = await Promise.all([
-    supabase
-      .from('connections')
-      .select(
-        'id, type, name, mode, status, last_scanned_at, created_at, collector_id, collectors(id, name, status, last_heartbeat)',
-      )
-      .order('name'),
-    supabase.from('resources').select('id, connection_id, stale'),
-    // findings carry no connection_id — they hang off a resource. !inner drops findings whose
-    // resource was deleted, which is correct: an orphan cannot be attributed to a connection.
-    supabase.from('findings').select('id, severity, resources!inner(connection_id)').eq('status', 'open'),
-  ]);
+  const connectionsRes = await supabase
+    .from('connections')
+    .select(
+      'id, type, name, mode, status, last_scanned_at, created_at, collector_id, collectors(id, name, status, last_heartbeat)',
+    )
+    .order('name');
 
-  const error = connectionsRes.error ?? resourcesRes.error ?? findingsRes.error;
-  if (error) {
+  if (connectionsRes.error) {
     return (
       <Page>
         <Card>
           <CardBody>
-            <EmptyState tone="error" title="Could not load connections" description={error.message} />
+            <EmptyState tone="error" title="Could not load connections" description={connectionsRes.error.message} />
           </CardBody>
         </Card>
       </Page>
@@ -79,61 +86,72 @@ export default async function ConnectionsPage() {
 
   if (connections.length === 0) return <Page><SetupState /></Page>;
 
-  // Latest scan per connection: one bounded query each rather than one big fetch reduced in JS.
-  // PostgREST has no "latest per group", and a single ordered+limited fetch would starve a
-  // rarely-scanned connection of its row behind a noisy one's history — reporting "never
-  // scanned" for a connection that has scanned. A false "never scanned" is worse than an extra
-  // round trip. N is the number of systems a human connected, so it stays small.
-  // TODO: collapse into one read behind a `connection_latest_scan` view when this grows.
-  const latestScans = await Promise.all(
+  // Everything per-connection in one pass. N is the number of systems a human connected, so it
+  // stays small — small enough that N bounded queries beat two tenant-wide unbounded fetches that
+  // capped at Max Rows. Each read below is either an exact head-count or scoped to ONE connection.
+  //
+  // The latest-scan read stays per-connection for the reason it always was: PostgREST has no
+  // "latest per group", and a single ordered+limited fetch would starve a rarely-scanned
+  // connection of its row behind a noisy one's history — a false "never scanned" is worse than an
+  // extra round trip.
+  const perConnection = await Promise.all(
     connections.map(async (c) => {
-      const { data } = await supabase
-        .from('scans')
-        .select('id, status, started_at, finished_at')
-        .eq('connection_id', c.id)
-        .order('started_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      return [c.id, (data as ScanRow | null) ?? null] as const;
+      const [scanRes, resTotalRes, resStaleRes, openRes] = await Promise.all([
+        supabase
+          .from('scans')
+          .select('id, status, started_at, finished_at')
+          .eq('connection_id', c.id)
+          .order('started_at', { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        supabase.from('resources').select('id', { count: 'exact', head: true }).eq('connection_id', c.id),
+        supabase
+          .from('resources')
+          .select('id', { count: 'exact', head: true })
+          .eq('connection_id', c.id)
+          .eq('stale', true),
+        // Open findings for THIS connection. findings carry no connection_id — they hang off a
+        // resource — so the inner join reaches connection_id and drops findings whose resource was
+        // deleted (an orphan cannot be attributed to a connection). count:'exact' gives the true
+        // open count even though the row sample is capped at LIST_LIMIT; the sample only feeds the
+        // worst-severity badge.
+        supabase
+          .from('findings')
+          .select('severity, resources!inner(connection_id)', { count: 'exact' })
+          .eq('status', 'open')
+          .eq('resources.connection_id', c.id)
+          .limit(LIST_LIMIT),
+      ]);
+      return { c, scanRes, resTotalRes, resStaleRes, openRes };
     }),
   );
-  const lastScan = new Map(latestScans);
 
-  const resources = (resourcesRes.data ?? []) as { id: string; connection_id: string | null; stale: boolean }[];
-  const findings = (findingsRes.data ?? []) as unknown as {
-    id: string;
-    severity: Severity;
-    resources: { connection_id: string | null } | null;
-  }[];
-
-  const resourceCount = new Map<string, { total: number; stale: number }>();
-  for (const r of resources) {
-    if (!r.connection_id) continue;
-    const c = resourceCount.get(r.connection_id) ?? { total: 0, stale: 0 };
-    c.total += 1;
-    if (r.stale) c.stale += 1;
-    resourceCount.set(r.connection_id, c);
+  // A failed read is not zero coverage — surface it rather than rendering plausible-but-wrong
+  // zeros on the one page whose job is to say what is NOT being seen.
+  const failed = perConnection.find((p) => p.resTotalRes.error ?? p.resStaleRes.error ?? p.openRes.error);
+  if (failed) {
+    const message = (failed.resTotalRes.error ?? failed.resStaleRes.error ?? failed.openRes.error)!.message;
+    return (
+      <Page>
+        <Card>
+          <CardBody>
+            <EmptyState tone="error" title="Could not load connection health" description={message} />
+          </CardBody>
+        </Card>
+      </Page>
+    );
   }
 
-  const findingSevs = new Map<string, Severity[]>();
-  for (const f of findings) {
-    const cid = f.resources?.connection_id;
-    if (!cid) continue;
-    const list = findingSevs.get(cid);
-    if (list) list.push(f.severity);
-    else findingSevs.set(cid, [f.severity]);
-  }
-
-  const rows = connections.map((c) => {
-    const scan = lastScan.get(c.id) ?? null;
-    const sevs = findingSevs.get(c.id) ?? [];
+  const rows = perConnection.map(({ c, scanRes, resTotalRes, resStaleRes, openRes }) => {
+    const scan = (scanRes.data as ScanRow | null) ?? null;
+    const sevs = ((openRes.data ?? []) as unknown as { severity: Severity }[]).map((f) => f.severity);
     let worst: Severity | null = null;
     for (const s of sevs) if (worst === null || SEVERITY_RANK[s] < SEVERITY_RANK[worst]) worst = s;
     return {
       ...c,
       scan,
-      counts: resourceCount.get(c.id) ?? { total: 0, stale: 0 },
-      open: sevs.length,
+      counts: { total: resTotalRes.count ?? 0, stale: resStaleRes.count ?? 0 },
+      open: openRes.count ?? 0,
       worst,
     };
   });

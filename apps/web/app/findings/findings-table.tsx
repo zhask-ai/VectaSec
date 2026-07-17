@@ -170,7 +170,9 @@ function GroupRows({
           {group.allNotAssessable ? (
             <NotAssessedBadge count={group.count} />
           ) : (
-            <SeverityBadge severity={group.severity} count={group.count} />
+            // Count the ASSESSED occurrences here — the gaps are tallied separately below, so the
+            // ×N beside a severity never silently includes a coverage gap.
+            <SeverityBadge severity={group.severity} count={group.assessedCount} />
           )}
           {/* A detector may override severity per hit (scan.py: `h.severity or d.severity`), so
               a group can genuinely be mixed. Saying so prevents the worst outcome of grouping —

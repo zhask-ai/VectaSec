@@ -55,9 +55,16 @@ export type RuleGroup = {
    * severity per hit (`Hit.severity or Detector.severity` in scan.py), so occurrences of one
    * rule genuinely can differ — collapsing them under an assumed-uniform severity would hide
    * the critical one inside a group labelled "medium". */
+  /** The worst severity among the ASSESSED occurrences — a coverage gap's stored severity is
+   * ignored, so a not_assessable occurrence on a critical rule never paints the group critical when
+   * no real finding is. Falls back to the overall worst only when every occurrence is a gap, purely
+   * to give the group a sort key. */
   severity: Severity;
   mixedSeverity: boolean;
   count: number;
+  /** Occurrences that are real findings (assessment = 'assessed'). The severity badge counts these,
+   * not `count`, so the gaps are tallied separately as "+N not assessed" rather than folded in. */
+  assessedCount: number;
   evidenceCount: number;
   /** How many occurrences in this group are coverage gaps (not_assessable). */
   notAssessableCount: number;
@@ -77,6 +84,11 @@ export type Facets = {
   status: { key: UiStatus; count: number }[];
   systems: { key: string; count: number }[];
 };
+
+/** One value of the assessment facet, counted exactly (a head query, not a truncatable row fetch).
+ * Lives here beside Facets — and not in the `server-only` data.ts — so the client Filters can type
+ * it without reaching across the server boundary. */
+export type AssessmentFacet = { key: Assessment; count: number };
 
 /** Severity is stored as `text`, not an enum (see migration 001), so Postgres would sort it
  * alphabetically — critical, high, info, low, medium. Wrong, and wrong in the direction that
@@ -113,7 +125,14 @@ export function groupByRule(rows: FindingRow[]): RuleGroup[] {
   const groups: RuleGroup[] = [];
   for (const [ruleId, findings] of byRule) {
     const ranked = bySeverityThenRecency(findings);
-    const worst = ranked[0].severity;
+
+    // Severity reflects the ASSESSED occurrences only: a coverage gap is not a vulnerability on the
+    // severity axis, so its stored severity must not colour the group. When every occurrence is a
+    // gap, fall back to the overall worst purely so the group still has a sort key (the header then
+    // shows the neutral NotAssessed mark, not this severity).
+    const assessed = findings.filter((f) => f.assessment === 'assessed');
+    const severityBasis = assessed.length > 0 ? assessed : findings;
+    const worst = bySeverityThenRecency(severityBasis)[0].severity;
 
     const statusTally = new Map<UiStatus, number>();
     for (const f of findings) statusTally.set(f.uiStatus, (statusTally.get(f.uiStatus) ?? 0) + 1);
@@ -122,17 +141,16 @@ export function groupByRule(rows: FindingRow[]): RuleGroup[] {
     // answers "when did we last see this rule fire", which is a question about time.
     const newest = findings[0];
 
-    const notAssessableCount = findings.reduce((n, f) => n + (f.assessment === 'not_assessable' ? 1 : 0), 0);
-
     groups.push({
       ruleId,
       title: ranked[0].title,
       severity: worst,
-      mixedSeverity: findings.some((f) => f.severity !== worst),
+      mixedSeverity: severityBasis.some((f) => f.severity !== worst),
       count: findings.length,
+      assessedCount: assessed.length,
       evidenceCount: findings.reduce((n, f) => n + f.evidenceCount, 0),
-      notAssessableCount,
-      allNotAssessable: notAssessableCount === findings.length,
+      notAssessableCount: findings.length - assessed.length,
+      allNotAssessable: assessed.length === 0,
       // Iterated in UI_STATUSES order so the pills read open -> muted regardless of which
       // status happened to be tallied first.
       statusCounts: UI_STATUSES.filter((s) => statusTally.has(s)).map((s) => ({

@@ -62,20 +62,35 @@ export default async function AssetsPage({
 
   const supabase = await createClient();
 
-  const [resourcesRes, findingsRes, connectionsRes] = await Promise.all([
-    supabase
-      .from('resources')
-      .select(
-        'id, kind, name, namespace, labels, first_seen, last_seen, stale, connection_id, connections(id, name, type)',
-      ),
-    // status='open' exactly, matching the Overview's query. If Overview says 12 open and this
-    // page's columns sum to 18, the number nobody can reconcile is the one nobody trusts —
-    // consistency across the console outranks a broader definition of "unresolved" here.
-    supabase.from('findings').select('resource_id, severity').eq('status', 'open'),
-    supabase.from('connections').select('id, name, type'),
+  // A page of resources + the EXACT filtered total in one query. count:'exact' is computed
+  // server-side and is NOT truncated at Max Rows the way the row array (capped at LIST_LIMIT) is.
+  // Ordered by recency so the cap is deterministic; the page is re-sorted by risk for display.
+  let resourcesQ = supabase
+    .from('resources')
+    .select(
+      'id, kind, name, namespace, labels, first_seen, last_seen, stale, connection_id, connections(id, name, type)',
+      { count: 'exact' },
+    )
+    .order('last_seen', { ascending: false })
+    .limit(LIST_LIMIT);
+  if (kindFilter) resourcesQ = resourcesQ.eq('kind', kindFilter);
+  if (connFilter) resourcesQ = resourcesQ.eq('connection_id', connFilter);
+
+  // Exact stale total within the current filter — a head count, never a JS tally of a capped array.
+  let staleQ = supabase.from('resources').select('id', { count: 'exact', head: true }).eq('stale', true);
+  if (kindFilter) staleQ = staleQ.eq('kind', kindFilter);
+  if (connFilter) staleQ = staleQ.eq('connection_id', connFilter);
+
+  const [resourcesRes, staleRes, unfilteredRes, connectionsRes] = await Promise.all([
+    resourcesQ,
+    staleQ,
+    // The unfiltered total, to tell "no assets at all" (onboarding) apart from "none match this
+    // filter" (too narrow) — the two must never read alike in this console.
+    supabase.from('resources').select('id', { count: 'exact', head: true }),
+    supabase.from('connections').select('id, name, type').order('name'),
   ]);
 
-  const error = resourcesRes.error ?? findingsRes.error ?? connectionsRes.error;
+  const error = resourcesRes.error ?? staleRes.error ?? unfilteredRes.error ?? connectionsRes.error;
   if (error) {
     return (
       <Page>
@@ -89,33 +104,10 @@ export default async function AssetsPage({
   }
 
   const rows = (resourcesRes.data ?? []) as unknown as ResourceRow[];
-  const findings = (findingsRes.data ?? []) as FindingRow[];
   const connections = (connectionsRes.data ?? []) as ConnectionRow[];
-
-  const openByResource = new Map<string, Severity[]>();
-  for (const f of findings) {
-    if (!f.resource_id) continue;
-    const list = openByResource.get(f.resource_id);
-    if (list) list.push(f.severity);
-    else openByResource.set(f.resource_id, [f.severity]);
-  }
-
-  const assets: Asset[] = rows.map((r) => {
-    const sevs = openByResource.get(r.id) ?? [];
-    return { ...r, open: sevs.length, worst: worstSeverity(sevs) };
-  });
-
-  // Options come from the whole inventory, not the filtered slice — a filter that removes its
-  // own escape route is a trap.
-  const kinds = [...new Set(assets.map((a) => a.kind))].sort();
-
-  const filtered = assets.filter(
-    (a) =>
-      (kindFilter === null || a.kind === kindFilter) &&
-      (connFilter === null || a.connection_id === connFilter),
-  );
-
-  const staleTotal = assets.filter((a) => a.stale).length;
+  const total = resourcesRes.count ?? rows.length; // filtered total (M)
+  const totalUnfiltered = unfilteredRes.count ?? 0;
+  const staleTotal = staleRes.count ?? 0;
 
   if (connections.length === 0) {
     return (
@@ -134,7 +126,7 @@ export default async function AssetsPage({
     );
   }
 
-  if (assets.length === 0) {
+  if (totalUnfiltered === 0) {
     return (
       <Page>
         <Card>
@@ -151,8 +143,57 @@ export default async function AssetsPage({
     );
   }
 
+  // Open-finding tallies ONLY for the resources on this page: bounded by what is shown, never an
+  // unbounded tenant-wide fetch. A single resource's open findings are bounded by the rulepack, so
+  // even a full page stays far under Max Rows — the property that made the old tenant-wide select
+  // silently wrong does not apply to a page-scoped `.in(...)`.
+  const pageIds = rows.map((r) => r.id);
+  const openByResource = new Map<string, Severity[]>();
+  if (pageIds.length > 0) {
+    // status='open' exactly, matching the Overview's query — consistency across the console
+    // outranks a broader definition of "unresolved" here.
+    const findingsRes = await supabase
+      .from('findings')
+      .select('resource_id, severity')
+      .eq('status', 'open')
+      .in('resource_id', pageIds);
+
+    if (findingsRes.error) {
+      return (
+        <Page>
+          <Card>
+            <CardBody>
+              <EmptyState tone="error" title="Could not load findings" description={findingsRes.error.message} />
+            </CardBody>
+          </Card>
+        </Page>
+      );
+    }
+
+    for (const f of (findingsRes.data ?? []) as FindingRow[]) {
+      if (!f.resource_id) continue;
+      const list = openByResource.get(f.resource_id);
+      if (list) list.push(f.severity);
+      else openByResource.set(f.resource_id, [f.severity]);
+    }
+  }
+
+  const assets: Asset[] = rows.map((r) => {
+    const sevs = openByResource.get(r.id) ?? [];
+    return { ...r, open: sevs.length, worst: worstSeverity(sevs) };
+  });
+
+  // Kinds for the dropdown come from the page, unioned with the active kind so a filter never
+  // removes its own escape route. Past the cap this list can be partial — the footer says so, and
+  // there is no view to enumerate kinds exactly without an unbounded scan (and no RPC, which would
+  // bypass RLS). A capped-but-honest dropdown beats a silently-wrong one.
+  const kinds = [...new Set([...(kindFilter ? [kindFilter] : []), ...assets.map((a) => a.kind)])].sort();
+
+  const shown = assets.length;
+  const truncated = total > shown;
+
   const byKind = new Map<string, Asset[]>();
-  for (const a of filtered) {
+  for (const a of assets) {
     const list = byKind.get(a.kind);
     if (list) list.push(a);
     else byKind.set(a.kind, [a]);
@@ -182,25 +223,26 @@ export default async function AssetsPage({
         connections={connections}
         kindFilter={kindFilter}
         connFilter={connFilter}
-        showing={filtered.length}
-        total={assets.length}
+        showing={shown}
+        total={total}
         stale={staleTotal}
       />
 
-      {filtered.length === 0 ? (
+      {total === 0 ? (
         <Card>
           <CardBody>
             <EmptyState
               tone="filtered"
               title="No assets match these filters"
               description="Every asset was excluded by the current kind or connection filter. The inventory itself is not empty."
-              meta={`${assets.length} asset${assets.length === 1 ? '' : 's'} total`}
+              meta={`${totalUnfiltered} asset${totalUnfiltered === 1 ? '' : 's'} total`}
               action={<LinkButton href={'/assets'}>Clear filters</LinkButton>}
             />
           </CardBody>
         </Card>
       ) : (
-        groups.map((g) => (
+        <>
+          {groups.map((g) => (
           <Card key={g.kind}>
             <CardHeader>
               <CardTitle>
@@ -303,7 +345,18 @@ export default async function AssetsPage({
               </Table>
             </CardBody>
           </Card>
-        ))
+          ))}
+
+          {truncated && (
+            <Card>
+              <CardFooter>
+                Showing the {shown} most recently seen of {total} matching asset
+                {total === 1 ? '' : 's'}. Narrow by kind or connection to see the rest — beyond{' '}
+                {LIST_LIMIT} rows the answer is a filter, not a longer page.
+              </CardFooter>
+            </Card>
+          )}
+        </>
       )}
     </Page>
   );
@@ -385,6 +438,7 @@ function Filters({
             }}
           >
             Showing {showing} of {total} asset{total === 1 ? '' : 's'}
+            {showing < total && ' — refine to see more'}
             {stale > 0 && ` · ${stale} stale`}
           </span>
         </form>

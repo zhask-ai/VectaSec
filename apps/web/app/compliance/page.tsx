@@ -7,6 +7,7 @@ import { Card, CardBody, CardFooter, CardHeader, CardMeta, CardTitle } from '@/c
 import { EmptyState } from '@/components/ui/empty-state';
 import { SeverityBadge } from '@/components/ui/severity';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
+import { AttestControl } from './attest-control';
 import { ControlStatusBadge, CoverageBar, FidelityTag } from './control-status';
 import {
   FRAMEWORK_ORDER,
@@ -48,8 +49,19 @@ type FindingRow = {
   rule_id: string;
 };
 
+/** The live human sign-off behind a `pass`. Provenance only — the write happens through the engine
+ *  API; the console reads control_attestations directly (it has an RLS select policy) for who/when. */
+type AttestationRef = {
+  attestedBy: string;
+  createdAt: string;
+  scope: string;
+  note: string | null;
+  expiresAt: string | null;
+};
+
 type Control = {
   id: string;
+  framework: string;
   control_id: string;
   title: string;
   requirement: string | null;
@@ -60,6 +72,8 @@ type Control = {
    *  evidence that has since vanished is a control due for re-evaluation, and saying "3
    *  findings" while listing 1 would be the console inventing the other two. */
   missingEvidence: number;
+  /** The live attestation whose sign-off produced this control's `pass` (null otherwise). */
+  attestation: AttestationRef | null;
 };
 
 type FrameworkGroup = { framework: string; controls: Control[]; score: Score; evaluatedAt: string | null };
@@ -117,20 +131,55 @@ function UnknownSeverity({ raw }: { raw: string }) {
 async function getData(): Promise<PageData> {
   const supabase = await createClient();
 
-  // RLS scopes both reads to the caller's tenant. There is no tenant filter in the query
+  // RLS scopes all reads to the caller's tenant. There is no tenant filter in the query
   // because there must not be one — a WHERE clause is a suggestion, a policy is a boundary.
-  const [controlsRes, connectionsRes] = await Promise.all([
+  const [controlsRes, connectionsRes, attestationsRes] = await Promise.all([
     supabase
       .from('controls')
       .select('id, framework, control_id, title, requirement, status, failing_finding_ids, evaluated_at'),
     supabase.from('connections').select('id'),
+    // Attestation provenance for the passing controls. The engine writes the pass AND the row; the
+    // console only reads who/when back (control_attestations has an RLS select policy). Bounded by
+    // the control catalogue, so no cap concern. created_at desc so the newest wins per control.
+    supabase
+      .from('control_attestations')
+      .select('framework, control_id, attested_by, scope, note, created_at, expires_at')
+      .order('created_at', { ascending: false }),
   ]);
 
   if (controlsRes.error) return { state: 'error', message: controlsRes.error.message };
   if (connectionsRes.error) return { state: 'error', message: connectionsRes.error.message };
+  if (attestationsRes.error) return { state: 'error', message: attestationsRes.error.message };
 
   const rows = (controlsRes.data ?? []) as ControlRow[];
   const connections = connectionsRes.data ?? [];
+
+  // Newest LIVE (unexpired) attestation per control. Only a live one produces a `pass` (the engine
+  // ignores expired ones), so an expired attestation is not provenance for a current pass and is
+  // skipped here. Rows arrive created_at desc, so the first seen per key is the newest.
+  const attestations = (attestationsRes.data ?? []) as {
+    framework: string;
+    control_id: string;
+    attested_by: string;
+    scope: string;
+    note: string | null;
+    created_at: string;
+    expires_at: string | null;
+  }[];
+  const now = Date.now();
+  const attestationOf = new Map<string, AttestationRef>();
+  for (const a of attestations) {
+    if (a.expires_at && new Date(a.expires_at).getTime() <= now) continue; // lapsed — not a pass
+    const key = `${a.framework}:${a.control_id}`;
+    if (attestationOf.has(key)) continue; // keep the newest (first seen in desc order)
+    attestationOf.set(key, {
+      attestedBy: a.attested_by,
+      createdAt: a.created_at,
+      scope: a.scope,
+      note: a.note,
+      expiresAt: a.expires_at,
+    });
+  }
 
   // "Nothing to show" is three different facts, and an empty state that conflates them tells
   // the user nothing about what to do next.
@@ -164,15 +213,19 @@ async function getData(): Promise<PageData> {
       .filter((f): f is FindingRow => f !== undefined)
       .sort((a, b) => severityRank(a.severity) - severityRank(b.severity));
 
+    const status = normalizeStatus(row.status);
     const control: Control = {
       id: row.id,
+      framework: row.framework,
       control_id: row.control_id,
       title: row.title,
       requirement: row.requirement,
-      status: normalizeStatus(row.status),
+      status,
       evaluated_at: row.evaluated_at,
       findings,
       missingEvidence: ids.length - findings.length,
+      // Provenance only shown where it means something — on a control that is actually passing.
+      attestation: status === 'pass' ? attestationOf.get(`${row.framework}:${row.control_id}`) ?? null : null,
     };
 
     const list = byFramework.get(row.framework);
@@ -301,12 +354,29 @@ function Caveat({ children }: { children: React.ReactNode }) {
  * without a click and expandable when it is the row you care about. Native <details> keeps
  * the whole page a Server Component — no client bundle for a disclosure. */
 function Evidence({ control }: { control: Control }) {
-  if (control.status !== 'fail') {
+  // A passing control is passing on a human's sign-off, never on a scan — so its "evidence" is the
+  // attestation provenance, not findings.
+  if (control.status === 'pass') {
+    return <AttestationProvenance attestation={control.attestation} />;
+  }
+
+  // Not evaluated: no violation was found, but a clean scan is not a pass. This is exactly where a
+  // human can attest — so the coverage gap doubles as the call to action.
+  if (control.status === 'unknown') {
     return (
-      <span style={{ color: 'var(--text-muted)' }}>
-        {control.status === 'unknown' ? 'no evidence gathered' : '—'}
-      </span>
+      <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+        <span style={{ color: 'var(--text-muted)', fontSize: 'var(--text-2xs)' }}>
+          No violation found — but a clean scan is not a pass.
+        </span>
+        <AttestControl controlPk={control.id} controlLabel={control.control_id} />
+      </div>
     );
+  }
+
+  // not_applicable: out of scope. Attesting it would be meaningless — the engine keeps it out of
+  // scope regardless — so no affordance here.
+  if (control.status !== 'fail') {
+    return <span style={{ color: 'var(--text-muted)' }}>—</span>;
   }
 
   if (control.findings.length === 0) {
@@ -383,6 +453,52 @@ function Evidence({ control }: { control: Control }) {
   );
 }
 
+/** yyyy-mm-dd, UTC. For dates (expiry, sign-off day) where a relative label is either wrong — the
+ *  page's relative() only handles the past, and an expiry is in the future — or less useful. */
+function dateOnly(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toISOString().slice(0, 10);
+}
+
+/** Who signed, when, over what scope. The provenance behind a `pass` — shown in place of evidence,
+ *  because a passing control is passing on a human's word, not a scan. */
+function AttestationProvenance({ attestation }: { attestation: AttestationRef | null }) {
+  if (!attestation) {
+    // The engine only writes `pass` on a live attestation, so a pass with none we can read means
+    // the row is not visible here (or lapsed between the two reads). Say so rather than letting the
+    // pass read as scan-proven — that is the exact dishonesty this page exists to refuse.
+    return (
+      <span style={{ color: 'var(--sev-medium-fg)', fontSize: 'var(--text-2xs)' }}>
+        passing on an attestation this view cannot show — re-check who signed it
+      </span>
+    );
+  }
+
+  return (
+    <div style={{ display: 'grid', gap: '2px', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+      <span>
+        Attested by{' '}
+        {/* No display names exist in the schema (same limit as finding assignees), so the signer is
+            shown as the head of their user id — enough to correlate, honest about what we have. */}
+        <code style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
+          {attestation.attestedBy.slice(0, 8)}
+        </code>{' '}
+        <span title={dateOnly(attestation.createdAt)}>{relative(attestation.createdAt)}</span>
+      </span>
+      <span>
+        Scope: <span style={{ color: 'var(--text-primary)' }}>{attestation.scope}</span>
+      </span>
+      {attestation.note && <span>Note: {attestation.note}</span>}
+      <span>
+        {attestation.expiresAt
+          ? `Expires ${dateOnly(attestation.expiresAt)}`
+          : 'No expiry — permanent (discouraged)'}
+      </span>
+      <span style={{ color: 'var(--text-muted)' }}>Human sign-off, not a scan result.</span>
+    </div>
+  );
+}
+
 function FrameworkCard({ group }: { group: FrameworkGroup }) {
   const meta = metaFor(group.framework);
 
@@ -414,7 +530,7 @@ function FrameworkCard({ group }: { group: FrameworkGroup }) {
             <TH width="140px">Status</TH>
             <TH width="120px">Control</TH>
             <TH>Requirement</TH>
-            <TH width="34%">Evidence</TH>
+            <TH width="34%">Evidence / attestation</TH>
             <TH width="110px">Evaluated</TH>
           </TR>
         </THead>
@@ -483,11 +599,14 @@ export default async function CompliancePage() {
           A scan can prove a control <strong style={{ color: 'var(--text-primary)' }}>fails</strong>. It
           can never prove one passes — the absence of a finding is not evidence of compliance, only
           evidence of what was looked at. So nothing here is ever marked passing on the strength of a
-          clean scan: the engine emits only <em>fails</em>, <em>not applicable</em>, and{' '}
-          <em>not evaluated</em>. Marking a control passed requires a human attestation with
-          scope-coverage evidence behind it, and that is not built yet — so no control here is
-          passing today. Scores are computed over evaluated controls only. Controls that were not
-          evaluated are shown, counted separately, and never counted as passing.
+          clean scan: a scan emits only <em>fails</em>, <em>not applicable</em>, and{' '}
+          <em>not evaluated</em>. A control reaches <strong style={{ color: 'var(--text-primary)' }}>passing</strong>{' '}
+          only when a human <strong style={{ color: 'var(--text-primary)' }}>attests</strong> it — signs
+          off, over a stated scope, that it is met — and a live failing finding always overrides that
+          sign-off (you cannot attest away a broken control). So a pass here is someone&rsquo;s
+          accountable sign-off, shown with its provenance, never the by-product of a clean scan.
+          Scores are computed over evaluated controls only. Controls that were not evaluated are
+          shown, counted separately, and never counted as passing.
         </p>
       </header>
 
