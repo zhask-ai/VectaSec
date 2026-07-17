@@ -1,5 +1,6 @@
 import type { Metadata, Route } from 'next';
 import Link from 'next/link';
+import { ScanStrip } from '@/components/ScanStrip';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -9,21 +10,21 @@ export const metadata: Metadata = {
 
 /* The console shell. Nav order is deliberate: Overview answers "what do I do now", Findings is
  * the workhorse, everything after is reference. Compliance sits high because it is the
- * budget-holder's view, not the analyst's.
+ * budget-holder's view, not the analyst's. Scans sits with the operational tail: it is where
+ * you look when you asked for work, not where you live.
  *
  * Other agents own the pages behind these routes; this file owns only the frame.
  *
- * `typedRoutes` is ON (next.config.ts) so a typo'd or dead href is a build error — worth
- * keeping for a console where nav correctness matters. The cast below is the one deliberate
- * exception: every route except / and /login is still unbuilt, so it cannot typecheck yet.
- * As each page lands, DELETE its cast — the moment all five resolve, remove `as Route`
- * entirely and let the compiler guard the nav. */
+ * `typedRoutes` is ON (next.config.ts) so a typo'd or dead href is a build error. Every route
+ * below exists now, so there are no `as Route` casts left — the compiler guards the nav, as
+ * the original note here promised it would. */
 const NAV: { href: Route; label: string }[] = [
   { href: '/', label: 'Overview' },
-  { href: '/findings' as Route, label: 'Findings' },
-  { href: '/assets' as Route, label: 'Assets' },
-  { href: '/compliance' as Route, label: 'Compliance' },
-  { href: '/connections' as Route, label: 'Connections' },
+  { href: '/findings', label: 'Findings' },
+  { href: '/assets', label: 'Assets' },
+  { href: '/compliance', label: 'Compliance' },
+  { href: '/connections', label: 'Connections' },
+  { href: '/scans', label: 'Scans' },
 ];
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -81,7 +82,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           >
             {/* Scan progress is ambient — a strip here, never a modal. A scan must never block
                 the console. */}
-            <span id="vs-scan-strip" />
+            <ScanStrip />
           </header>
 
           <nav

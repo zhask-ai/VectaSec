@@ -1,11 +1,13 @@
-# VectaSec dev target: a DELIBERATELY MISCONFIGURED Kafka.
+# VectaSec dev targets: a DELIBERATELY MISCONFIGURED Kafka and RabbitMQ.
 #
-# This is the thing we scan. Every setting below is a real-world misconfiguration that
-# VectaSec's Kafka rulepack is meant to catch — this file is effectively the fixture for
+# These are the things we scan. Every setting below is a real-world misconfiguration that
+# VectaSec's rulepacks are meant to catch — this file is effectively the fixture for
 # our end-to-end proof, so each bad value is annotated with the rule it should trigger.
 #
 #   docker compose -f deploy/dev/docker-compose.yml up -d
 #   uv run vectasec scan --type kafka --bootstrap localhost:9092
+#   uv run vectasec scan --type rabbitmq --url http://localhost:15672 --username guest --password guest
+#   (or connect both from the console's Connections page)
 #
 # DO NOT copy these settings anywhere real. That is the point of them.
 
@@ -61,6 +63,30 @@ services:
       CLUSTER_ID: "vectasec-dev-cluster-0001"
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # ── RabbitMQ, misconfigured the way real ones are ─────────────────────────
+  # The stock image already ships half the demo: the default `guest` user
+  # (RABBITMQ.USER.DEFAULT_GUEST_PRESENT), guest's wildcard `.* .* .*` grant on the default
+  # vhost `/` (RABBITMQ.PERMISSION.WILDCARD_ALL, RABBITMQ.VHOST.DEFAULT_VHOST_IN_USE), the
+  # management API on plain HTTP (RABBITMQ.MGMT.HTTP_API_NO_TLS) and AMQP without TLS
+  # (RABBITMQ.LISTENER.AMQP_PLAINTEXT).
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: vectasec-dev-rabbitmq
+    ports:
+      - "15672:15672"   # management API — what the connector reads (guest/guest)
+      - "5672:5672"
+    environment:
+      # ── MISCONFIG → RABBITMQ.USER.GUEST_REMOTE_LOGIN ──────────────────────
+      # Empties loopback_users, so guest/guest logs in from ANY host, not just localhost —
+      # the single worst RabbitMQ misconfiguration seen in the wild.
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit loopback_users []"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
       timeout: 10s
       retries: 12

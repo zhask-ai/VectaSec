@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache';
 
 import { getVerifiedUser } from '@/lib/supabase/server';
 import { getActionContext } from './data';
-import { enginePost } from './engine';
+import { enginePost } from '@/lib/engine';
 
 /* Findings mutations.
  *

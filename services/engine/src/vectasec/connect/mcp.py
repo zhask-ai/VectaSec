@@ -28,7 +28,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..registry import connector
+from ..registry import ConnectorField, connector
 from ..contracts import Resource, Edge, Collected
 
 SPEC_VERSION = "2025-11-25"          # what we offer; the negotiated value from InitializeResult wins
@@ -471,7 +471,14 @@ def _tools_hash(instructions, server_info, tools) -> str:
 
 
 # ── collect ───────────────────────────────────────────────────────────────
-@connector("mcp")
+@connector("mcp", fields=[
+    ConnectorField("url", "MCP endpoint", required=True,
+                   placeholder="https://mcp.example.com/mcp",
+                   help="Streamable HTTP endpoint of the MCP server or gateway."),
+    ConnectorField("token", "Bearer token", secret=True,
+                   help="Only if the server requires auth. Passive checks by default — "
+                        "active probes stay off unless enabled in config."),
+])
 def collect(config: dict) -> Collected:
     url = config["url"].rstrip("/") if config.get("url") else None
     if not url:

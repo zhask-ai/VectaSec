@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ..registry import connector
+from ..registry import ConnectorField, connector
 from ..contracts import Resource, Edge, Collected
 
 # Named in the rulepack's suppression table: each one is a real deployment shape that the
@@ -171,7 +171,14 @@ def _rabbit_app_version(node: dict):
     return node.get("rabbitmq_version")
 
 
-@connector("rabbitmq")
+@connector("rabbitmq", fields=[
+    ConnectorField("url", "Management API URL", required=True,
+                   placeholder="http://localhost:15672",
+                   help="RabbitMQ management plugin base URL. GETs only."),
+    ConnectorField("username", "Username", required=True,
+                   help="A user with the read-only 'monitoring' tag is enough."),
+    ConnectorField("password", "Password", required=True, secret=True),
+])
 def collect(config: dict) -> Collected:
     base = (config.get("url") or "").rstrip("/")
     if not base:

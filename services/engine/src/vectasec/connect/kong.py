@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from ..registry import connector
+from ..registry import ConnectorField, connector
 from ..contracts import Resource, Edge, Collected
 
 # `GET /`.configuration is sanitised server-side (kong/api/routes/kong.lua calls remove_sensitive(),
@@ -188,7 +188,13 @@ def _consumer_groups(client: httpx.Client, base: str, prefix: str, cid: str) -> 
     return {"status": 200, "names": [g.get("name") for g in (r.json().get("data") or [])]}
 
 
-@connector("kong")
+@connector("kong", fields=[
+    ConnectorField("url", "Admin API URL", required=True,
+                   placeholder="http://localhost:8001",
+                   help="Kong Admin API base URL. GETs only."),
+    ConnectorField("admin_token", "Admin token", secret=True,
+                   help="Kong-Admin-Token for RBAC-enabled gateways — use a read-only role."),
+])
 def collect(config: dict) -> Collected:
     base = config["url"].rstrip("/")
     timeout = float(config.get("timeout", 10))

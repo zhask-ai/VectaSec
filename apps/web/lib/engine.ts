@@ -1,6 +1,6 @@
 import 'server-only';
 
-/* The engine API client.
+/* The engine API client — the console's ONLY write path.
  *
  * WHY THIS IS SERVER-ONLY, and why the URL is not NEXT_PUBLIC:
  *
@@ -11,9 +11,9 @@ import 'server-only';
  * forgeable audit trail, from the devtools console, with no exploit needed.
  *
  * So the console is the thing that makes those headers trustworthy. Callers never pass a
- * tenant; it is derived from a row RLS already agreed the user can see (getFindingTenant), and
- * the actor is the id from a server-confirmed getUser(). The browser cannot reach this file,
- * cannot see this URL, and cannot influence either header.
+ * tenant; it is derived from a row RLS already agreed the user can see (or from the user's own
+ * tenant_members row), and the actor is the id from a server-confirmed getUser(). The browser
+ * cannot reach this file, cannot see this URL, and cannot influence either header.
  *
  * When the engine grows real JWT verification (its own TODO(auth)), this indirection stops
  * being load-bearing — but it should stay anyway: it is also what keeps the engine off the
@@ -25,27 +25,29 @@ const ENGINE_URL = process.env.VECTASEC_ENGINE_URL ?? 'http://127.0.0.1:8000';
 /** How long to wait on the engine before calling it unreachable.
  *
  * Deliberately short. Every caller is a human who clicked a button and is watching a spinner;
- * the default fetch timeout would leave them staring at it. Triage is the exception — it can
- * call an LLM — and passes its own. */
+ * the default fetch timeout would leave them staring at it. Triage (an LLM call) and
+ * connection tests (a real collect against the target) are the exceptions — they pass their
+ * own. */
 const DEFAULT_TIMEOUT_MS = 8_000;
 
 export type EngineResult<T> = { ok: true; data: T } | { ok: false; message: string };
 
-export async function enginePost<T>(
+async function engineRequest<T>(
+  method: 'POST' | 'DELETE',
   path: string,
   body: unknown,
   auth: { tenantId: string; actor: string },
-  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  timeoutMs: number,
 ): Promise<EngineResult<T>> {
   try {
     const res = await fetch(`${ENGINE_URL}${path}`, {
-      method: 'POST',
+      method,
       headers: {
         'Content-Type': 'application/json',
         'X-VectaSec-Tenant': auth.tenantId,
         'X-VectaSec-Actor': auth.actor,
       },
-      body: JSON.stringify(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
       cache: 'no-store',
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -58,6 +60,23 @@ export async function enginePost<T>(
     const reason = e instanceof Error && e.name === 'TimeoutError' ? 'did not respond in time' : 'is unreachable';
     return { ok: false, message: `The engine ${reason}. Findings and evidence are unaffected; this action was not applied.` };
   }
+}
+
+export async function enginePost<T>(
+  path: string,
+  body: unknown,
+  auth: { tenantId: string; actor: string },
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<EngineResult<T>> {
+  return engineRequest<T>('POST', path, body, auth, timeoutMs);
+}
+
+export async function engineDelete<T>(
+  path: string,
+  auth: { tenantId: string; actor: string },
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<EngineResult<T>> {
+  return engineRequest<T>('DELETE', path, undefined, auth, timeoutMs);
 }
 
 /** FastAPI reports validation failures as `{detail: [...]}` and deliberate refusals as

@@ -2,13 +2,18 @@ import Link from 'next/link';
 
 import { createClient } from '@/lib/supabase/server';
 import { SEVERITY_RANK, type Severity } from '@/lib/types';
+import { AutoRefresh } from '@/components/AutoRefresh';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { SeverityBadge } from '@/components/ui/severity';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
+import { AddConnection } from './add-connection';
+import { RowActions } from './row-actions';
 
-/* Connected systems — the coverage view. "What are we NOT seeing" is the question this page
- * exists to answer, so a broken connection has to be louder than a healthy one.
+/* Connected systems — the coverage view AND the connect-and-scan surface. "What are we NOT
+ * seeing" is the question this page exists to answer, so a broken connection has to be
+ * louder than a healthy one; connecting something new and scanning it happens here too,
+ * through the engine API (actions.ts) — the browser itself still cannot write a row.
  *
  * `connections.config` is deliberately never selected: it carries credential references, and a
  * column that is never fetched cannot be leaked by a later refactor that passes a row to a
@@ -158,9 +163,12 @@ export default async function ConnectionsPage() {
 
   const broken = rows.filter((r) => r.scan?.status === 'error').length;
   const unscanned = rows.filter((r) => !r.last_scanned_at).length;
+  const scanning = rows.filter((r) => r.scan?.status === 'queued' || r.scan?.status === 'running').length;
 
   return (
     <Page>
+      {/* Poll only while something is actually in flight; static again the render after. */}
+      <AutoRefresh active={scanning > 0} />
       {/* Collection health is stated before the inventory, because every count below is only as
           true as the scan that produced it. A failing connection reporting "0 open findings" is
           the most dangerous cell on this page. */}
@@ -186,21 +194,22 @@ export default async function ConnectionsPage() {
           <CardMeta>
             {rows.length} connection{rows.length === 1 ? '' : 's'}
             {unscanned > 0 && ` · ${unscanned} never scanned`}
+            {scanning > 0 && ` · ${scanning} scanning`}
           </CardMeta>
         </CardHeader>
         <CardBody pad={false}>
           <Table density="default" caption="Connected systems and their collection status">
             <THead>
               <TR>
-                <TH width="22%">Name</TH>
-                <TH width="10%">Type</TH>
-                <TH width="10%">Mode</TH>
-                <TH width="14%">Status</TH>
-                <TH width="16%">Last scan</TH>
-                <TH width="14%" numeric>
+                <TH width="18%">Name</TH>
+                <TH width="8%">Type</TH>
+                <TH width="12%">Status</TH>
+                <TH width="13%">Last scan</TH>
+                <TH width="10%" numeric>
                   Resources
                 </TH>
-                <TH width="14%">Open findings</TH>
+                <TH width="13%">Open findings</TH>
+                <TH width="26%">Actions</TH>
               </TR>
             </THead>
             <TBody>
@@ -208,6 +217,8 @@ export default async function ConnectionsPage() {
                 <TR key={r.id}>
                   <TD>
                     <span style={{ fontFamily: 'var(--font-mono)' }}>{r.name}</span>
+                    {/* Mode matters when it is NOT the default path: a collector connection
+                        names its collector; cloud is implied by saying nothing. */}
                     {r.collectors && (
                       <span
                         style={{
@@ -219,11 +230,15 @@ export default async function ConnectionsPage() {
                         via {r.collectors.name} ({r.collectors.status})
                       </span>
                     )}
+                    {r.mode === 'collector' && !r.collectors && (
+                      <span
+                        style={{ display: 'block', fontSize: 'var(--text-2xs)', color: 'var(--sev-medium-fg)' }}
+                      >
+                        collector mode · no collector enrolled
+                      </span>
+                    )}
                   </TD>
                   <TD mono>{r.type}</TD>
-                  <TD>
-                    <span style={{ color: 'var(--text-secondary)' }}>{r.mode}</span>
-                  </TD>
                   <TD>
                     <StatusChip
                       status={r.scan?.status === 'error' ? 'error' : r.status}
@@ -270,6 +285,13 @@ export default async function ConnectionsPage() {
                       <span style={{ color: 'var(--text-muted)' }}>not scanned</span>
                     )}
                   </TD>
+                  <TD>
+                    <RowActions
+                      connectionId={r.id}
+                      name={r.name}
+                      scanActive={r.scan?.status === 'queued' || r.scan?.status === 'running'}
+                    />
+                  </TD>
                 </TR>
               ))}
             </TBody>
@@ -300,11 +322,21 @@ function SetupState() {
         <EmptyState
           tone="setup"
           title="No systems connected"
-          description="VectaSec scans the integration layer — the brokers, gateways and MCP servers between your services. Connect one with the CLI to start."
+          description="VectaSec scans the integration layer — the brokers, gateways and MCP servers between your services. Connect one to start; the first scan runs immediately."
           meta={`connectors available: ${CONNECTOR_TYPES.join(', ')}`}
         />
-        <div style={{ maxWidth: 640, margin: '0 auto' }}>
-          <ConnectSnippet />
+        <div style={{ maxWidth: 640, margin: '0 auto', display: 'grid', gap: 'var(--space-4)' }}>
+          <AddConnection />
+          <details>
+            <summary
+              style={{ cursor: 'pointer', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}
+            >
+              Prefer the CLI?
+            </summary>
+            <div style={{ marginTop: 'var(--space-2)' }}>
+              <ConnectSnippet />
+            </div>
+          </details>
         </div>
       </CardBody>
     </Card>
@@ -316,19 +348,30 @@ function ConnectHelp() {
     <Card>
       <CardHeader>
         <CardTitle>Connect another system</CardTitle>
-        <CardMeta>read-only · credentials stay on your side</CardMeta>
+        <CardMeta>read-only · scans run from the worker, never the browser</CardMeta>
       </CardHeader>
       <CardBody>
-        <ConnectSnippet />
+        <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
+          <AddConnection />
+          <details>
+            <summary
+              style={{ cursor: 'pointer', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}
+            >
+              Prefer the CLI?
+            </summary>
+            <div style={{ marginTop: 'var(--space-2)' }}>
+              <ConnectSnippet />
+            </div>
+          </details>
+        </div>
       </CardBody>
     </Card>
   );
 }
 
-/** The literal command. Connections are created by the engine CLI, not by this console: the
- * browser holds a SELECT-only role, and a connection needs credentials the console must never
- * be able to accept. So this page teaches the command rather than offering a form it could not
- * honestly submit. */
+/** The CLI path — same result as the form, from wherever the target is reachable. The form
+ * submits through the engine API with a verified actor (actions.ts); this snippet exists for
+ * operators whose broker is only reachable from a bastion the browser isn't on. */
 function ConnectSnippet() {
   return (
     <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
@@ -349,18 +392,21 @@ function ConnectSnippet() {
           overflowX: 'auto',
         }}
       >
-        <span style={{ color: 'var(--text-muted)' }}># Kafka</span>
-        {'\n'}vectasec scan --type kafka --bootstrap localhost:9092
+        <span style={{ color: 'var(--text-muted)' }}># save a connection, then scan it by name</span>
+        {'\n'}vectasec connections add --type kafka --name prod-kafka --bootstrap broker-1:9092
+        {'\n'}vectasec scan --connection prod-kafka
         {'\n\n'}
-        <span style={{ color: 'var(--text-muted)' }}># Kong / RabbitMQ / MCP</span>
+        <span style={{ color: 'var(--text-muted)' }}># or ad-hoc (saves the connection as a side effect)</span>
+        {'\n'}vectasec scan --type rabbitmq --url http://localhost:15672 --username svc --password ***
         {'\n'}vectasec scan --type kong --url http://localhost:8001
-        {'\n'}vectasec scan --type rabbitmq --url http://localhost:15672 --username guest --password ***
         {'\n'}vectasec scan --type mcp --url https://mcp.example.com
       </pre>
       <p style={{ margin: 0, fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
-        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec doctor</code> checks wiring;{' '}
-        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec rules</code> lists the loaded
-        rulepack. The connection appears here after the first scan.
+        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec connections</code> lists the estate;{' '}
+        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec scans</code> shows history;{' '}
+        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec doctor</code> checks wiring. Scans
+        queued here need <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec worker</code>{' '}
+        running to execute.
       </p>
     </div>
   );

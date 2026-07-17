@@ -93,7 +93,12 @@ def representative(hits: list, default_severity: str):
     return best, best_sev
 
 
-def _ensure_connection(cur, tenant_id: str, type_: str, name: str, config: dict) -> str:
+def _ensure_connection(cur, tenant_id: str, type_: str, name: str, config: dict,
+                       mode: str = "cloud") -> str:
+    """Resolve (tenant, type, name) to a connections row, creating or updating it.
+
+    `mode` applies only on CREATE: an existing connection keeps the mode it was set up
+    with — a rescan must never silently flip a collector connection to cloud."""
     cur.execute(
         "select id from connections where tenant_id=%s and type=%s and name=%s",
         (tenant_id, type_, name),
@@ -104,8 +109,8 @@ def _ensure_connection(cur, tenant_id: str, type_: str, name: str, config: dict)
         return row[0]
     cur.execute(
         """insert into connections (tenant_id, type, name, mode, config)
-           values (%s,%s,%s,'cloud',%s) returning id""",
-        (tenant_id, type_, name, json.dumps(config)),
+           values (%s,%s,%s,%s,%s) returning id""",
+        (tenant_id, type_, name, mode, json.dumps(config)),
     )
     return cur.fetchone()[0]
 

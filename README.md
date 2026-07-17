@@ -48,22 +48,22 @@ A Supabase-backed control plane (Postgres + RLS multi-tenancy, Auth/SSO, Storage
 
 Phase 0 is substantially done; parts of Phase 1–3 were built out of order (the rulepacks ran ahead of the plumbing). **[docs/STATUS.md](docs/STATUS.md)** is the honest, per-phase breakdown. The short version:
 
-**Works end to end today.** `docker compose up` a deliberately misconfigured Kafka → `vectasec scan` → deterministic detectors → findings with cited observations committed to Postgres in one transaction → `vectasec findings`. That path is real and reproducible on a laptop in about five minutes.
+**Works end to end today.** Two proven paths to the same result. Console: sign in → **Connections → Connect a system** (form) → the first scan queues on `pgmq`, `vectasec worker` runs it, and findings with cited observations land live on the page. CLI: `docker compose up` the misconfigured dev targets → `vectasec scan` → `vectasec findings`. Both verified against the live Supabase project with Kafka and RabbitMQ targets.
 
 - 4 read-only connectors (`kafka`, `kong`, `rabbitmq`, `mcp`) and 73 detectors
+- Connect-and-scan from **either surface**: the console form (per-connector fields declared by the connector itself, served at `GET /connectors`) or `vectasec connections add` / `vectasec scan --connection <name>`; per-connection **Scan now / Test / Remove** in the UI; scan history at `/scans` and `vectasec scans`
+- A queue worker (`vectasec worker`) that drains `pgmq`, adopts queued scan rows, retries with poison-message capping, and reaps scans stuck `running`
 - A passing offline unit suite (`uv run pytest` in `services/engine` and `services/collector`) — detector, redaction, scan-logic and AI-citation-gate level, plus CI jobs for cross-tenant RLS and the integrity triggers; see gaps below
 - Schema with `FORCE RLS` on 18 tenant tables; the citation gate (no `ai_output` commits without citing an observation of its own tenant) and the append-only evidence ledger (`observations` and `audit_log` reject UPDATE) are enforced by Postgres triggers, not by application code — and attacked in CI, including via the engine's own write path. What the ledger does **not** stop is DELETE, so a holder of the engine's DB credential can still delete-and-reinsert an observation; see [docs/STATUS.md](docs/STATUS.md) *Known gaps*
 - Grounded AI triage: structured-output citations, range-checked, with a deterministic fallback and a fingerprint cache
-- FastAPI engine for actions (status / assign / suppress / triage), one audit row per mutation, in the same transaction
-- Next.js console: server-rendered, reads Supabase under RLS, forwards every mutation to the engine
+- FastAPI engine for actions (connections / scans / status / assign / suppress / triage / attest), one audit row per mutation, in the same transaction
+- Next.js console: server-rendered, reads Supabase under RLS, forwards every mutation to the engine with a revocation-checked actor
 
 **Not built yet.** Named plainly because the plan is not the product:
 
-- **Console sign-in is a placeholder** — every route redirects to `/login`, which says so. The console does not currently render real data for a normal user.
-- **No queue worker** — `POST /scans` enqueues to `pgmq` and nothing consumes it; queued scans stay `queued`. The working path is `inline: true` and the CLI.
-- **Collector has no control plane** — the agent's code and tests exist, but the `/collector/*` endpoints it enrolls and polls against do not. Only `check` and `preview` work.
-- **Compliance is never evaluated** — the rule→control mapping is written but nothing calls it, so the `controls` table is always empty and the compliance page renders empty.
-- **Engine API auth is self-asserted headers** (dev stand-in, binds to localhost). Any caller can name any tenant and any actor.
+- **Engine API auth is self-asserted headers** (dev stand-in, binds to localhost). Any caller can name any tenant and any actor. The console is the only trustworthy caller; do not expose the engine.
+- **Connection credentials live in `connections.config` as plain JSONB** — the Vault-backed `creds_ref` path is unbuilt. The browser can never read them (no console query selects `config`), but a DB-credential holder can.
+- **Collector round trip is unproven** — the `/collector/*` control-plane endpoints exist and the agent's code and tests exist, but a real collector process has not yet completed enroll → poll → scan → push against them.
 - **No Identity / NHI capability at all** — no non-human-identity inventory, no OAuth-grant blast radius, no workload-identity audit. This is the wedge in the positioning line above and it has zero code.
 - **No supply chain capability at all** — no SBOM, no CVE scan, no integration-as-code static analysis (DataWeave, gateway policies, workflow JSON).
 - **No DORA Article 28 register and no OSCAL export.**
@@ -96,24 +96,25 @@ The `vectasec` CLI and the engine API find `.env` by searching upward from the w
 
 ### 2. Apply the schema
 
-Two migrations, in order, against your database — via the Supabase SQL editor, `psql`, or `supabase db push`:
+Apply every migration in `supabase/migrations/` in filename order against your database — via the Supabase SQL editor, `psql`, or `supabase db push`. The first two are the load-bearing ones:
 
 ```
 supabase/migrations/20260717000001_core_schema.sql     # tenancy, inventory, graph, scans, findings, evidence
 supabase/migrations/20260717000002_platform_schema.sql # platform tables, pgmq/pg_cron, RLS hardening, the two integrity triggers
+supabase/migrations/2026071700000{3..8}_*.sql          # fixes + facets + citation-gate completeness + compliance unknown-state
 ```
 
 `001` seeds a Demo tenant (`00000000-0000-0000-0000-000000000001`) that the CLI defaults to, so you can scan before you have any users.
 
-### 3. Start the dev target
+### 3. Start the dev targets
 
-A single-node Kafka wired with real, deliberate misconfigurations — each one annotated with the rule it should trigger. It is the fixture for the end-to-end proof, not a deployment of VectaSec.
+A single-node Kafka and a RabbitMQ wired with real, deliberate misconfigurations — each one annotated with the rule it should trigger. They are the fixture for the end-to-end proof, not a deployment of VectaSec.
 
 ```bash
 docker compose -f deploy/dev/docker-compose.yml up -d
 ```
 
-It seeds topics (`payments`, `customer-pii`, `orders`, …) and is healthy in ~30s.
+Kafka seeds topics (`payments`, `customer-pii`, `orders`, …); RabbitMQ ships the default `guest` user with remote login deliberately enabled. Healthy in ~30s.
 
 ### 4. Check the wiring
 
@@ -124,36 +125,44 @@ uv run vectasec doctor
 
 Expect 4 connectors, 73 detectors, a connected database, and `pgmq, pg_cron` present. If this is unhappy, nothing below will work.
 
-### 5. Scan
+### 5. Scan (CLI path)
 
 ```bash
-uv run vectasec scan --type kafka --bootstrap localhost:9092
+# save a connection, then scan it by name — this is what the console's buttons do too
+uv run vectasec connections add --type kafka --name dev-kafka --bootstrap localhost:9092
+uv run vectasec scan --connection dev-kafka
+
+# or ad-hoc (saves the connection as a side effect)
+uv run vectasec scan --type rabbitmq --url http://localhost:15672 --username guest --password guest
 ```
 
-The whole scan is one transaction: resources and edges upsert, every detector runs against every matching resource, and each finding writes its triggering observation to the evidence ledger alongside it. Findings dedupe on a fingerprint of `(tenant, rule_id, ext_id)`, so re-running this is idempotent and never resurrects a finding a human resolved.
+The whole scan is one transaction: resources and edges upsert, every detector runs against every matching resource, and each finding writes its triggering observation to the evidence ledger alongside it. Findings dedupe on a fingerprint of `(tenant, connection, rule_id, ext_id)`, so re-running this is idempotent and never resurrects a finding a human resolved.
 
 ### 6. See what it found
 
 ```bash
-uv run vectasec findings   # findings for the tenant, worst first, with evidence counts
-uv run vectasec rules      # the loaded rulepack — every rule, severity, and target kind
-uv run vectasec doctor     # engine + database wiring
+uv run vectasec findings      # findings for the tenant, worst first, with evidence counts
+uv run vectasec connections   # the estate: every connection, health, resources, open findings
+uv run vectasec scans         # scan history with status and durations
+uv run vectasec rules         # the loaded rulepack — every rule, severity, and target kind
+uv run vectasec doctor        # engine + database wiring, incl. queue depth
 ```
 
 `--json` on `scan` prints the stats blob. `--tenant <uuid>` targets a tenant other than Demo.
 
-### 7. The engine API (optional)
+### 7. The engine API + worker (needed for the console flow)
 
-Needed only for actions — status, assign, suppress, AI triage — and for the console's mutations.
+The API takes actions — connections, scans, status, assign, suppress, AI triage — and the worker executes what the API queues.
 
 ```bash
 cd services/engine
 uv run python -m vectasec.api.main   # http://127.0.0.1:8000, /docs for the OpenAPI UI
+uv run vectasec worker               # in a second terminal: drains the pgmq scan queue
 ```
 
-It binds to localhost on purpose: it holds a `BYPASSRLS` database connection and its auth is a self-asserted header. Do not expose it.
+(`python -m vectasec.api.main`, not bare `uvicorn` — the module entry point is what loads `.env`.) The API binds to localhost on purpose: it holds a `BYPASSRLS` database connection and its auth is a self-asserted header. Do not expose it. A scan queued from the console sits `queued` until the worker (or an enrolled collector, for collector-mode connections) picks it up — `vectasec doctor` shows the queue.
 
-### 8. The console (optional)
+### 8. The console
 
 ```bash
 cd apps/web
@@ -162,9 +171,9 @@ pnpm install
 pnpm dev                       # http://localhost:3000
 ```
 
-**Read this before you spend time on it:** sign-in is not implemented. `proxy.ts` redirects anonymous traffic to `/login`, and `/login` is a placeholder that says as much — so a fresh `pnpm dev` dead-ends there. The pages behind it are built and server-rendered, but reaching them needs a Supabase Auth session plus a `tenant_members` row linking that user to a tenant. See [docs/STATUS.md](docs/STATUS.md).
+Sign in (email + password via Supabase Auth; the user needs a `tenant_members` row), then **Connections → + Connect a system**: pick a connector, fill its fields, and the first scan queues immediately. Watch it run on **Scans** (the page polls while anything is in flight), then work the queue on **Findings**. Every mutation — connect, scan, test, remove, triage — goes through the engine API with a revocation-checked actor and lands in the audit log.
 
-The console never receives `SUPABASE_SERVICE_ROLE_KEY` or `DATABASE_URL`. It reads Postgres as `authenticated` (SELECT-only, RLS-scoped) and forwards every mutation to the engine API.
+The console never receives `SUPABASE_SERVICE_ROLE_KEY` or `DATABASE_URL`. It reads Postgres as `authenticated` (SELECT-only, RLS-scoped) and forwards every mutation to the engine API. Connection credentials pass through a Server Action to the engine and are never readable from the browser afterwards.
 
 ### Running the tests
 

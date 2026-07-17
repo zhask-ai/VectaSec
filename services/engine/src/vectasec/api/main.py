@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..config import load_env, settings
 from ..db import connect
-from ..registry import CONNECTORS, DETECTORS
+from ..registry import CONNECTORS, CONNECTOR_FIELDS, DETECTORS, validate_config
 from ..scan import run_scan, _ensure_connection   # _ensure_connection: reused so a queued scan
                                                   # points at the same connection row the worker
                                                   # will land on — not a second one
@@ -190,6 +190,27 @@ def health() -> dict:
 
 
 # ── Scans ─────────────────────────────────────────────────────────────────
+def _enqueue_scan(cur, tenant: str, connection_id: str, type_: str, config: dict,
+                  name: str, requested_by: str) -> tuple[str, int]:
+    """Insert a 'queued' scans row and its pgmq job in the caller's transaction.
+
+    One helper, two callers (POST /scans and POST /connections/{id}/scan), so the job payload
+    can never drift from the shape worker.parse_job validates. pgmq is a table: the message
+    becomes visible at COMMIT, so a worker can never pull a job whose scan row does not exist.
+    """
+    cur.execute(
+        """insert into scans (tenant_id, connection_id, status)
+           values (%s,%s,'queued') returning id""",
+        (tenant, connection_id),
+    )
+    scan_id = cur.fetchone()[0]
+    job = {"scan_id": str(scan_id), "type": type_, "config": config,
+           "tenant_id": tenant, "name": name, "requested_by": requested_by}
+    cur.execute("select * from pgmq.send(%s, %s::jsonb)", (QUEUE, json.dumps(job)))
+    msg_id = cur.fetchone()[0]
+    return str(scan_id), msg_id
+
+
 class ScanRequest(BaseModel):
     type: str
     config: dict = Field(default_factory=dict)
@@ -200,10 +221,8 @@ class ScanRequest(BaseModel):
 
 @app.post("/scans", status_code=202)
 def create_scan(req: ScanRequest, p: Principal = Depends(acting)) -> dict:
-    """Start a scan. Queued by default (the Collector/worker pulls it); `inline: true` runs it
-    in this request, which is the dev and demo path.
-
-    NOTE: no worker consumes the queue yet, so a queued scan stays `queued` until one exists.
+    """Start a scan. Queued by default — `vectasec worker` drains the queue and adopts the
+    row (worker.py); `inline: true` runs it in this request instead (dev and demo path).
     """
     if req.type not in CONNECTORS:
         raise HTTPException(400, f"no connector for type {req.type!r} (have: {sorted(CONNECTORS)})")
@@ -230,28 +249,13 @@ def create_scan(req: ScanRequest, p: Principal = Depends(acting)) -> dict:
         conn.autocommit = False
         with conn.cursor() as cur:
             connection_id = _ensure_connection(cur, tenant, req.type, name, req.config)
-            cur.execute(
-                """insert into scans (tenant_id, connection_id, status)
-                   values (%s,%s,'queued') returning id""",
-                (tenant, connection_id),
-            )
-            scan_id = cur.fetchone()[0]
-
-            # Enqueued in the same transaction as the scan row it refers to: pgmq is a table, so
-            # the message only becomes visible at COMMIT and a worker can never pull a job whose
-            # scan row does not exist yet.
-            # TODO(worker): the worker must adopt this scan_id — run_scan currently opens its own
-            # scans row, so until it accepts one this row is a placeholder that stays 'queued'.
-            job = {"scan_id": str(scan_id), "type": req.type, "config": req.config,
-                   "tenant_id": tenant, "name": name, "requested_by": p.actor}
-            cur.execute("select * from pgmq.send(%s, %s::jsonb)", (QUEUE, json.dumps(job)))
-            msg_id = cur.fetchone()[0]
-
-            _audit(cur, actor, "scan.requested", str(scan_id),
+            scan_id, msg_id = _enqueue_scan(cur, tenant, connection_id, req.type,
+                                            req.config, name, p.actor)
+            _audit(cur, actor, "scan.requested", scan_id,
                    {"type": req.type, "name": name, "mode": "queued", "msg_id": msg_id})
         conn.commit()
 
-    return {"scan_id": str(scan_id), "mode": "queued", "status": "queued",
+    return {"scan_id": scan_id, "mode": "queued", "status": "queued",
             "msg_id": msg_id, "connection_id": str(connection_id)}
 
 
@@ -269,6 +273,203 @@ def get_scan(scan_id: uuid.UUID, p: Principal = Depends(principal)) -> dict:
         raise HTTPException(404, "no such scan")
     return {"scan_id": str(scan_id), "status": row[0], "started_at": row[1], "finished_at": row[2],
             "stats": row[3], "connection": {"type": row[4], "name": row[5]}}
+
+
+# ── Connections ───────────────────────────────────────────────────────────
+# The console's connect-and-scan surface. Reads of the connections LIST stay in the console
+# (PostgREST + RLS, config never selected); everything here changes state or starts work, so
+# it lives behind an authenticated actor + audit row like every other action.
+
+@app.get("/connectors")
+def connectors(p: Principal = Depends(principal)) -> dict:
+    """The connector catalogue: what can be connected and what a human must supply to
+    connect it. Driven by the registry, so a dropped-in connector file shows up here — and
+    in the console's form — with no list to edit. `rules` counts the detectors whose
+    rule_id prefix belongs to the type, because "20 checks" is what the form's picker says."""
+    out = []
+    for type_ in sorted(CONNECTORS):
+        rules = sum(1 for d in DETECTORS if d.rule_id.split(".")[0].lower() == type_)
+        out.append({
+            "type": type_,
+            "rules": rules,
+            "fields": [f.to_dict() for f in CONNECTOR_FIELDS.get(type_, [])],
+        })
+    return {"connectors": out}
+
+
+class ConnectionRequest(BaseModel):
+    type: str
+    name: str = Field(min_length=1)
+    config: dict = Field(default_factory=dict)
+    mode: Literal["cloud", "collector"] = "cloud"
+
+    @field_validator("name")
+    @classmethod
+    def _name_trimmed(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("name is required")
+        return v
+
+
+@app.post("/connections", status_code=201)
+def create_connection(req: ConnectionRequest, p: Principal = Depends(acting)) -> dict:
+    """Create (or update the config of) a connection without scanning it.
+
+    Validation happens HERE, at the moment a human is looking at a form, not later inside a
+    queued job nobody is watching. The audit row records config KEYS only — config values
+    carry credentials and must never enter the append-only log."""
+    problems = validate_config(req.type, req.config)
+    if problems:
+        raise HTTPException(400, "; ".join(problems))
+
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                "select id from connections where tenant_id=%s and type=%s and name=%s",
+                (p.tenant_id, req.type, req.name),
+            )
+            existed = cur.fetchone() is not None
+            connection_id = _ensure_connection(cur, p.tenant_id, req.type, req.name,
+                                               req.config, mode=req.mode)
+            _audit(cur, p, "connection.updated" if existed else "connection.created",
+                   str(connection_id),
+                   {"type": req.type, "name": req.name, "mode": req.mode,
+                    "config_keys": sorted(req.config)})
+        conn.commit()
+
+    return {"connection_id": str(connection_id), "type": req.type, "name": req.name,
+            "created": not existed}
+
+
+@app.post("/connections/{connection_id}/test")
+def test_connection(connection_id: uuid.UUID, p: Principal = Depends(acting)) -> dict:
+    """Run the connector's collect against the stored config and report what came back.
+
+    Read-only against the target, same code path a real scan uses — so "test passed" means
+    the scan will actually work, not that a TCP port answered. Persists nothing from the
+    collect; only connections.status is updated so the console can show reachability. 200
+    either way: the test *ran*; `ok` says what it found."""
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select type, name, config from connections where id=%s and tenant_id=%s",
+            (str(connection_id), p.tenant_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(404, "no such connection")
+    type_, name, config = row[0], row[1], row[2] or {}
+    if type_ not in CONNECTORS:
+        raise HTTPException(400, f"no connector loaded for type {type_!r}")
+
+    # SystemExit included: connectors raise it for config errors (their CLI heritage), and
+    # it is not an Exception — uncaught it would take the request handler down with it.
+    try:
+        collected = CONNECTORS[type_](config)
+        kinds: dict[str, int] = {}
+        for r in collected.resources:
+            kinds[r.kind] = kinds.get(r.kind, 0) + 1
+        result = {"ok": True, "resources": len(collected.resources), "kinds": kinds}
+        status = "active"
+    except (Exception, SystemExit) as e:
+        result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        status = "error"
+
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("update connections set status=%s where id=%s and tenant_id=%s",
+                        (status, str(connection_id), p.tenant_id))
+            _audit(cur, p, "connection.tested", str(connection_id),
+                   {"type": type_, "name": name, **result})
+        conn.commit()
+
+    return {"connection_id": str(connection_id), "type": type_, "name": name, **result}
+
+
+@app.post("/connections/{connection_id}/scan", status_code=202)
+def scan_connection(connection_id: uuid.UUID, p: Principal = Depends(acting)) -> dict:
+    """Queue a scan of an EXISTING connection from its stored config.
+
+    This is the console's "Scan now": the browser sends only the connection id it can
+    already see under RLS — the config, credentials included, never round-trips through
+    the client. Cloud connections go onto pgmq for `vectasec worker`; collector
+    connections only get the queued scans row, which the enrolled collector claims via
+    GET /collector/jobs (pushing them onto pgmq would hand a cloud worker a job whose
+    target it cannot reach and whose credentials it does not have)."""
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                "select type, name, config, mode from connections where id=%s and tenant_id=%s",
+                (str(connection_id), p.tenant_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "no such connection")
+            type_, name, config, mode = row[0], row[1], row[2] or {}, row[3]
+            if type_ not in CONNECTORS:
+                raise HTTPException(400, f"no connector loaded for type {type_!r}")
+
+            if mode == "collector":
+                cur.execute(
+                    """insert into scans (tenant_id, connection_id, status)
+                       values (%s,%s,'queued') returning id""",
+                    (p.tenant_id, str(connection_id)),
+                )
+                scan_id, msg_id = str(cur.fetchone()[0]), None
+            else:
+                scan_id, msg_id = _enqueue_scan(cur, p.tenant_id, str(connection_id),
+                                                type_, config, name, p.actor)
+            _audit(cur, p, "scan.requested", scan_id,
+                   {"type": type_, "name": name, "mode": mode, "msg_id": msg_id,
+                    "via": "connection"})
+        conn.commit()
+
+    return {"scan_id": scan_id, "connection_id": str(connection_id), "status": "queued",
+            "mode": mode, "msg_id": msg_id}
+
+
+@app.delete("/connections/{connection_id}")
+def delete_connection(connection_id: uuid.UUID, p: Principal = Depends(acting)) -> dict:
+    """Remove a connection and everything collected through it.
+
+    The cascade is the schema's: resources (and their edges, findings, observations) go
+    with the connection; scans rows survive with connection_id nulled — scan history is
+    an audit artefact and outlives the thing scanned. The audit row records the counts
+    BEFORE the delete so what was removed is on the record."""
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                "select type, name from connections where id=%s and tenant_id=%s",
+                (str(connection_id), p.tenant_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "no such connection")
+            type_, name = row
+
+            cur.execute("select count(*) from resources where connection_id=%s", (str(connection_id),))
+            n_resources = cur.fetchone()[0]
+            cur.execute(
+                """select count(*) from findings f
+                   join resources r on r.id = f.resource_id
+                   where r.connection_id = %s""",
+                (str(connection_id),),
+            )
+            n_findings = cur.fetchone()[0]
+
+            _audit(cur, p, "connection.deleted", str(connection_id),
+                   {"type": type_, "name": name, "resources": n_resources,
+                    "findings": n_findings})
+            cur.execute("delete from connections where id=%s and tenant_id=%s",
+                        (str(connection_id), p.tenant_id))
+        conn.commit()
+
+    return {"deleted": True, "connection_id": str(connection_id), "type": type_,
+            "name": name, "resources": n_resources, "findings": n_findings}
 
 
 # ── Findings workflow ─────────────────────────────────────────────────────

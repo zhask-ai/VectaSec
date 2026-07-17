@@ -4,13 +4,25 @@
 
 Phases refer to [vectasec-build-plan.md](vectasec-build-plan.md) §18.
 
-**One-line summary:** the deterministic core is real and provable — the plumbing around it is not. Phase 0 is substantially done, the Phase 1 *rulepacks* ran far ahead into Phase 2/3 territory, and the Phase 1 *plumbing* (worker, collector bridge, compliance evaluation, sign-in, integrations) is largely missing. No phase is "done" by its own **Done when** bar.
+**One-line summary:** the deterministic core is real and provable, and the connect→scan→findings loop now closes from **both surfaces** — console and CLI. Phase 0 is substantially done, the Phase 1 *rulepacks* ran far ahead into Phase 2/3 territory, and the remaining Phase 1 plumbing gaps are integrations, SSO/RBAC, and a proven collector round trip. No phase is "done" by its own **Done when** bar.
 
 ---
 
 ## What actually works, end to end
 
-This is the honest floor. It runs on a laptop and does what it says:
+This is the honest floor. It runs on a laptop and does what it says.
+
+**The console path** (observed working 2026-07-17, against the live Supabase project):
+
+```
+uv run python -m vectasec.api.main     # engine API
+uv run vectasec worker                 # queue consumer
+pnpm -C apps/web dev                   # console
+```
+
+Sign in → Connections → **+ Connect a system** → pick RabbitMQ, fill URL + credentials → submit. The engine validates the config against the connector's declared fields, writes the connection, enqueues the first scan on `pgmq`; the worker adopts the queued row, scans the target, and commits findings + cited observations in one transaction; the Connections page (polling while anything is in flight) re-renders with resource and finding counts, `/scans` shows the run with its duration and stats, and the findings queue shows both systems' findings faceted by rulepack. Per-row **Scan now** (queue a rescan), **Test** (live reachability via the real collect path), and **Remove** (audited cascade delete) all verified. The same flow was exercised through the CLI: `vectasec connections add` / `scan --connection` / `scans` / `connections test` / dry-run `rm`.
+
+**The CLI-only path** (the original floor):
 
 ```
 docker compose -f deploy/dev/docker-compose.yml up -d
@@ -18,7 +30,7 @@ cd services/engine && uv run vectasec scan --type kafka --bootstrap localhost:90
 uv run vectasec findings
 ```
 
-A deliberately misconfigured Kafka → read-only collection → 73 deterministic detectors → findings and cited observations committed to Postgres in **one transaction**, deduped by fingerprint, listed back with their evidence counts. Re-running is idempotent. That path is not a demo mock.
+A deliberately misconfigured Kafka (and now RabbitMQ) → read-only collection → 73 deterministic detectors → findings and cited observations committed to Postgres in **one transaction**, deduped by fingerprint, listed back with their evidence counts. Re-running is idempotent. That path is not a demo mock.
 
 Nothing else in this document reaches that bar.
 
@@ -38,9 +50,12 @@ Nothing else in this document reaches that bar.
 | Connectors (4) | `connect/{kafka,kong,rabbitmq,mcp}.py` | Read-only. Kafka is the reference. |
 | Detectors (73) | `detect/{kafka,kong,rabbitmq,mcp}.py` | KAFKA 20, MCP 19, RABBITMQ 18, KONG 16. `uv run vectasec rules`. |
 | Grounded AI triage | `ai.py` | Structured-output citations, range-checked, deterministic fallback, fingerprint cache, refusal handling. Works with no API key. |
-| Engine API (actions) | `api/main.py` | health, scans, finding status/assign/triage, suppressions, compliance read, blast-radius. Audit row per mutation, in-transaction. |
-| CLI | `cli.py` | `scan`, `rules`, `findings`, `doctor`. |
-| Dev scan target | `deploy/dev/docker-compose.yml` | Misconfigured Kafka, each bad value annotated with the rule it should trigger. |
+| Engine API (actions) | `api/main.py` | health, scans, finding status/assign/triage, suppressions, compliance read, blast-radius, collector control plane, **connection lifecycle** (`GET /connectors` catalogue from the registry, `POST /connections` with declared-field validation, `POST /connections/{id}/test` via the real collect, `POST /connections/{id}/scan` from stored config — collector-mode rows skip pgmq so the cloud worker never gets a job it cannot reach, `DELETE /connections/{id}` with counts in the audit row). Audit row per mutation, in-transaction; config **keys** only in audit detail, never values. |
+| Queue worker | `worker.py`, `vectasec worker` | Drains `pgmq.vectasec_scans`, adopts the queued scans row (no orphans), poison-message cap via `read_ct`, and the stuck-`running` reaper. Observed executing console-queued scans live. |
+| Connector field specs | `registry.py` `ConnectorField`, declared per-connector in `connect/*.py` | Each connector declares what a human must supply; drives the console form, `GET /connectors`, CLI validation. `validate_config()` is the one shared gate. |
+| CLI | `cli.py` | `scan` (`--connection <name>` rescans from stored config, or ad-hoc `--type`), `connections` (`list`/`add`/`test`/`rm` with dry-run default), `scans`, `rules`, `findings`, `doctor` (incl. queue depth), `worker`. |
+| Console connect-and-scan | `apps/web/app/connections/*`, `app/scans/*`, `components/{AutoRefresh,ScanStrip}.tsx`, `lib/{engine,tenant}.ts` | Add-connection form (per-connector fields, secrets as password inputs, never echoed), per-row Scan now / Test / Remove, `/scans` history with error strings, ambient scan strip, poll-while-in-flight refresh. Every mutation re-verifies the user (revocation-checked) and derives the tenant from an RLS-read row — never from the form. |
+| Dev scan targets | `deploy/dev/docker-compose.yml` | Misconfigured Kafka **and RabbitMQ** (guest remote login deliberately enabled), each bad value annotated with the rule it should trigger. |
 | Console pages | `apps/web/app/**` | Server-rendered findings queue + detail, assets + blast radius, connections, compliance. Reads under RLS; mutations forwarded to the engine. |
 | Collector code | `services/collector/src/collector/**` | Outbound-only design, local credentials, `redact()` boundary, `preview` for security review. **The code. Not a working deployment** — see PARTIAL. |
 | Tests | `services/engine/tests/`, `services/collector/tests/` | **Run `uv run pytest` in each — this document deliberately states no count.** A hardcoded total was wrong here, in the README twice, and in ARCHITECTURE.md for exactly as long as it took someone to add a detector, and a stale number in a document whose only asset is being checkable is worse than no number. What the suite is: offline unit tests over detectors, redaction, `scan.py`'s pure logic, `ai.py`'s citation gate, and `compliance/map.py`'s no-pass contract. What it is not: see gap #8. |
@@ -66,7 +81,7 @@ The bar was: *"connect a real (managed) Kafka, scan, see a cited finding update 
 
 | Phase 1 item | State |
 |---|---|
-| The Collector, end to end | ⚠️ **Code exists, cannot run.** `collector/main.py` enrolls and polls `/collector/enroll`, `/collector/heartbeat`, `/collector/jobs`, `/collector/results`. **None of those endpoints exist** in `api/main.py` (`grep -rn collector services/engine/src` → nothing). Only `check` and `preview` work. The trust properties are real in the code and real in `preview`; the loop has never talked to a control plane. |
+| The Collector, end to end | ⚠️ **Both ends exist; the round trip is unproven.** `collector/main.py` enrolls and polls `/collector/enroll`, `/collector/heartbeat`, `/collector/jobs`, `/collector/results` — and all four now exist in `api/main.py` (HMAC service tokens, tenant-scoped job claiming with `skip locked`, persist-only results path that never receives `Resource.raw`). `POST /connections/{id}/scan` on a collector-mode connection leaves the queued row for `/collector/jobs` rather than pgmq. What has NOT happened: a real collector process completing enroll → poll → scan → push against them. Until that is observed, treat the loop as untested integration, not a working feature. |
 | Kafka connector + rulepack | ✅ 20 rules. |
 | Kong connector + rulepack | ✅ 16 rules. |
 | One iPaaS | ❌ Not started. |
@@ -121,15 +136,17 @@ Things the README, the plan, or the schema imply that have **zero code**:
 
 Ranked by how much they'd hurt.
 
-0. **A scan that dies mid-collect leaves a stuck `running` row, and nothing reaps it.** Introduced deliberately by `20260717000003` + the `scan.py` transaction fix, and recorded here rather than papered over. `run_scan` now COMMITs the `connections` + `scans('running')` rows *before* collecting, because holding them uncommitted took an exclusive lock on the `connections` row for the entire collect — a 5-minute Kafka connect blocked every concurrent scan of that connection, and `running` was a status no reader could ever observe (the row was invisible outside the open transaction). The trade is real and is the right way round: a *crash* (SIGKILL, OOM, pod eviction) during collect now leaves a durable `running` row that nothing transitions, where before it left no row at all. An in-process exception is still recorded — both the connector and the persist phase now write `status='error'` on their own transaction. **There is no reaper**: nothing ages out a `running` scan, so the console would show it as in-flight forever. Wants a sweeper (`update scans set status='error' where status='running' and started_at < now() - interval '1 hour'`), which is naturally the queue worker's job (gap 2) — a worker owns a scan's lifecycle and is the right place for a heartbeat/lease. Not built here: inventing a reaper without the worker that leases the scan is guesswork about a component that does not exist yet.
+0. ~~**A scan that dies mid-collect leaves a stuck `running` row, and nothing reaps it.**~~ **FIXED** — the worker exists now and owns the reaper it asked for: `worker.reap_stuck_scans` runs every loop iteration (and via `vectasec worker --reap-only`), ageing `running` rows older than the lease window to `error` with a `reaped:` marker merged into stats. The original entry, for the record:
+
+   **A scan that dies mid-collect leaves a stuck `running` row, and nothing reaps it.** Introduced deliberately by `20260717000003` + the `scan.py` transaction fix, and recorded here rather than papered over. `run_scan` now COMMITs the `connections` + `scans('running')` rows *before* collecting, because holding them uncommitted took an exclusive lock on the `connections` row for the entire collect — a 5-minute Kafka connect blocked every concurrent scan of that connection, and `running` was a status no reader could ever observe (the row was invisible outside the open transaction). The trade is real and is the right way round: a *crash* (SIGKILL, OOM, pod eviction) during collect now leaves a durable `running` row that nothing transitions, where before it left no row at all. An in-process exception is still recorded — both the connector and the persist phase now write `status='error'` on their own transaction. **There is no reaper**: nothing ages out a `running` scan, so the console would show it as in-flight forever. Wants a sweeper (`update scans set status='error' where status='running' and started_at < now() - interval '1 hour'`), which is naturally the queue worker's job (gap 2) — a worker owns a scan's lifecycle and is the right place for a heartbeat/lease. Not built here: inventing a reaper without the worker that leases the scan is guesswork about a component that does not exist yet.
 
 0b. **Findings with no resource are not re-fingerprinted.** `20260717000003` rewrites `findings.fingerprint` to include `connection_id`, joining through `resources` to get it. A finding whose `resource_id` is NULL (or whose resource has a NULL `connection_id`) has no connection to hash, so no correct new value exists and the row keeps its old fingerprint. It becomes unreachable: the next scan inserts a fresh row under the new key, and the old one keeps its triage state and ages in place. This should be rare — `findings.resource_id` cascades on resource delete, so it is only NULL when `_persist_resources` did not return an id for the ext_id. The migration deliberately does **not** delete those rows: deleting a security finding is not a migration's call. Worth a query before the next release to confirm the count is zero.
 
-1. **The console is unreachable.** `proxy.ts` redirects all anonymous traffic to `/login`; `/login` is a placeholder. A fresh `pnpm dev` dead-ends. Every page behind it is built and untested against real auth. *Fix: a client-side `supabase.auth` sign-in + an `/auth/callback` route to exchange the code, plus a `tenant_members` row per user.*
+1. ~~**The console is unreachable.**~~ **FIXED** — `/login` is a real email+password sign-in (`app/login/page.tsx`), verified end to end: the whole connect→scan→findings console flow above was driven through it as an authenticated user with a `tenant_members` row. Still absent: SSO/SAML/SCIM, invites, password reset (§NOT BUILT).
 
-2. **No queue worker.** `POST /scans` enqueues to `pgmq.vectasec_scans` in the same transaction as the `scans` row — correctly — and **nothing reads the queue**. Queued scans stay `queued` forever. Flagged `TODO(worker)` in `api/main.py`. Compounding issue: `run_scan()` opens its *own* `scans` row, so a worker cannot adopt the queued one; the queued row would become an orphan placeholder. `run_scan` needs to accept a `scan_id` before a worker can exist.
+2. ~~**No queue worker.**~~ **FIXED** — `vectasec worker` (worker.py) reads the queue with a visibility timeout, `run_scan` accepts the `scan_id` to adopt (no orphan placeholder), poison messages are archived after `read_ct` exhausts, and a failed archive only costs a redundant idempotent re-run. Observed draining console-queued scans live on 2026-07-17.
 
-3. **The Collector has no other end.** Four endpoints missing (§PARTIAL). The most trust-critical component in the product, the one the README leads with, has never completed a round trip. `preview` is genuinely useful for a security review today; the loop is not deployable.
+3. ~~**The Collector has no other end.**~~ **PARTIALLY FIXED** — the four `/collector/*` endpoints exist (§PARTIAL, updated). What remains open is observing a real collector complete the round trip; until then the loop is still not deployable-with-confidence.
 
 4. **Compliance never runs, and when it does it can only ever say `fail` or `unknown`.** `compliance/map.py::evaluate()` is dead code — nothing calls it, so the `controls` table is permanently empty and the console's compliance page — the budget-holder's view — renders empty. One call from the scan loop fixes that, and it is the cheapest high-value gap on the list.
 
@@ -155,7 +172,9 @@ Ranked by how much they'd hurt.
 
 10. ~~**Duplicate/conflicting resource constraints.**~~ **FIXED** by `20260717000003_pipeline_fixes.sql`, and it was worse than this entry said. Migration 001's `unique (connection_id, kind, name)` and 002's `resources_conn_extid_uniq on (connection_id, ext_id)` were both live while `scan.py` upserted `on conflict (connection_id, ext_id)` — which arbitrates only the *ext_id* constraint. The break needed no rename: **two distinct resources that legitimately share `(kind, name)`** miss the ON CONFLICT target entirely, take the INSERT path, and raise `unique_violation` on the legacy constraint. Kong reaches this on any ordinary deployment — `connect/kong.py` sets `name = instance_name or name`, and `instance_name` is null by default, so `key-auth` on two routes yields two `kind='plugin', name='key-auth'` rows with distinct ext_ids. The exception aborted the **whole scan**, and (until the `_mark_scan_error` fix landed alongside) rolled the `scans` row back with it, so it failed silently and permanently on every re-run. `ext_id` is the documented identity; the 001 unique is dropped.
 
-11. **`connections.mode` is hardcoded.** The DB default is `'collector'`; `scan._ensure_connection` inserts `'cloud'` literally. There is no way to record a collector-sourced connection, which is fine only because collector-sourced connections cannot exist yet.
+11. ~~**`connections.mode` is hardcoded.**~~ **FIXED** — `_ensure_connection` takes `mode` (applied on CREATE only; a rescan never flips an existing connection's mode), `POST /connections` and `vectasec connections add --mode` accept it, and `POST /connections/{id}/scan` routes collector-mode scans to the collector job path instead of pgmq. The console form creates cloud connections only, deliberately: a UI-created collector connection would have no `collector_id` and would sit unclaimed forever — the collector's own enrollment is the honest way to create those rows.
+
+11b. **Connection credentials are now reachable from a browser form, and still land in plain JSONB.** The add-connection form (and `connections add`) accepts passwords/tokens and stores them in `connections.config`, as the cloud path always has (§NOT BUILT → Vault). What bounds the exposure: secrets travel browser → Server Action → engine over the app origin; no console query ever SELECTs `config`; audit rows record config *keys* only; the browser role has no write path. What does not: anyone holding the engine's DB credential reads every stored secret. Vault/`creds_ref` remains the real fix before any multi-tenant deployment.
 
 12. **CI is written but has never run.** `.github/workflows/ci.yml` covers the unit tests (it runs `pytest` without asserting a count, deliberately), the web build, live-Kafka detectors, migrations against an empty database, cross-tenant RLS, and the two integrity triggers. None of it has ever executed: the repo has 3 commits and `apps/`, `services/`, `supabase/`, `deploy/`, `docs/research/`, `.github/` are all **untracked**, so nothing has been pushed and no branch protection exists. An unpushed workflow is a plan, not a gate — treat every CI-derived assurance in this document as unobserved until it is green on a real PR.
 
@@ -191,12 +210,12 @@ Ranked by how much they'd hurt.
 
 ## What to do next (opinionated)
 
-In order, cheapest-first among the things that unblock the most:
+In order, cheapest-first among the things that unblock the most (items about compliance wiring, sign-in, the worker, and Kafka edges from earlier revisions are done — see DONE):
 
-1. **Call `compliance.evaluate()` from the scan loop.** One line of wiring turns 1000 lines of written work into a working page.
-2. **Give Kafka edges.** `broker → topic`. Makes the graph, blast radius, and the whole "integration layer" story non-empty on the one target that works.
-3. **Delete one of the two blast-radius implementations.** Keep `graph.py`'s — it's the correct one — and have the API call it.
-4. **Wire console sign-in.** The console is finished work sitting behind a locked door.
-5. **Push, so CI actually runs.** The integrity and cross-tenant jobs exist and pass locally against a replica; until the tree is committed and pushed they gate nothing (gap #12). Then take gap #15 — a hash-chained or externally mirrored ledger — before anyone shows an auditor the word "tamper-evident".
+1. **Push, so CI actually runs.** The integrity and cross-tenant jobs exist and pass locally against a replica; until the tree is committed and pushed they gate nothing (gap #12).
+2. **Run the collector round trip.** Both ends exist; one observed enroll → poll → scan → push closes the most trust-critical open loop in the product (gap #3).
+3. **Verify a JWT in the engine.** The connect/scan/delete surface grew; the self-asserted-header window should close before anything binds off-localhost (gap #5).
+4. **Vault the connection credentials.** The UI now feeds `connections.config`; `creds_ref` should exist before any second tenant does (gap #11b).
+5. **Then gap #15** — a hash-chained or externally mirrored ledger — before anyone shows an auditor the word "tamper-evident".
 6. **Make `run_scan` adopt a `scan_id`, then write the worker.** Unblocks queued scans and, after it, the collector bridge.
 7. **JWT verification in `api/main.py`.** Required before the engine is reachable from anywhere but localhost.

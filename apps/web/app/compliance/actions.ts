@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 
 import { createClient, getVerifiedUser } from '@/lib/supabase/server';
-import { enginePost } from '../findings/engine';
+import { enginePost } from '@/lib/engine';
 
 /* Compliance mutations — attesting a control.
  *

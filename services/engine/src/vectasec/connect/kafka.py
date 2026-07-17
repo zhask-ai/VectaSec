@@ -1,6 +1,6 @@
 """Kafka connector — read-only. Lists brokers/topics and reads broker config
 via the Admin API, normalising into resources."""
-from ..registry import connector
+from ..registry import ConnectorField, connector
 from ..contracts import Resource, Edge, Collected
 
 
@@ -34,7 +34,12 @@ def _normalise(entries: dict) -> dict:
     return out
 
 
-@connector("kafka")
+@connector("kafka", fields=[
+    ConnectorField("bootstrap", "Bootstrap servers", required=True,
+                   placeholder="broker-1:9092,broker-2:9092",
+                   help="Comma-separated host:port list the engine or worker can reach. "
+                        "Read-only AdminClient — nothing is written to the cluster."),
+])
 def collect(config: dict) -> Collected:
     from confluent_kafka import KafkaError, KafkaException
     from confluent_kafka.admin import (
