@@ -1,0 +1,43 @@
+{{/* Non-secret configuration only. Anything that would be damaging to read goes in
+     secret.yaml — a ConfigMap is world-readable to anyone with get on the namespace. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vectasec.fullname" . }}
+  labels:
+    {{- include "vectasec.labels" . | nindent 4 }}
+data:
+  ENGINE_PORT: "8000"
+  # The engine's own default bind is 127.0.0.1 (api/main.py `main()`), which would make the
+  # container unreachable from its Service. Overriding it is required here and is only
+  # defensible because the API is restricted at the Ingress — see values.yaml.
+  ENGINE_HOST: "0.0.0.0"
+  ENGINE_CORS_ORIGINS: {{ .Values.engine.corsOrigins | default .Values.publicUrl | quote }}
+
+  {{- if .Values.supabase.url }}
+  # Server-side runtime only. This does NOT repoint the browser bundle: NEXT_PUBLIC_* are
+  # inlined at image build time (see web.image in values.yaml).
+  NEXT_PUBLIC_SUPABASE_URL: {{ .Values.supabase.url | quote }}
+  {{- end }}
+  {{- if .Values.supabase.anonKey }}
+  # Public by design — RLS is the boundary, not this key's secrecy. Deliberately not a Secret:
+  # it ships to every browser that loads the console, so filing it as one would misrepresent
+  # what it protects.
+  NEXT_PUBLIC_SUPABASE_ANON_KEY: {{ .Values.supabase.anonKey | quote }}
+  {{- end }}
+
+{{- if and .Values.worker.enabled .Values.worker.targets }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "vectasec.fullname" . }}-worker-targets
+  labels:
+    {{- include "vectasec.labels" . | nindent 4 }}
+data:
+  # Read by the collector at VECTASEC_TARGETS_FILE. Credentials must NOT be inlined here —
+  # collector/config.py resolves ${ENV_VAR} references inside this file precisely so the secret
+  # lives in a Secret and only the reference lives in the ConfigMap.
+  targets.json: |
+    {{- toJson .Values.worker.targets | nindent 4 }}
+{{- end }}

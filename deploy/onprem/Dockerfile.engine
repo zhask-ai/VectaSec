@@ -1,0 +1,51 @@
+# VectaSec engine API — on-prem and SaaS use the same image.
+#
+#   docker build -f deploy/onprem/Dockerfile.engine -t vectasec/engine:0.0.1 .
+#
+# Context is the REPO ROOT (not services/) because the build needs services/engine only, but
+# BuildKit resolves this file's ignore rules from Dockerfile.engine.dockerignore next to it —
+# which lets the on-prem deploy own its own build inputs without adding a .dockerignore to the
+# repo root.
+#
+# Deliberately NOT as locked-down as services/collector/Dockerfile, which deletes its own shell.
+# The collector can afford that because it only ever dials out. This process is a server that an
+# operator must be able to debug in a datacentre with no other access, so the shell stays. It is
+# a real trade and it is made knowingly.
+
+FROM python:3.12-slim AS build
+
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PATH=/opt/venv/bin:$PATH
+
+RUN python -m venv /opt/venv
+
+COPY services/engine /src/engine
+# Installed, not mounted. A shipped image must not be able to pick up a detector from a writable
+# volume at runtime: detectors are auto-registered by import (registry.py), so a writable
+# detect/ directory is arbitrary code execution inside the process holding the BYPASSRLS
+# database connection.
+RUN pip install /src/engine
+
+
+FROM python:3.12-slim AS runtime
+
+COPY --from=build /opt/venv /opt/venv
+
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    ENGINE_PORT=8000
+
+RUN set -eux; \
+    useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin engine; \
+    rm -rf /var/lib/apt/lists/*
+
+USER 10001:10001
+EXPOSE 8000
+STOPSIGNAL SIGTERM
+
+# `python -m vectasec.api.main`, not `uvicorn`: main() reads ENGINE_HOST/ENGINE_PORT and defaults
+# the bind to 127.0.0.1. Invoking uvicorn directly would bypass that default and silently make
+# 0.0.0.0 the norm rather than a choice the deployment states out loud.
+CMD ["python", "-m", "vectasec.api.main"]

@@ -1,0 +1,91 @@
+# VectaSec dev target: a DELIBERATELY MISCONFIGURED Kafka.
+#
+# This is the thing we scan. Every setting below is a real-world misconfiguration that
+# VectaSec's Kafka rulepack is meant to catch — this file is effectively the fixture for
+# our end-to-end proof, so each bad value is annotated with the rule it should trigger.
+#
+#   docker compose -f deploy/dev/docker-compose.yml up -d
+#   uv run vectasec scan --type kafka --bootstrap localhost:9092
+#
+# DO NOT copy these settings anywhere real. That is the point of them.
+
+name: vectasec-dev
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: vectasec-dev-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+
+      # ── MISCONFIG → KAFKA.LISTENER.PLAINTEXT ──────────────────────────────
+      # Every client listener is unencrypted and unauthenticated. INTERNAL is advertised on
+      # the compose network (for topic-seed); EXTERNAL is advertised to the host scanner.
+      KAFKA_LISTENERS: "INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:29092,EXTERNAL://localhost:9092"
+
+      # ── MISCONFIG → KAFKA.AUTHZ.NO_AUTHORIZER ─────────────────────────────
+      # authorizer.class.name is deliberately unset: no ACL enforcement whatsoever.
+
+      # ── MISCONFIG → KAFKA.AUTHZ.ALLOW_EVERYONE ────────────────────────────
+      # The AWS MSK default. With no authorizer this is doubly permissive.
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "true"
+
+      # ── MISCONFIG → KAFKA.TOPIC.AUTO_CREATE ───────────────────────────────
+      # Any client can materialise topics just by producing to them.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+      # ── MISCONFIG → KAFKA.TOPIC.DELETE_ENABLE ─────────────────────────────
+      KAFKA_DELETE_TOPIC_ENABLE: "true"
+
+      # ── MISCONFIG → KAFKA.DURABILITY.UNCLEAN_LEADER_ELECTION ──────────────
+      # Trades data loss for availability — silently drops committed records.
+      KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "true"
+
+      # ── MISCONFIG → KAFKA.DURABILITY.MIN_INSYNC_REPLICAS ──────────────────
+      KAFKA_MIN_INSYNC_REPLICAS: "1"
+
+      # single-node dev quorum
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_LOG_DIRS: "/tmp/kraft-combined-logs"
+      CLUSTER_ID: "vectasec-dev-cluster-0001"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # Seeds topics whose names make the demo finding land: an exposed `payments` bus is a
+  # story a CISO reacts to; `topic-0` is not.
+  topic-seed:
+    image: apache/kafka:3.9.0
+    container_name: vectasec-dev-topic-seed
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        for t in payments customer-pii orders audit-events internal-metrics; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 \
+            --create --if-not-exists --topic "$$t" --partitions 3 --replication-factor 1
+        done
+        # A topic carrying card data with a 1-year retention — retention rules should notice.
+        /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:29092 \
+          --alter --entity-type topics --entity-name payments \
+          --add-config retention.ms=31536000000
+        echo "seeded topics:"
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --list
+    restart: "no"

@@ -1,0 +1,17 @@
+# Ignore rules for Dockerfile.web (see Dockerfile.engine.dockerignore for why this file exists).
+#
+# Default-deny. `.env`/`.env.local` sit in the repo root and apps/web respectively and both hold
+# real secrets; an allowlist means a new secret file added tomorrow is excluded by default
+# instead of shipped by default.
+*
+
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!apps/web
+
+apps/web/node_modules
+apps/web/.next
+apps/web/.env
+apps/web/.env.local
+apps/web/*.tsbuildinfo

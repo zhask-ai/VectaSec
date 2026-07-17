@@ -1,0 +1,47 @@
+VectaSec {{ .Chart.AppVersion }} — release {{ .Release.Name }} in {{ .Release.Namespace }}.
+
+  Console   {{ if .Values.ingress.enabled }}{{ if .Values.ingress.tls.enabled }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}{{ else }}kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "vectasec.fullname" . }}-web {{ .Values.web.service.port }}{{ end }}
+  Engine    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "vectasec.fullname" . }}-engine {{ .Values.engine.service.port }}
+            curl localhost:{{ .Values.engine.service.port }}/health
+
+READ THIS BEFORE YOU CALL THIS INSTALLED
+────────────────────────────────────────
+
+1. MIGRATIONS ARE NOT APPLIED BY THIS CHART.
+   Nothing here runs supabase/migrations/*.sql. The engine will start, /health will report
+   {"db": false} or the pods will error on first query, until you apply them yourself:
+
+     psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+       -f supabase/migrations/20260717000001_core_schema.sql \
+       -f supabase/migrations/20260717000002_platform_schema.sql
+
+   Your Postgres must have pgcrypto, pgmq and pg_cron, and the anon/authenticated/service_role
+   roles. Stock Postgres has none of that — migration 2 fails on line 16.
+
+2. THE ENGINE API AUTHENTICATES NOBODY.
+   It takes the tenant from an X-VectaSec-Tenant header and believes it, while holding a
+   BYPASSRLS connection. Anything that reaches {{ .Values.ingress.paths.engine }} can read and
+   modify every tenant.
+{{- if and .Values.ingress.enabled (not .Values.ingress.annotations) }}
+
+   >> You have ingress.enabled=true with NO annotations, so this path is exposed to anyone who
+   >> can resolve {{ .Values.ingress.host }}. Add a source-range restriction now.
+{{- end }}
+
+3. THE CONSOLE IMAGE IS HOST-SPECIFIC.
+   {{ .Values.web.image.repository }}:{{ .Values.web.image.tag }} has NEXT_PUBLIC_SUPABASE_URL
+   and NEXT_PUBLIC_SUPABASE_ANON_KEY compiled into its browser bundle. supabase.url and
+   supabase.anonKey in values.yaml do NOT repoint it. If that image was not built for
+   {{ .Values.publicUrl }}, the console will load and then fail every query. Build your own:
+   see deploy/onprem/Dockerfile.web.
+{{- if not .Values.worker.enabled }}
+
+4. The worker is disabled — correctly. Nothing consumes the pgmq queue and the collector's
+   four /collector/* endpoints do not exist on the engine. Enabling it yields CrashLoopBackOff,
+   not a worker.
+{{- else }}
+
+4. >> worker.enabled=true. The engine does not implement /collector/enroll, /collector/jobs,
+   >> /collector/heartbeat or /collector/results. This pod will CrashLoop on enroll. Set
+   >> worker.enabled=false until those land.
+{{- end }}

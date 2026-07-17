@@ -1,0 +1,353 @@
+# VectaSec — self-hosted (on-prem) stack, single host.
+#
+#   cp .env.example .env && $EDITOR .env
+#   docker compose -f deploy/onprem/docker-compose.yml up -d --build
+#
+# The buyer for this file is a regulated customer who will not accept ANY external processing.
+# So: no telemetry, no outbound calls, and the AI layer is off unless a key is set (the engine
+# falls back to its deterministic rule-based triage — see vectasec/ai.py).
+#
+# ── Port policy ───────────────────────────────────────────────────────────────
+# Every published port is parametrised AND defaulted away from what this dev host already
+# runs. Defaults deliberately avoid:
+#   80/443    — the sibling `kaveo` stack's Caddy (infra/docker-compose.yml)
+#   9092/9093 — deploy/dev/docker-compose.yml's deliberately-misconfigured Kafka
+#   3000/8000 — `next dev` and the engine run from a shell
+#   5432      — any local Postgres
+# Only Caddy is published. Postgres is bound to loopback for migrations/debugging; every other
+# service is reachable only on the internal network, through Caddy.
+#
+# ── Supabase components: what is here and what is NOT ─────────────────────────
+# Self-hosted Supabase is a set of processes around one Postgres. This stack runs the ones the
+# product actually uses, and no others — an unused container in a security product is attack
+# surface we would have to defend:
+#   db        (supabase/postgres)  REQUIRED — pgcrypto, pgmq, pg_cron + the anon/authenticated/
+#                                  service_role roles the migrations grant to.
+#   auth      (gotrue)             REQUIRED — the console calls supabase.auth.getClaims()/getUser()
+#                                  (apps/web/lib/supabase/server.ts). No auth, no login.
+#   rest      (postgrest)          REQUIRED — the console READS through PostgREST under RLS.
+#                                  This is the tenant-isolation boundary for the browser.
+#   realtime  (supabase/realtime)  REQUIRED — apps/web/components/LiveFindings.tsx subscribes to
+#                                  a private channel on `findings`.
+#   storage   (storage-api)        NOT RUN — nothing in the console or engine uploads or reads a
+#                                  file. Add it the day a report export lands, not before.
+#   kong                           NOT RUN — upstream Supabase fronts these with Kong; Caddy does
+#                                  the same routing here and we already need Caddy for TLS.
+#                                  Kong's key-auth is not the security boundary anyway: PostgREST
+#                                  and Realtime verify the JWT themselves against JWT_SECRET.
+#
+# Ingress is Caddy. Everything is one origin, which is why the console can reach both Supabase
+# and the engine without CORS gymnastics:
+#   https://host/            → web console
+#   https://host/auth/v1/*   → gotrue
+#   https://host/rest/v1/*   → postgrest
+#   https://host/realtime/v1 → realtime
+#   https://host/api/*       → engine API   (IP-gated — see the Caddyfile, and READ the README)
+
+name: vectasec-onprem
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-logging: &logging
+  # Bounded by default: a scanner left running for a quarter must not fill a customer's disk.
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  # ── Postgres ────────────────────────────────────────────────────────────────
+  db:
+    # supabase/postgres, not postgres:16 — and this is not a preference. The migrations
+    # `create extension pgmq` + `pg_cron` (which needs shared_preload_libraries, set at image
+    # build time) and grant to the `anon`/`authenticated`/`service_role` roles. Stock Postgres
+    # has none of that and migration 2 fails on line 16.
+    image: supabase/postgres:15.8.1.060
+    <<: [*restart, *logging]
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_EXP: ${JWT_EXP:-3600}
+    ports:
+      # Loopback only. This database holds every customer's broker topology; it has no business
+      # on a routable interface. Present at all so an operator can run psql and take dumps.
+      - "127.0.0.1:${VECTASEC_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${POSTGRES_DB:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ── Migrations ──────────────────────────────────────────────────────────────
+  migrate:
+    # Same image as `db` purely to get a psql whose major version matches the server.
+    image: supabase/postgres:15.8.1.060
+    <<: *logging
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?}
+      # Must be passed in, not left to the `:-postgres` fallback in the script below. Without
+      # it, POSTGRES_DB=vectasec would create the database `vectasec` (in `db`) while the
+      # migrations landed in `postgres` — and the engine would then connect to an empty
+      # `vectasec` and report zero tables rather than an error.
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+    volumes:
+      # Read-only: the migration runner may apply this directory, never rewrite it.
+      - ../../supabase/migrations:/migrations:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        # Applied in filename order — the same order the Supabase CLI uses, and the order the
+        # files encode (000001 creates the tables 000002 alters).
+        #
+        # ON_ERROR_STOP: a migration that half-applies leaves a schema nobody can reason about.
+        # There is no version ledger here (see README "Migrations"): every file is re-run on
+        # every boot, which is safe ONLY because both migrations are written idempotently
+        # (`create ... if not exists`, `add column if not exists`). A new migration that is not
+        # idempotent WILL break restart. This is the stack's sharpest edge.
+        for f in /migrations/*.sql; do
+          echo "── applying $${f}"
+          psql -v ON_ERROR_STOP=1 -h db -U postgres -d "$${POSTGRES_DB:-postgres}" -f "$${f}"
+        done
+        echo "── migrations applied"
+
+  # ── Supabase: auth ──────────────────────────────────────────────────────────
+  auth:
+    image: supabase/gotrue:v2.174.0
+    <<: [*restart, *logging]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: ${VECTASEC_PUBLIC_URL:?VECTASEC_PUBLIC_URL is required}
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:-postgres}?search_path=auth&sslmode=disable
+      GOTRUE_SITE_URL: ${VECTASEC_PUBLIC_URL:?}
+      GOTRUE_URI_ALLOW_LIST: ${VECTASEC_PUBLIC_URL:?}/**
+      # Closed by default. On-prem this is an internal security console: operators are
+      # provisioned deliberately, not by whoever finds the login page.
+      GOTRUE_DISABLE_SIGNUP: ${GOTRUE_DISABLE_SIGNUP:-true}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET:?}
+      GOTRUE_JWT_EXP: ${JWT_EXP:-3600}
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${GOTRUE_EXTERNAL_EMAIL_ENABLED:-true}
+      # Autoconfirm defaults ON because most air-gapped sites have no SMTP relay to give us,
+      # and an invite nobody can receive is a locked door. Set false and fill SMTP_* if you
+      # have a relay — that is the better posture.
+      GOTRUE_MAILER_AUTOCONFIRM: ${GOTRUE_MAILER_AUTOCONFIRM:-true}
+      GOTRUE_SMTP_HOST: ${SMTP_HOST:-}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT:-}
+      GOTRUE_SMTP_USER: ${SMTP_USER:-}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS:-}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL:-}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME:-VectaSec}
+      GOTRUE_LOG_LEVEL: ${GOTRUE_LOG_LEVEL:-info}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9999/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # ── Supabase: rest ──────────────────────────────────────────────────────────
+  rest:
+    image: postgrest/postgrest:v12.2.12
+    <<: [*restart, *logging]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # `authenticator` (not `postgres`): it is NOSUPERUSER/NOBYPASSRLS and switches into
+      # anon/authenticated per request. Handing PostgREST a BYPASSRLS role would silently void
+      # every RLS policy in 20260717000002_platform_schema.sql — i.e. tenant isolation.
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:-postgres}
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS:-public,storage,graphql_public}
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET:?}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_APP_SETTINGS_JWT_SECRET: ${JWT_SECRET:?}
+      PGRST_APP_SETTINGS_JWT_EXP: ${JWT_EXP:-3600}
+      PGRST_DB_POOL: ${PGRST_DB_POOL:-10}
+    command: ["postgrest"]
+    # No healthcheck: the postgrest image ships no shell, curl or wget, so any test here would
+    # be a lie that always passes or always fails. Caddy's proxy is the real liveness signal.
+
+  # ── Supabase: realtime ──────────────────────────────────────────────────────
+  realtime:
+    image: supabase/realtime:v2.34.47
+    <<: [*restart, *logging]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PORT: "4000"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?}
+      DB_NAME: ${POSTGRES_DB:-postgres}
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY:?REALTIME_DB_ENC_KEY is required (exactly 16 chars)}
+      API_JWT_SECRET: ${JWT_SECRET:?}
+      SECRET_KEY_BASE: ${REALTIME_SECRET_KEY_BASE:?REALTIME_SECRET_KEY_BASE is required (64+ chars)}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      # Provisions the single self-host tenant on boot. Without it the server starts and every
+      # channel join 401s against a tenant that does not exist.
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+
+  # ── Engine API ──────────────────────────────────────────────────────────────
+  engine:
+    image: ${VECTASEC_ENGINE_IMAGE:-vectasec/engine:0.0.1}
+    build:
+      context: ../..
+      dockerfile: deploy/onprem/Dockerfile.engine
+    <<: [*restart, *logging]
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # `postgres` is BYPASSRLS by design (see 20260717000002_platform_schema.sql's trust-model
+      # note): the engine filters tenant_id in every statement itself. That makes this URL the
+      # most dangerous string in the stack.
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?}@db:5432/${POSTGRES_DB:-postgres}
+      # 127.0.0.1 is the code's default, chosen because this process holds the BYPASSRLS
+      # connection above and trusts a self-asserted header for identity. Overriding it is what
+      # api/main.py's `main()` means by "Containers set ENGINE_HOST=0.0.0.0 deliberately" — it
+      # is only defensible because Caddy IP-gates /api/*. See README → "Not production-ready".
+      ENGINE_HOST: 0.0.0.0
+      ENGINE_PORT: "8000"
+      ENGINE_CORS_ORIGINS: ${VECTASEC_PUBLIC_URL:?}
+      # Optional. Unset = the deterministic rule-based fallback, which is the correct default
+      # for an air-gapped site: setting it makes this stack call api.anthropic.com, which is
+      # exactly the external processing this deployment exists to avoid.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    healthcheck:
+      # httpx is a hard dependency of the engine, so this needs nothing extra in the image.
+      # Note what it does NOT prove: /health answers 200 even when the database is down (that
+      # is deliberate — it reports {"db": false} instead). This is a liveness check only.
+      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if httpx.get('http://localhost:8000/health', timeout=5).status_code==200 else 1)"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ── Worker ──────────────────────────────────────────────────────────────────
+  worker:
+    # DISABLED BY DEFAULT, and not as caution — as fact. There is no worker to run yet:
+    #
+    #   • The pgmq queue `vectasec_scans` has no consumer anywhere in the repo. POST /scans
+    #     without `inline: true` enqueues a job that stays 'queued' forever. api/main.py says so
+    #     itself: "NOTE: no worker consumes the queue yet".
+    #   • The collector (services/collector) is the only job-runner that exists, but it polls
+    #     /collector/enroll, /collector/heartbeat, /collector/jobs and /collector/results — and
+    #     the engine implements NONE of those four. Started today it 404s on enroll and exits.
+    #
+    # So this service is shipped as the wiring, not as a working component. Starting it by
+    # default would put a crash-looping container in front of a customer and call it a worker.
+    # Enable with `--profile worker` once those endpoints land.
+    profiles: ["worker"]
+    image: ${VECTASEC_COLLECTOR_IMAGE:-vectasec/collector:0.0.1}
+    build:
+      context: ../../services
+      dockerfile: collector/Dockerfile
+    <<: [*restart, *logging]
+    depends_on:
+      engine:
+        condition: service_healthy
+    environment:
+      # In-cluster: the collector's whole point (outbound-only, credentials never leave the
+      # network) is already satisfied by the topology on-prem. It talks to Caddy over the
+      # internal network, so plain http is intentional and confined to the compose bridge.
+      VECTASEC_CONTROL_PLANE_URL: http://caddy:80
+      VECTASEC_ALLOW_INSECURE_CONTROL_PLANE: "1"
+      VECTASEC_ENROLL_TOKEN_FILE: /run/secrets/enroll_token
+      VECTASEC_TARGETS_FILE: /etc/vectasec/targets.json
+      VECTASEC_COLLECTOR_NAME: ${VECTASEC_COLLECTOR_NAME:-onprem-worker}
+    volumes:
+      - ./targets.json:/etc/vectasec/targets.json:ro
+      - ./enroll_token:/run/secrets/enroll_token:ro
+      - worker-state:/var/lib/vectasec
+
+  # ── Web console ─────────────────────────────────────────────────────────────
+  web:
+    image: ${VECTASEC_WEB_IMAGE:-vectasec/web:0.1.0}
+    build:
+      context: ../..
+      dockerfile: deploy/onprem/Dockerfile.web
+      args:
+        # BUILD-TIME, not runtime. Next.js inlines NEXT_PUBLIC_* into the browser bundle at
+        # build, so these cannot be changed by restarting the container — the image is bound to
+        # this hostname. That breaks the "one image everywhere" story for the console; the
+        # compose path hides it by building locally, the Helm path cannot. See README.
+        NEXT_PUBLIC_SUPABASE_URL: ${VECTASEC_PUBLIC_URL:?}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY:?ANON_KEY is required}
+    <<: [*restart, *logging]
+    depends_on:
+      - rest
+      - auth
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    healthcheck:
+      # `/` and not `/health`: the console has no health route. A 307 to /login is a pass, which
+      # is the honest bar here — it proves Next is serving, nothing about Supabase.
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ── Ingress ─────────────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2.8-alpine
+    <<: [*restart, *logging]
+    depends_on:
+      - web
+      - engine
+      - rest
+      - auth
+      - realtime
+    ports:
+      - "${VECTASEC_HTTP_PORT:-8080}:80"
+      - "${VECTASEC_HTTPS_PORT:-8443}:443"
+    environment:
+      VECTASEC_SITE_ADDRESS: ${VECTASEC_SITE_ADDRESS:-https://vectasec.localhost}
+      VECTASEC_TLS: ${VECTASEC_TLS:-internal}
+      VECTASEC_ENGINE_ALLOWED_CIDRS: ${VECTASEC_ENGINE_ALLOWED_CIDRS:-127.0.0.1/32 ::1/128 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  db-data:
+  caddy-data:      # holds the CA + issued certs — back this up or every client re-trusts on rebuild
+  caddy-config:
+  worker-state:

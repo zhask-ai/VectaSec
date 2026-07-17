@@ -1,0 +1,77 @@
+# VectaSec on-prem ingress.
+#
+# One origin for the console, Supabase and the engine. That is not just tidy: the console's
+# Supabase client and its engine calls both run in the browser, and a single origin is what
+# keeps the JWT cookie and the CORS allowlist trivial instead of subtle.
+#
+# Routes mirror what upstream Supabase's Kong exposes, because supabase-js hard-codes these
+# paths off SUPABASE_URL:
+#   /auth/v1/*      → gotrue
+#   /rest/v1/*      → postgrest
+#   /realtime/v1/*  → realtime  (rewritten onto the server's /socket)
+{
+	# No admin API. It is unauthenticated on localhost and this container needs nothing from it.
+	admin off
+
+	# ACME needs to answer on the public 80/443. This stack defaults to 8080/8443 to stay off
+	# the sibling kaveo stack's ports, so automatic issuance will NOT work as shipped and
+	# VECTASEC_TLS defaults to `internal` (Caddy's own CA). See README → TLS.
+	email {$VECTASEC_ACME_EMAIL:admin@localhost}
+}
+
+{$VECTASEC_SITE_ADDRESS} {
+	tls {$VECTASEC_TLS}
+
+	encode zstd gzip
+
+	header {
+		# HSTS is deliberately NOT set: with `tls internal` on a non-standard port, pinning a
+		# browser to HTTPS for the whole host would outlive this stack and break the operator's
+		# other services. Turn it on once you have a real cert on 443.
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+
+	# ── Engine API ────────────────────────────────────────────────────────────
+	# The engine trusts X-VectaSec-Tenant / X-VectaSec-Actor as-asserted (api/main.py
+	# `principal()` — "TODO(auth): a real deployment MUST verify a Supabase JWT here"), and it
+	# holds a BYPASSRLS connection. Anyone who can reach /api/ can therefore read and mutate any
+	# tenant by typing a different uuid in a header.
+	#
+	# This CIDR gate is a STOPGAP, not a fix. It is here because the alternative — publishing
+	# that API to the world on port 8443 — is indefensible, and because on-prem the console is
+	# usually reached from known networks. It does not authenticate anyone: a single host inside
+	# an allowed range still has full cross-tenant access. Do not treat this block as "auth
+	# done". Remove it when JWT verification lands, not before.
+	@engine path /api/*
+	handle @engine {
+		@engine_denied not remote_ip {$VECTASEC_ENGINE_ALLOWED_CIDRS}
+		respond @engine_denied "engine API not permitted from this address" 403 {
+			close
+		}
+		uri strip_prefix /api
+		reverse_proxy engine:8000
+	}
+
+	# ── Supabase ──────────────────────────────────────────────────────────────
+	handle_path /auth/v1/* {
+		reverse_proxy auth:9999
+	}
+
+	handle_path /rest/v1/* {
+		reverse_proxy rest:3000
+	}
+
+	# handle_path strips /realtime/v1, leaving /websocket; the server serves the socket at
+	# /socket/websocket, so put the prefix back. Caddy proxies the WebSocket upgrade natively.
+	handle_path /realtime/v1/* {
+		rewrite * /socket{uri}
+		reverse_proxy realtime:4000
+	}
+
+	# ── Console ───────────────────────────────────────────────────────────────
+	handle {
+		reverse_proxy web:3000
+	}
+}

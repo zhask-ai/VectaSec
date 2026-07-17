@@ -1,0 +1,71 @@
+# VectaSec console (Next.js) — on-prem.
+#
+#   docker build -f deploy/onprem/Dockerfile.web \
+#     --build-arg NEXT_PUBLIC_SUPABASE_URL=https://vectasec.example.com \
+#     --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ... \
+#     -t vectasec/web:0.1.0 .
+#
+# ── The thing to know before you rely on this image ──────────────────────────
+# NEXT_PUBLIC_* are INLINED INTO THE BROWSER BUNDLE AT BUILD TIME. They are build args here, not
+# runtime env, because that is what they physically are. Consequences, stated plainly:
+#   • This image is bound to one hostname and one anon key. It is NOT a universal artifact, so
+#     "same image, two topologies" holds for the engine but NOT for the console.
+#   • You cannot repoint a built console at another Supabase by editing .env and restarting.
+#   • Every customer needs their own build (compose does this for you; Helm does not — see
+#     README → "Not production-ready").
+# Both values are public by design (apps/web/.env.example: RLS is what protects the data, not
+# the secrecy of the anon key), so baking them leaks nothing. The problem is distribution, not
+# confidentiality.
+
+FROM node:22-slim AS build
+
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    PNPM_HOME=/usr/local/bin
+
+WORKDIR /src
+
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+
+# Manifests first so a dependency install is cached independently of source edits.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json ./apps/web/
+RUN pnpm install --frozen-lockfile --filter @vectasec/web...
+
+COPY apps/web ./apps/web
+
+ARG NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \
+    NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+# Fail here rather than at 3am. Next does not error on a missing NEXT_PUBLIC_*; it inlines
+# `undefined` and ships a console whose every Supabase call fails at runtime with no clue why.
+RUN test -n "$NEXT_PUBLIC_SUPABASE_URL"      || (echo "NEXT_PUBLIC_SUPABASE_URL build-arg is required" && exit 1); \
+    test -n "$NEXT_PUBLIC_SUPABASE_ANON_KEY" || (echo "NEXT_PUBLIC_SUPABASE_ANON_KEY build-arg is required" && exit 1)
+
+RUN pnpm --filter @vectasec/web build
+
+
+FROM node:22-slim AS runtime
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+
+# The whole tree, node_modules included, because apps/web/next.config.ts does not set
+# `output: 'standalone'`. Standalone would cut this image by roughly an order of magnitude and
+# drop pnpm + the toolchain from the runtime layer. Changing next.config.ts is outside this
+# directory's remit — it is filed in the README as known work, not pretended away.
+COPY --from=build /src /app
+
+RUN chown -R node:node /app
+USER node
+EXPOSE 3000
+STOPSIGNAL SIGTERM
+
+CMD ["pnpm", "--filter", "@vectasec/web", "start"]

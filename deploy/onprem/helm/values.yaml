@@ -1,0 +1,238 @@
+# VectaSec self-hosted — Helm values.
+#
+# Scope: the three VectaSec workloads (engine api, worker, web console). Postgres and the
+# Supabase components are NOT deployed by this chart — see Chart.yaml for why. Point
+# `supabase.url` and `database.url` at what you already run.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# ── The deployment's public identity ─────────────────────────────────────────
+# Must match the Ingress host and the URL baked into the web image (see `web.image` below).
+publicUrl: https://vectasec.example.com
+
+image:
+  registry: ""            # e.g. registry.internal/ — leave "" to use the repository as written
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ── Database ─────────────────────────────────────────────────────────────────
+database:
+  # The engine connects as a BYPASSRLS superuser and filters tenant_id itself in every
+  # statement. Treat this string as the most sensitive value in the release.
+  #
+  # Prefer existingSecret. `url` below writes the DSN into a chart-managed Secret, which means
+  # it lands in your values file and in `helm get values` output.
+  url: ""
+  existingSecret: ""       # must contain key DATABASE_URL
+  existingSecretKey: DATABASE_URL
+
+# ── Supabase (external to this chart) ────────────────────────────────────────
+supabase:
+  # Base URL of your Supabase (self-hosted or hosted). The console reads through PostgREST
+  # under RLS and subscribes to Realtime here.
+  url: ""
+  # Public by design — RLS protects the data, not this key's secrecy.
+  anonKey: ""
+
+# ── AI ───────────────────────────────────────────────────────────────────────
+ai:
+  # Leave empty for air-gapped / no-external-processing sites: the engine falls back to its
+  # deterministic rule-based triage. A key here means this cluster calls api.anthropic.com.
+  anthropicApiKey: ""
+  existingSecret: ""       # must contain key ANTHROPIC_API_KEY
+
+# ── Engine API ───────────────────────────────────────────────────────────────
+engine:
+  replicaCount: 2
+  image:
+    repository: vectasec/engine
+    tag: "0.0.1"
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  # Space-separated CIDRs is a compose/Caddy concept; in Kubernetes use the NetworkPolicy and
+  # the Ingress annotations below. Either way, read the security note in the README first:
+  # this API authenticates nobody and holds a BYPASSRLS connection.
+  corsOrigins: ""          # defaults to .Values.publicUrl when empty
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      # No CPU limit on purpose: CFS throttling on a scan loop turns a slow scan into a scan
+      # that times out against the customer's broker and reports a false "unreachable".
+      # Memory is capped because a runaway connector should be killed, not swap the node.
+      memory: 512Mi
+
+  # /health is a genuine endpoint (api/main.py) BUT it returns 200 even when the database is
+  # down — by design, so an operator can tell which half is broken. So: liveness only. Do NOT
+  # move readiness onto a check that cannot see the DB and then believe it means "ready".
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+# ── Worker ───────────────────────────────────────────────────────────────────
+worker:
+  # OFF, because there is nothing to run. Not a precaution — a fact about this repo:
+  #   • Nothing consumes the pgmq queue `vectasec_scans`. A queued scan stays queued forever.
+  #   • The collector polls /collector/enroll|heartbeat|jobs|results; the engine implements
+  #     none of them, so the pod CrashLoops on enroll.
+  # The templates are here so the shape is reviewable and the day those endpoints land this is
+  # a one-line change. Turning this on today buys you a CrashLoopBackOff.
+  enabled: false
+
+  replicaCount: 1
+  image:
+    repository: vectasec/collector
+    tag: "0.0.1"
+
+  # Enrollment token for the collector. Must exist before enabling.
+  enrollToken: ""
+  existingSecret: ""       # must contain key VECTASEC_ENROLL_TOKEN
+
+  # Targets the collector scans — the engine's connector config, one entry per system.
+  targets: []
+  # - type: kafka
+  #   name: prod-msk
+  #   config:
+  #     bootstrap: b-1.msk.internal:9092
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+# ── Web console ──────────────────────────────────────────────────────────────
+web:
+  replicaCount: 2
+  image:
+    # NOT a universal artifact. Next.js inlines NEXT_PUBLIC_SUPABASE_URL and
+    # NEXT_PUBLIC_SUPABASE_ANON_KEY into the browser bundle AT BUILD TIME, so this tag encodes
+    # one hostname and one anon key. `supabase.url`/`supabase.anonKey` above CANNOT repoint a
+    # built image — they are passed to the server runtime only.
+    #
+    # You must build and push your own:
+    #   docker build -f deploy/onprem/Dockerfile.web \
+    #     --build-arg NEXT_PUBLIC_SUPABASE_URL=https://vectasec.example.com \
+    #     --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ... \
+    #     -t registry.internal/vectasec/web:0.1.0-example-com .
+    repository: vectasec/web
+    tag: "0.1.0"
+
+  service:
+    type: ClusterIP
+    port: 3000
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      # Next's server is the memory hog in this chart; the image is not `output: standalone`
+      # yet so it carries the full node_modules tree.
+      memory: 1Gi
+
+  # `/` and not `/health`: the console has no health route. A 307 to /login counts as success
+  # (kubelet treats 2xx-3xx as pass), which proves Next is serving and nothing more.
+  livenessProbe:
+    httpGet:
+      path: /
+      port: http
+    initialDelaySeconds: 20
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    httpGet:
+      path: /
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  podAnnotations: {}
+
+# ── Ingress ──────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+    # The engine API authenticates nobody (README → security). Until JWT verification lands,
+    # restrict it at the edge. With ingress-nginx:
+    #   nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8,192.168.0.0/16"
+
+  host: vectasec.example.com
+
+  tls:
+    enabled: true
+    secretName: vectasec-tls
+
+  # Supabase (/rest/v1, /auth/v1, /realtime/v1) is NOT routed here — this chart does not deploy
+  # it. If your Supabase lives behind the same hostname, add those paths to your own Ingress or
+  # set supabase.url to wherever it actually is.
+  paths:
+    engine: /api
+    web: /
+
+# ── Pod security ─────────────────────────────────────────────────────────────
+# Applied to every workload. The images already run as uid 10001 (engine/collector) and node
+# (web); this is the enforcement that says so to the cluster.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  privileged: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ── NetworkPolicy ────────────────────────────────────────────────────────────
+networkPolicy:
+  # Off by default: egress rules that are wrong break scanning in a way that looks like the
+  # customer's broker is down, and this chart cannot know your CIDRs. Turning it on is
+  # recommended — the engine must reach Postgres and the systems it scans, and nothing else.
+  enabled: false
+  ingressFrom: []
+  egressTo: []

@@ -1,0 +1,46 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/* Opt-in, because a wrong egress rule here does not look like a wrong egress rule — it looks
+     like the customer's broker is down, and the scan reports it as unreachable. The chart
+     cannot guess your Postgres and target CIDRs, so it makes you state them. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "vectasec.fullname" . }}-engine
+  labels:
+    {{- include "vectasec.labels" . | nindent 4 }}
+    app.kubernetes.io/component: engine
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "vectasec.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: engine
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        {{- with .Values.networkPolicy.ingressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: 8000
+          protocol: TCP
+  egress:
+    # DNS first — omit it and every connector fails to resolve, which surfaces as a scan error
+    # against the target rather than as a policy problem.
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- with .Values.networkPolicy.egressTo }}
+    # Postgres + every system this engine scans. Everything else stays denied — including
+    # api.anthropic.com, which is the point on a no-external-processing site.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

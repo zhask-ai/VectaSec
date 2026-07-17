@@ -1,0 +1,283 @@
+/* VectaSec console design tokens.
+ *
+ * Dark-first: security consoles are read in dark rooms across long shifts.
+ * Every colour pair here is verified by `pnpm contrast` (scripts/contrast-check.mjs),
+ * which parses THIS FILE — so these hexes are the single source of truth, not a copy of
+ * the research tables. Two real failures were found by computing rather than eyeballing
+ * (see --text-muted note below, and light muted at 4.46:1), which is why the check is wired
+ * into CI instead of trusted to review.
+ *
+ * Provenance: docs/research/console-ux.md §7. Ratios are WCAG 2.2:
+ *   text 4.5:1 (SC 1.4.3) · non-text/UI 3:1 (SC 1.4.11) · never colour alone (SC 1.4.1, Level A).
+ */
+
+/* ── Dark (default) ─────────────────────────────────────────────────────── */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces — cool near-black with a blue cast; reads "technical", avoids muddy neutral grey.
+   * Elevation in dark is a LIGHTER SURFACE, not a shadow: shadows are invisible on #0B0E14. */
+  --bg: #0b0e14;
+  --surface: #12161f;
+  --surface-raised: #1a1f2b;
+
+  /* Borders. --border and --border-strong are 1.38:1 / 1.95:1 and FAIL SC 1.4.11's 3:1.
+   * That is fine — they are decorative separators (table dividers, card edges), not controls.
+   * Anything that is the SOLE visual indicator of a control (input outline, unchecked
+   * checkbox, secondary-button border) MUST use --border-interactive. Most-missed a11y bug
+   * in dark design systems; enforce it in review. */
+  --border: #262c3a;
+  --border-strong: #3a4356;
+  --border-interactive: #616d85;
+
+  --text-primary: #e6eaf2;
+  --text-secondary: #a3aec2;
+  /* ⚠ 4.37:1 on --surface-raised — BELOW 4.5. Never use muted text inside popovers or
+   * hover rows; use --text-secondary there. Kept named so the trap stays visible. */
+  --text-muted: #78849a;
+
+  /* Severity — split into fg / solid / badge because one hex per severity cannot satisfy
+   * both text (4.5:1) and fill (3:1) roles. `fg` = text/icons. `solid` = fills, bars, graph
+   * nodes (non-text). `badge-bg` = soft tint behind `fg`. */
+  --sev-critical-fg: #ff8a8a;
+  --sev-high-fg: #ffa766;
+  --sev-medium-fg: #f2cc60;
+  --sev-low-fg: #6fb6ff;
+  --sev-info-fg: #a3aec2;
+
+  --sev-critical-solid: #e5484d;
+  --sev-high-solid: #f76b15;
+  --sev-medium-solid: #ffc53d;
+  --sev-low-solid: #3b9eff;
+  --sev-info-solid: #78849a;
+
+  --sev-critical-bg: #2e1116;
+  --sev-high-bg: #2b1808;
+  --sev-medium-bg: #2a2208;
+  --sev-low-bg: #0e1f33;
+  --sev-info-bg: #1c212b;
+
+  /* The one brand-blue fill: primary buttons. `fg` is the text ON it, so the pair is checked
+   * as text (4.5:1), not as a fill. Defined here because it was previously only ever written
+   * as `var(--accent, #4C8DFF)` in a .tsx — a var() fallback for a token that does not exist
+   * is a hardcoded colour wearing a token's clothes: it never re-themes, and `pnpm contrast`
+   * (which parses this file) cannot see it. */
+  --accent: #4c8dff;
+  --accent-fg: #0b0e14;
+
+  --focus-ring: #6fb6ff;
+  --shadow-popover: 0 8px 24px rgb(0 0 0 / 0.5);
+}
+
+/* ── Light (first-class second) ─────────────────────────────────────────── */
+/* Elevation in light is border + shadow, not a lighter surface — the inverse of dark. */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f6f8fb;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+
+  --border: #e2e6ed;
+  --border-strong: #c6cdd8;
+  --border-interactive: #767f8f;
+
+  --text-primary: #0f1420;
+  --text-secondary: #475069;
+  /* The obvious grey #69738B computes 4.46:1 on --bg — a hair under. Darkened to pass.
+   * A 0.04 miss is invisible to the eye and fatal to an audit. */
+  --text-muted: #626c83;
+
+  --sev-critical-fg: #c3252a;
+  --sev-high-fg: #a24a00;
+  /* A dark olive, not a yellow: yellow cannot reach 4.5:1 on white. Expected and correct —
+   * the icon and label carry severity, the hue only supports it. */
+  --sev-medium-fg: #7a5a00;
+  --sev-low-fg: #0b5bb5;
+  --sev-info-fg: #4a5568;
+
+  --sev-critical-solid: #c3252a;
+  --sev-high-solid: #a24a00;
+  --sev-medium-solid: #7a5a00;
+  --sev-low-solid: #0b5bb5;
+  --sev-info-solid: #4a5568;
+
+  --sev-critical-bg: #fdecec;
+  --sev-high-bg: #fdf0e3;
+  --sev-medium-bg: #fbf3d9;
+  --sev-low-bg: #e7f1fd;
+  --sev-info-bg: #eff1f5;
+
+  /* Inverted against dark: on white the fill has to go dark and the label light, or the pair
+   * cannot reach 4.5:1. Same token names, so no component has to know which theme it is in. */
+  --accent: #0b5bb5;
+  --accent-fg: #ffffff;
+
+  --focus-ring: #0b5bb5;
+  --shadow-popover: 0 8px 24px rgb(15 20 32 / 0.12);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    color-scheme: light;
+
+    --bg: #f6f8fb;
+    --surface: #ffffff;
+    --surface-raised: #ffffff;
+
+    --border: #e2e6ed;
+    --border-strong: #c6cdd8;
+    --border-interactive: #767f8f;
+
+    --text-primary: #0f1420;
+    --text-secondary: #475069;
+    --text-muted: #626c83;
+
+    --sev-critical-fg: #c3252a;
+    --sev-high-fg: #a24a00;
+    --sev-medium-fg: #7a5a00;
+    --sev-low-fg: #0b5bb5;
+    --sev-info-fg: #4a5568;
+
+    --sev-critical-solid: #c3252a;
+    --sev-high-solid: #a24a00;
+    --sev-medium-solid: #7a5a00;
+    --sev-low-solid: #0b5bb5;
+    --sev-info-solid: #4a5568;
+
+    --sev-critical-bg: #fdecec;
+    --sev-high-bg: #fdf0e3;
+    --sev-medium-bg: #fbf3d9;
+    --sev-low-bg: #e7f1fd;
+    --sev-info-bg: #eff1f5;
+
+    --accent: #0b5bb5;
+    --accent-fg: #ffffff;
+
+    --focus-ring: #0b5bb5;
+    --shadow-popover: 0 8px 24px rgb(15 20 32 / 0.12);
+  }
+}
+
+/* ── Non-colour tokens (theme-invariant) ────────────────────────────────── */
+:root {
+  /* Type scale. Every size is below the 24px "large text" threshold, so ALL of it must
+   * clear 4.5:1. 11px is a hard floor and only for de-emphasised meta — never for a value
+   * someone must act on. Shrink padding to gain density, never type. */
+  --text-2xs: 0.6875rem;  /* 11px — table meta, timestamps */
+  --text-xs: 0.75rem;     /* 12px — table body, the workhorse */
+  --text-sm: 0.8125rem;   /* 13px — body, labels */
+  --text-base: 0.875rem;  /* 14px — default UI */
+  --text-lg: 1rem;        /* 16px — panel titles */
+  --text-xl: 1.25rem;     /* 20px — page titles */
+  --text-2xl: 1.5rem;     /* 24px — metrics */
+  --text-3xl: 2rem;       /* 32px — landing headline number */
+
+  --leading-2xs: 1rem;
+  --leading-xs: 1rem;
+  --leading-sm: 1.25rem;
+  --leading-base: 1.25rem;
+  --leading-lg: 1.5rem;
+  --leading-xl: 1.75rem;
+  --leading-2xl: 2rem;
+  --leading-3xl: 2.5rem;
+
+  /* Evidence in a proportional font does not read as evidence. Mono is mandatory for
+   * config, IDs, fingerprints, and observation claims. */
+  --font-ui: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* 4px base — dense UI needs the 4/8/12 rungs; scales starting at 8 force cramping or bloat. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* Deliberately tighter than general-SaaS 40/48/56: a findings queue is a log viewer,
+   * analysts want 200 rows on screen. Skeleton rows MUST match these exactly or the page
+   * jumps (CLS). */
+  --row-compact: 32px;
+  --row-default: 40px;
+  --row-relaxed: 48px;
+
+  /* Small radii. Rounded corners read "consumer"; security tooling reads sharper. */
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+  --radius-full: 9999px;
+
+  --sidebar-width: 216px;
+  --topbar-height: 48px;
+}
+
+/* ── Base ───────────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: var(--leading-base);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers must be comparable at a glance: $1,111.11 should not optically shrink next to
+ * $999.99. Applies to counts, ports, CVSS, timestamps, fingerprints. */
+table,
+[data-numeric] {
+  font-variant-numeric: tabular-nums;
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--font-mono);
+}
+
+a {
+  color: inherit;
+}
+
+/* Never remove the focus ring. 2px ring + 2px offset, ≥3:1 on all three surfaces. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.vs-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

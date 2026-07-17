@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vectasec.fullname" . }}-engine
+  labels:
+    {{- include "vectasec.labels" . | nindent 4 }}
+    app.kubernetes.io/component: engine
+spec:
+  replicas: {{ .Values.engine.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vectasec.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: engine
+  template:
+    metadata:
+      labels:
+        {{- include "vectasec.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: engine
+      annotations:
+        # Roll the pods when config changes. Without this a `helm upgrade` that only edits the
+        # ConfigMap leaves every pod running the previous values and reports success.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.engine.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "vectasec.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        # Matches the uid created in Dockerfile.engine. Set here too so the cluster rejects an
+        # image that was rebuilt as root rather than silently running it.
+        runAsUser: 10001
+        runAsGroup: 10001
+      containers:
+        - name: engine
+          image: {{ include "vectasec.image" (dict "root" . "img" .Values.engine.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "vectasec.fullname" . }}
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "vectasec.databaseSecretName" . }}
+                  key: {{ include "vectasec.databaseSecretKey" . }}
+            {{- if or .Values.ai.existingSecret .Values.ai.anthropicApiKey }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.ai.existingSecret | default (include "vectasec.fullname" .) }}
+                  key: ANTHROPIC_API_KEY
+                  # Optional: an absent key means the engine runs its deterministic rule-based
+                  # triage, which is the correct default for a no-external-processing site.
+                  optional: true
+            {{- end }}
+          livenessProbe:
+            {{- toYaml .Values.engine.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.engine.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.engine.resources | nindent 12 }}
+          volumeMounts:
+            # readOnlyRootFilesystem is on, so anything that writes needs an explicit mount.
+            # PYTHONDONTWRITEBYTECODE is set in the image, but httpx/uvicorn still want a tmp.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.engine.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.engine.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.engine.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,16 @@
+# Ignore rules for Dockerfile.engine. BuildKit reads `<dockerfile>.dockerignore` in preference
+# to the context's .dockerignore, which is what lets deploy/onprem own its build inputs while
+# building from the repo root.
+#
+# Default-deny: everything is excluded, then services/engine is added back. An allowlist because
+# the repo root holds .env, apps/web/node_modules and a 200MB collector .venv — a denylist here
+# would eventually miss one of those and bake a secret into a layer.
+*
+
+!services/engine
+
+services/engine/**/.venv
+services/engine/**/__pycache__
+services/engine/**/*.pyc
+services/engine/.pytest_cache
+services/engine/tests

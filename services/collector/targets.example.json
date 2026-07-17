@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "Mount this at /etc/vectasec/targets.json (or set VECTASEC_TARGETS_FILE).",
+    "Credentials are ${ENV_VAR} references, never literals — so this file holds no secrets and",
+    "can live in git or a ConfigMap while the credential arrives from a Secret at runtime.",
+    "`name` is what a scan job addresses, it must be unique, and it is the only part of this",
+    "file the control plane ever sees. Run `vectasec-collector check` to see exactly what that is."
+  ],
+  "targets": [
+    {
+      "name": "prod-kafka",
+      "type": "kafka",
+      "config": {
+        "bootstrap": "kafka-1.internal:9092,kafka-2.internal:9092",
+        "timeout": 15
+      }
+    },
+    {
+      "name": "prod-kong",
+      "type": "kong",
+      "config": {
+        "url": "http://kong.internal:8001",
+        "admin_token": "${KONG_ADMIN_TOKEN}",
+        "verify": true,
+        "timeout": 10
+      }
+    },
+    {
+      "name": "prod-rabbit",
+      "type": "rabbitmq",
+      "config": {
+        "url": "https://rabbit.internal:15672",
+        "username": "vectasec-ro",
+        "password": "${RABBIT_PASSWORD}",
+        "verify_tls": true
+      }
+    },
+    {
+      "name": "internal-mcp",
+      "type": "mcp",
+      "config": {
+        "url": "https://mcp.internal/mcp",
+        "token": "${MCP_TOKEN}",
+        "source_zone": "internal"
+      }
+    }
+  ]
+}

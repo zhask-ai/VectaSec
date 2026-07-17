@@ -1,0 +1,35 @@
+[project]
+name = "vectasec-collector"
+version = "0.0.1"
+description = "VectaSec collector — customer-side, outbound-only; credentials never leave the network"
+# Mirrors the engine's floor AND its ceiling: the engine pins <3.13, so a bare >=3.12 here would
+# fail resolution rather than widen support.
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "httpx>=0.27",              # the only outbound client; no server framework by design
+  "vectasec-engine",          # by path (below) — same connectors + detectors as the cloud path
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+]
+
+# One codebase, two topologies. The collector does not fork or vendor the engine's connectors and
+# detectors — it imports them, so a rule authored once behaves identically whether it runs in our
+# cloud or in the customer's VPC.
+[tool.uv.sources]
+vectasec-engine = { path = "../engine", editable = true }
+
+[project.scripts]
+vectasec-collector = "collector.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/collector"]
+
+[tool.hatch.metadata]
+allow-direct-references = true

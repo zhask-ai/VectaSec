@@ -1,0 +1,53 @@
+{{- if .Values.ingress.enabled }}
+{{/* /api is declared BEFORE / because ingress-nginx and most controllers match the longest
+     prefix, but the ordering also documents intent for controllers that do not. */}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "vectasec.fullname" . }}
+  labels:
+    {{- include "vectasec.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # The engine API. It authenticates NOBODY — it reads the tenant from a request header
+          # and trusts it (api/main.py `principal()`), while holding a BYPASSRLS connection.
+          # Publishing this path is publishing cross-tenant read/write to whoever reaches it.
+          # Restrict it at the controller until JWT verification lands; with ingress-nginx:
+          #   nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8"
+          #
+          # NOTE: the engine serves /scans, /findings/... — not /api/scans. This path needs the
+          # controller to strip the prefix, which is NOT portable across controllers and is why
+          # it is not baked in here. ingress-nginx:
+          #   nginx.ingress.kubernetes.io/rewrite-target: /$2
+          # and set paths.engine to /api(/|$)(.*) with pathType ImplementationSpecific.
+          - path: {{ .Values.ingress.paths.engine }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "vectasec.fullname" . }}-engine
+                port:
+                  number: {{ .Values.engine.service.port }}
+          - path: {{ .Values.ingress.paths.web }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "vectasec.fullname" . }}-web
+                port:
+                  number: {{ .Values.web.service.port }}
+{{- end }}

@@ -1,0 +1,119 @@
+{{/* Disabled by default (worker.enabled=false) and that default is load-bearing.
+
+     There is no worker in this repo yet:
+       • Nothing consumes the pgmq queue `vectasec_scans`; POST /scans without inline:true
+         leaves a scan 'queued' forever. api/main.py says so in its own comment.
+       • The collector — the only job-runner that exists — polls /collector/enroll,
+         /collector/heartbeat, /collector/jobs and /collector/results. The engine implements
+         none of the four, so this pod 404s on enroll and CrashLoops.
+
+     This template is the shape, reviewable now, correct the day those endpoints land. It is
+     not a working component and enabling it will not make it one. */}}
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vectasec.fullname" . }}-worker
+  labels:
+    {{- include "vectasec.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vectasec.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "vectasec.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "vectasec.serviceAccountName" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        runAsUser: 10001
+        runAsGroup: 10001
+        # The collector image declares VOLUME /var/lib/vectasec at mode 0700 owned by 10001.
+        # fsGroup so the mounted emptyDir below is writable by that uid.
+        fsGroup: 10001
+      containers:
+        - name: worker
+          image: {{ include "vectasec.image" (dict "root" . "img" .Values.worker.image) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # No ports. The collector never binds: it is outbound-only by design, which is what
+          # lets a customer deny every ingress rule to it.
+          env:
+            - name: VECTASEC_CONTROL_PLANE_URL
+              value: http://{{ include "vectasec.fullname" . }}-engine:{{ .Values.engine.service.port }}
+            # In-cluster plain http to a ClusterIP. The collector refuses non-https without
+            # this flag — correct for its normal job (crossing the internet from a customer
+            # VPC), unnecessary when it is a Service away from the engine it enrolls with.
+            - name: VECTASEC_ALLOW_INSECURE_CONTROL_PLANE
+              value: "1"
+            - name: VECTASEC_ENROLL_TOKEN_FILE
+              value: /run/secrets/vectasec/VECTASEC_ENROLL_TOKEN
+            - name: VECTASEC_TARGETS_FILE
+              value: /etc/vectasec/targets.json
+            - name: VECTASEC_STATE_DIR
+              value: /var/lib/vectasec
+            - name: VECTASEC_COLLECTOR_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          # No probes. The collector exposes no HTTP surface to probe, and an exec probe would
+          # need a shell — which its Dockerfile deletes on purpose. Liveness here is the
+          # process exiting; the restartPolicy covers it. Inventing a probe that always passes
+          # would be worse than having none.
+          volumeMounts:
+            - name: enroll-token
+              mountPath: /run/secrets/vectasec
+              readOnly: true
+            {{- if .Values.worker.targets }}
+            - name: targets
+              mountPath: /etc/vectasec
+              readOnly: true
+            {{- end }}
+            - name: state
+              mountPath: /var/lib/vectasec
+      volumes:
+        - name: enroll-token
+          secret:
+            secretName: {{ .Values.worker.existingSecret | default (printf "%s-worker" (include "vectasec.fullname" .)) }}
+            defaultMode: 0400
+        {{- if .Values.worker.targets }}
+        - name: targets
+          configMap:
+            name: {{ include "vectasec.fullname" . }}-worker-targets
+        {{- end }}
+        - name: state
+          # emptyDir, not a PVC: the state dir holds sha256(enrollment token) and a collector
+          # id — never a usable credential (see the collector Dockerfile). Losing it on
+          # reschedule costs a re-enrollment, not data.
+          emptyDir: {}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

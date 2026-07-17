@@ -1,0 +1,744 @@
+# VectaSec CI.
+#
+# Four gates, in ascending order of what they would let through if they were missing:
+#
+#   engine              — the rulepack's offline unit tests (fast, runs on every push).
+#   web                 — the console typechecks and builds.
+#   detectors-live      — the connector + rulepack against a REAL, deliberately broken Kafka.
+#                         The offline fixtures can only prove we agree with ourselves; this
+#                         proves we still agree with Apache Kafka.
+#   rls-cross-tenant    — adversarial cross-tenant queries against the real migrations.
+#                         NON-NEGOTIABLE per the build plan. VectaSec stores other people's
+#                         security posture: a tenant-isolation regression is not a bug, it is
+#                         the end of the company. It is the one thing no reviewer can eyeball.
+#
+# `ci` at the bottom is the single aggregate check to mark required in branch protection —
+# it fails if ANY job above fails, so a new job cannot be forgotten in the branch settings.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ══════════════════════════════════════════════════════════════════════
+  engine:
+    name: engine · lint + unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: lint
+        working-directory: services/engine
+        # Deliberately the "this code cannot run" subset (syntax errors, undefined names,
+        # broken f-strings), NOT ruff's full default set. The repo does not have a formatter
+        # baseline yet, and ruff's defaults currently flag ~15 pre-existing style nits in the
+        # test suites. A lint gate that is red on arrival gets ignored, and then it catches
+        # nothing at all. Widen this the day the baseline is clean — the value here is
+        # catching an undefined name in a detector, because scan.py swallows detector
+        # exceptions into stats['detector_errors'] and a NameError would silently disable a
+        # rule in production rather than crash.
+        run: uvx ruff check --select E9,F63,F7,F82 .
+
+      - name: engine unit tests
+        working-directory: services/engine
+        run: uv run --with pytest pytest -q
+
+      - name: collector unit tests
+        working-directory: services/collector
+        run: uv run --with pytest pytest -q
+
+  # ══════════════════════════════════════════════════════════════════════
+  web:
+    name: web · typecheck + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No version pin: root package.json declares packageManager: pnpm@9.12.0 and
+      # action-setup honours it, so CI cannot drift from local.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      # Install at the workspace root — apps/web is a pnpm workspace member, not a
+      # standalone package.
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      # `next lint` is gone in Next 16 and there is no eslint config in the repo, so tsc is
+      # the console's real static gate. It is not a formality: every page reads findings out
+      # of Supabase, and lib/types.ts is what keeps those row shapes honest.
+      - name: typecheck
+        working-directory: apps/web
+        run: pnpm typecheck
+
+      - name: build
+        working-directory: apps/web
+        env:
+          # next build prerenders the server components, which construct a Supabase client at
+          # module scope; lib/supabase/server.ts throws on a missing var. Placeholders are
+          # enough — nothing is contacted during a build. Note these two are public by design
+          # anyway (NEXT_PUBLIC_* is inlined into the browser bundle); RLS is what protects
+          # the data, which is exactly what the rls-cross-tenant job below proves.
+          NEXT_PUBLIC_SUPABASE_URL: https://ci.placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+        run: pnpm build
+
+  # ══════════════════════════════════════════════════════════════════════
+  detectors-live:
+    name: detectors · live dev Kafka
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: start the deliberately-misconfigured dev Kafka
+        run: docker compose -f deploy/dev/docker-compose.yml up -d --wait
+
+      - name: wait for topic-seed to finish
+        # `up --wait` returns once kafka reports healthy, which does not mean topic-seed has
+        # created the topics yet. Racing it would make the topic assertions flaky.
+        run: |
+          code="$(docker wait vectasec-dev-topic-seed)"
+          docker logs vectasec-dev-topic-seed
+          [ "$code" = "0" ] || { echo "topic-seed failed (exit $code)"; exit 1; }
+
+      - name: run the connector + rulepack against it
+        working-directory: services/engine
+        run: |
+          uv run python - <<'PY'
+          """Run the real connector + rulepack against the dev broker. No DB.
+
+          The offline fixture proves the detectors agree with a snapshot we captured. This
+          proves the CONNECTOR still speaks the Admin protocol correctly and that the values
+          it hands the detectors are the ones a real Apache Kafka actually returns — the half
+          a fixture can never test, and the half that breaks on a broker upgrade.
+          """
+          import sys
+
+          from vectasec.contracts import ScanContext
+          from vectasec.registry import CONNECTORS, DETECTORS
+          import vectasec.connect  # noqa: F401  — registers connectors
+          import vectasec.detect   # noqa: F401  — registers detectors
+
+          BOOTSTRAP = "localhost:9092"
+
+          # The EXACT rule set the dev broker must produce — asserted whole, in the house
+          # style of tests/test_detect_kafka.py: an extra finding is as much a bug as a
+          # missing one.
+          #
+          # deploy/dev/docker-compose.yml annotates SIX misconfigurations, but only these
+          # four may fire against the live single-node cluster. The other two are annotated
+          # aspirationally, and the detectors are RIGHT to stay silent — asserting them would
+          # mean asserting a false claim:
+          #
+          #   • KAFKA.AUTHZ.ALLOW_EVERYONE_IF_NO_ACL — allow.everyone.if.no.acl.found=true is
+          #     set, but with no authorizer loaded the setting is inert. Same reasoning as
+          #     test_fixture_allow_everyone_is_silent_because_there_is_no_authorizer.
+          #   • KAFKA.DURABILITY.UNCLEAN_LEADER_ELECTION and MIN_INSYNC_REPLICAS_ONE —
+          #     topic-seed creates every topic with --replication-factor 1, and with a single
+          #     replica there is no out-of-sync replica to promote, so no committed record can
+          #     be lost. The offline fixture DOES fire the unclean-election rule, but only
+          #     because it records topic names without partition data, leaving replication
+          #     factor unknown rather than known-to-be-1. Both are correct; they just see
+          #     different evidence.
+          EXPECTED = {
+              "KAFKA.LISTENER.PLAINTEXT",       # INTERNAL://:29092 + EXTERNAL://:9092 = 2 hits
+              "KAFKA.INTERBROKER.PLAINTEXT",
+              "KAFKA.AUTHZ.NO_AUTHORIZER",
+              "KAFKA.TOPIC.AUTO_CREATE_ENABLED",
+          }
+          EXPECTED_HITS = 5
+          SEEDED_TOPICS = {"payments", "customer-pii", "orders", "audit-events",
+                           "internal-metrics"}
+
+
+          def main() -> int:
+              collected = CONNECTORS["kafka"]({"bootstrap": BOOTSTRAP})
+              ctx = ScanContext(connection_id="ci", tenant_id="ci",
+                                resources=collected.resources)
+
+              kinds: dict = {}
+              for r in collected.resources:
+                  kinds[r.kind] = kinds.get(r.kind, 0) + 1
+              print(f"collected {len(collected.resources)} resources: {kinds}")
+
+              fired: dict = {}
+              errors: list = []
+              for d in DETECTORS:
+                  for r in collected.resources:
+                      if r.kind not in d.kinds:
+                          continue
+                      try:
+                          hits = d.fn(r, ctx) or []
+                      except Exception as e:
+                          # run_scan() swallows detector exceptions into
+                          # stats['detector_errors'] so one broken rule cannot void a scan.
+                          # Right in production, wrong here: in CI a crashing detector must
+                          # fail the build, not disappear into a stats field.
+                          errors.append(f"{d.rule_id} on {r.ext_id}: {type(e).__name__}: {e}")
+                          continue
+                      for h in hits:
+                          fired.setdefault(d.rule_id, []).append(
+                              (r.ext_id, h.severity or d.severity, h))
+
+              for rule in sorted(fired):
+                  for ext_id, sev, h in fired[rule]:
+                      print(f"  {sev:<8} {rule:<42} {ext_id:<12} {h.observation[:90]}")
+
+              ok = True
+              if errors:
+                  ok = False
+                  print("\nFAIL: detectors raised against a real broker:")
+                  for e in errors:
+                      print(f"  {e}")
+
+              if set(fired) != EXPECTED:
+                  ok = False
+                  print(f"\nFAIL: the rule set changed against the live broker."
+                        f"\n  missing:    {sorted(EXPECTED - set(fired))}"
+                        f"\n  unexpected: {sorted(set(fired) - EXPECTED)}")
+
+              n_hits = sum(len(v) for v in fired.values())
+              if n_hits != EXPECTED_HITS:
+                  ok = False
+                  print(f"\nFAIL: expected {EXPECTED_HITS} hits, got {n_hits} "
+                        f"(LISTENER.PLAINTEXT fires once per client listener)")
+
+              topics = {r.name for r in collected.resources if r.kind == "topic"}
+              if not SEEDED_TOPICS <= topics:
+                  ok = False
+                  print(f"\nFAIL: topics missing: {sorted(SEEDED_TOPICS - topics)}")
+
+              if not any(r.kind == "broker" for r in collected.resources):
+                  ok = False
+                  print("\nFAIL: no broker resource collected")
+
+              # The evidence contract, checked against real values: whatever the ledger is
+              # about to store must carry a fact, a fix, and its provenance.
+              for rule, hits in fired.items():
+                  for _ext, _sev, h in hits:
+                      if not (h.observation or "").strip():
+                          ok = False
+                          print(f"\nFAIL: {rule} hit has an empty observation")
+                      if not (h.remediation or "").strip():
+                          ok = False
+                          print(f"\nFAIL: {rule} hit has no remediation")
+                      if not h.source_ref:
+                          ok = False
+                          print(f"\nFAIL: {rule} hit has no source_ref (no provenance)")
+
+              print(f"\n{len(fired)} rules fired, {n_hits} hits")
+              print("OK" if ok else "FAILED")
+              return 0 if ok else 1
+
+
+          sys.exit(main())
+          PY
+
+      - name: broker logs
+        if: failure()
+        run: docker compose -f deploy/dev/docker-compose.yml logs --tail=200
+
+      - name: tear down
+        if: always()
+        run: docker compose -f deploy/dev/docker-compose.yml down -v
+
+  # ══════════════════════════════════════════════════════════════════════
+  # THE CROSS-TENANT RLS TEST. Required — see the header.
+  rls-cross-tenant:
+    name: cross-tenant RLS (required)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── The shim ────────────────────────────────────────────────────
+      # The migrations DO run against plain postgres, but not quite unmodified. Two things
+      # are missing from a stock image, and this step supplies the one that matters:
+      #
+      #   1. Supabase's `auth` schema and auth.uid(), which app_tenant_ids() calls — and
+      #      which every RLS policy resolves through. Without it migration 001 fails at
+      #      CREATE FUNCTION time. The shim below reimplements auth.uid() against the SAME
+      #      GUC the real one reads (`request.jwt.claim.sub`, which PostgREST sets per
+      #      request from the JWT), so the policies exercised here are byte-for-byte the
+      #      production policies, resolving a real user id through the real helper. Only the
+      #      JWT parsing is stubbed; the authorisation logic under test is untouched.
+      #   2. The `anon` / `authenticated` / `service_role` roles Supabase preprovisions.
+      #
+      # The other divergence is handled in the next step: `create extension pgmq/pg_cron`.
+      # Those are Supabase-managed and absent here. Nothing in the RLS surface depends on
+      # either — the queue is created inside a `do $$ ... exception when others then null $$`
+      # block that swallows its own absence — so the two lines are stripped and everything
+      # else (every table, every policy, both integrity triggers, app_tenant_ids()) is
+      # applied verbatim.
+      - name: Supabase shim (auth.uid + roles)
+        run: |
+          psql -v ON_ERROR_STOP=1 -q <<'SQL'
+          create role anon nologin;
+          create role authenticated nologin;
+          create role service_role nologin bypassrls;
+          grant anon, authenticated, service_role to postgres;   -- lets the test SET ROLE
+
+          create schema if not exists auth;
+          grant usage on schema auth to anon, authenticated, service_role;
+
+          -- The real auth.uid() reads the `sub` claim of the request JWT, which PostgREST
+          -- publishes as this GUC before every statement. Same GUC, same contract, no GoTrue.
+          create or replace function auth.uid() returns uuid
+          language sql stable
+          as $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
+          SQL
+
+      - name: apply the migrations
+        run: |
+          for f in supabase/migrations/*.sql; do
+            echo "── $(basename "$f")"
+            sed -E 's/^create extension if not exists (pgmq|pg_cron);/-- [ci] stripped: \1 is Supabase-managed and absent from stock postgres; nothing in the RLS surface depends on it./' "$f" \
+              | psql -v ON_ERROR_STOP=1 -q
+          done
+
+      - name: seed two tenants
+        run: |
+          psql -v ON_ERROR_STOP=1 -q <<'SQL'
+          -- Supabase grants `authenticated` FULL table privileges on public by default; RLS,
+          -- not the GRANT, is what confines a tenant. Reproduce that faithfully or this job
+          -- proves nothing: with SELECT-only grants the write probes below would fail on
+          -- privilege and pass for entirely the wrong reason. `anon` gets the same grants,
+          -- so its zero-row result proves the policies' `to authenticated` clause is the
+          -- gate rather than a missing permission.
+          grant usage on schema public to anon, authenticated;
+          grant all on all tables in schema public to anon, authenticated;
+          grant all on all sequences in schema public to anon, authenticated;
+
+          create or replace function ci_assert(cond boolean, msg text) returns void
+          language plpgsql as $$
+          begin
+            if cond is not true then raise exception 'RLS ASSERTION FAILED: %', msg; end if;
+          end $$;
+
+          begin;
+          insert into tenants (id, name) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Tenant A'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'Tenant B');
+
+          insert into tenant_members (tenant_id, user_id, role) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '11111111-1111-1111-1111-111111111111', 'admin'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '22222222-2222-2222-2222-222222222222', 'admin');
+
+          insert into connections (id, tenant_id, type, name) values
+            ('c1111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'kafka', 'a-kafka'),
+            ('c2222222-2222-2222-2222-222222222222', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'kafka', 'b-kafka');
+
+          insert into resources (id, tenant_id, connection_id, kind, name, ext_id) values
+            ('d1111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'c1111111-1111-1111-1111-111111111111', 'broker', 'broker-1', 'broker-1'),
+            ('d2222222-2222-2222-2222-222222222222', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'c2222222-2222-2222-2222-222222222222', 'broker', 'broker-1', 'broker-1');
+
+          insert into edges (tenant_id, src_resource_id, dst_resource_id, kind) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'd1111111-1111-1111-1111-111111111111', 'd1111111-1111-1111-1111-111111111111', 'self'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'd2222222-2222-2222-2222-222222222222', 'd2222222-2222-2222-2222-222222222222', 'self');
+
+          insert into scans (id, tenant_id, connection_id, status) values
+            ('e1111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'c1111111-1111-1111-1111-111111111111', 'done'),
+            ('e2222222-2222-2222-2222-222222222222', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'c2222222-2222-2222-2222-222222222222', 'done');
+
+          insert into findings (id, tenant_id, scan_id, resource_id, rule_id, fingerprint, title, severity) values
+            ('f1111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'e1111111-1111-1111-1111-111111111111', 'd1111111-1111-1111-1111-111111111111', 'KAFKA.LISTENER.PLAINTEXT', 'fp-a', 'A PLAINTEXT', 'critical'),
+            ('f2222222-2222-2222-2222-222222222222', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'e2222222-2222-2222-2222-222222222222', 'd2222222-2222-2222-2222-222222222222', 'KAFKA.LISTENER.PLAINTEXT', 'fp-b', 'B PLAINTEXT', 'critical');
+
+          -- The claim text is tagged per tenant so a leak is unmistakable in the failure.
+          insert into observations (id, tenant_id, finding_id, resource_id, claim) values
+            ('a1111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'f1111111-1111-1111-1111-111111111111', 'd1111111-1111-1111-1111-111111111111', 'TENANT-A-SECRET: config listeners is EXTERNAL://:9092'),
+            ('a2222222-2222-2222-2222-222222222222', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'f2222222-2222-2222-2222-222222222222', 'd2222222-2222-2222-2222-222222222222', 'TENANT-B-SECRET: config listeners is EXTERNAL://:9092');
+
+          -- ai_outputs + evidence must land in ONE transaction: the citation gate is a
+          -- DEFERRED constraint trigger that only fires at COMMIT.
+          insert into ai_outputs (id, tenant_id, finding_id, kind, content, fingerprint, model) values
+            ('01111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'f1111111-1111-1111-1111-111111111111', 'triage', 'A triage', 'fp-a', 'test'),
+            ('02222222-2222-2222-2222-222222222222', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'f2222222-2222-2222-2222-222222222222', 'triage', 'B triage', 'fp-b', 'test');
+          insert into ai_output_evidence values
+            ('01111111-1111-1111-1111-111111111111', 'a1111111-1111-1111-1111-111111111111'),
+            ('02222222-2222-2222-2222-222222222222', 'a2222222-2222-2222-2222-222222222222');
+
+          insert into audit_log (tenant_id, actor, action) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'engine', 'scan.completed'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'engine', 'scan.completed');
+          insert into api_keys (tenant_id, name, hash) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'a-key', 'sha-a'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'b-key', 'sha-b');
+          insert into suppressions (tenant_id, rule_id, reason) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'KAFKA.X', 'a'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'KAFKA.X', 'b');
+          insert into controls (tenant_id, framework, control_id, title) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'PCI_DSS_4_0_1', '1.1', 'A'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'PCI_DSS_4_0_1', '1.1', 'B');
+          insert into collectors (tenant_id, name) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'a-col'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'b-col');
+          insert into integrations (tenant_id, type, name) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'slack', 'a-slack'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'slack', 'b-slack');
+          insert into usage (tenant_id, metric, value, period) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'scans', 1, '2026-07'),
+            ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'scans', 1, '2026-07');
+          commit;
+          SQL
+
+      # ── The adversarial queries ─────────────────────────────────────
+      - name: adversarial cross-tenant queries
+        run: |
+          psql -v ON_ERROR_STOP=1 -q <<'SQL'
+          \set A '''aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'''
+          \set B '''bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'''
+          \set UA '''11111111-1111-1111-1111-111111111111'''
+
+          -- Act as user A of tenant A, exactly as PostgREST would: SET ROLE authenticated,
+          -- then publish the JWT sub claim. (The superuser `postgres` bypasses RLS entirely
+          -- — including FORCE — so a test that forgets SET ROLE silently passes everything.)
+          set role authenticated;
+          select set_config('request.jwt.claim.sub', '11111111-1111-1111-1111-111111111111', false);
+
+          -- ════ POSITIVE CONTROLS FIRST ════════════════════════════════
+          -- Every isolation assertion below is a count()==0. A blanket permission error, a
+          -- broken auth.uid(), or an empty database would satisfy all of them while proving
+          -- nothing at all. If A cannot read its OWN row, this suite is lying.
+          select ci_assert(auth.uid() = :UA::uuid, 'auth.uid() does not resolve the JWT sub claim');
+          select ci_assert((select count(*) from app_tenant_ids()) = 1, 'A should belong to exactly 1 tenant');
+          select ci_assert((select count(*) from findings where tenant_id = :A::uuid) = 1, 'CONTROL: A cannot read its own finding');
+          select ci_assert((select count(*) from observations where tenant_id = :A::uuid) = 1, 'CONTROL: A cannot read its own evidence');
+          select ci_assert((select claim from observations where tenant_id = :A::uuid) like 'TENANT-A-SECRET%', 'CONTROL: A cannot read its own claim text');
+
+          -- ════ Every tenant table, probed cross-tenant ════════════════
+          select ci_assert((select count(*) from tenants        where id        = :B::uuid) = 0, 'tenants leak');
+          select ci_assert((select count(*) from tenant_members where tenant_id = :B::uuid) = 0, 'tenant_members leak');
+          select ci_assert((select count(*) from connections    where tenant_id = :B::uuid) = 0, 'connections leak');
+          select ci_assert((select count(*) from resources      where tenant_id = :B::uuid) = 0, 'resources leak');
+          select ci_assert((select count(*) from edges          where tenant_id = :B::uuid) = 0, 'edges leak');
+          select ci_assert((select count(*) from scans          where tenant_id = :B::uuid) = 0, 'scans leak');
+          select ci_assert((select count(*) from findings       where tenant_id = :B::uuid) = 0, 'findings leak');
+          select ci_assert((select count(*) from observations   where tenant_id = :B::uuid) = 0, 'EVIDENCE LEDGER leak');
+          select ci_assert((select count(*) from ai_outputs     where tenant_id = :B::uuid) = 0, 'ai_outputs leak');
+          select ci_assert((select count(*) from audit_log      where tenant_id = :B::uuid) = 0, 'audit_log leak');
+          select ci_assert((select count(*) from api_keys       where tenant_id = :B::uuid) = 0, 'api_keys leak');
+          select ci_assert((select count(*) from suppressions   where tenant_id = :B::uuid) = 0, 'suppressions leak');
+          select ci_assert((select count(*) from controls       where tenant_id = :B::uuid) = 0, 'controls leak');
+          select ci_assert((select count(*) from collectors     where tenant_id = :B::uuid) = 0, 'collectors leak');
+          select ci_assert((select count(*) from integrations   where tenant_id = :B::uuid) = 0, 'integrations leak');
+          select ci_assert((select count(*) from usage          where tenant_id = :B::uuid) = 0, 'usage leak');
+
+          -- Unfiltered reads: a policy that lost its predicate shows up here even though the
+          -- targeted probes above would still pass.
+          select ci_assert((select count(*) from findings)       = 1, 'unfiltered findings shows more than A');
+          select ci_assert((select count(*) from observations)   = 1, 'unfiltered observations shows more than A');
+          select ci_assert((select count(*) from tenants)        = 1, 'unfiltered tenants shows more than A');
+          select ci_assert((select count(*) from tenant_members) = 1, 'unfiltered tenant_members shows more than own row');
+          select ci_assert((select count(*) from api_keys)       = 1, 'unfiltered api_keys shows more than A');
+
+          -- ════ Escape via joins and subqueries ═══════════════════════
+          select ci_assert((select count(*) from findings f join observations o on o.finding_id = f.id) = 1, 'join findings->observations leaks');
+          select ci_assert((select count(*) from resources r join connections c on c.id = r.connection_id) = 1, 'join resources->connections leaks');
+          -- ai_output_evidence has no tenant_id of its own; it is scoped through its parent.
+          select ci_assert((select count(*) from ai_output_evidence) = 1, 'ai_output_evidence leaks (no tenant column of its own)');
+          select ci_assert((select count(*) from ai_output_evidence e join observations o on o.id = e.observation_id
+                            where o.claim like 'TENANT-B%') = 0, 'B evidence reachable through ai_output_evidence');
+          select ci_assert((select count(*) from observations where finding_id in (select id from findings)) = 1, 'IN-subquery leaks');
+          select ci_assert((select count(*) from observations o where exists (select 1 from findings f where f.id = o.finding_id)) = 1, 'EXISTS-subquery leaks');
+
+          -- ════ Writes ════════════════════════════════════════════════
+          -- `authenticated` holds FULL table grants here, as it does on Supabase, and no
+          -- INSERT/UPDATE/DELETE policy exists on any table — so RLS is the only thing
+          -- refusing these. An RLS write refusal raises insufficient_privilege (42501);
+          -- anything else means the write went through.
+          do $$ begin
+            insert into findings (tenant_id, rule_id, fingerprint, title, severity)
+            values ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'X', 'fp-evil', 'evil', 'critical');
+            raise exception 'RLS ASSERTION FAILED: A inserted a finding into tenant B';
+          exception when insufficient_privilege then null;
+          end $$;
+
+          do $$ begin
+            insert into findings (tenant_id, rule_id, fingerprint, title, severity)
+            values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'X', 'fp-own', 'own', 'critical');
+            raise exception 'RLS ASSERTION FAILED: A inserted a finding into its OWN tenant (the console is read-only; mutations go through the engine API)';
+          exception when insufficient_privilege then null;
+          end $$;
+
+          -- Privilege escalation: grant myself membership of tenant B.
+          do $$ begin
+            insert into tenant_members (tenant_id, user_id)
+            values ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '11111111-1111-1111-1111-111111111111');
+            raise exception 'RLS ASSERTION FAILED: A granted itself membership of tenant B';
+          exception when insufficient_privilege then null;
+          end $$;
+
+          -- UPDATE/DELETE against invisible rows match zero rows rather than erroring, so
+          -- the assertion has to be on the DATA, checked back as postgres.
+          update findings set status = 'resolved' where tenant_id = :B::uuid;
+          delete from observations where tenant_id = :B::uuid;
+          reset role;
+          select ci_assert((select count(*) from observations where tenant_id = :B::uuid) = 1, 'TENANT A DELETED TENANT B EVIDENCE');
+          select ci_assert((select status from findings where id = 'f2222222-2222-2222-2222-222222222222') = 'open', 'TENANT A MUTATED A TENANT B FINDING');
+
+          -- ════ anon sees nothing at all ══════════════════════════════
+          set role anon;
+          select set_config('request.jwt.claim.sub', '11111111-1111-1111-1111-111111111111', false);
+          select ci_assert((select count(*) from findings)     = 0, 'anon reads findings');
+          select ci_assert((select count(*) from observations) = 0, 'anon reads the evidence ledger');
+          select ci_assert((select count(*) from tenants)      = 0, 'anon reads tenants');
+          select ci_assert((select count(*) from api_keys)     = 0, 'anon reads api_keys');
+          -- anon holds the same full table grants as authenticated (see the seed step), so
+          -- the four zeroes above prove the policies' `to authenticated` clause is the gate,
+          -- not an absent GRANT.
+          do $$ begin
+            perform app_tenant_ids();
+            raise exception 'RLS ASSERTION FAILED: anon may execute app_tenant_ids()';
+          exception when insufficient_privilege then null;
+          end $$;
+
+          -- ════ A logged-in user with no membership ═══════════════════
+          set role authenticated;
+          select set_config('request.jwt.claim.sub', '99999999-9999-9999-9999-999999999999', false);
+          select ci_assert((select count(*) from findings) = 0, 'a user with no membership reads findings');
+          select ci_assert((select count(*) from tenants)  = 0, 'a user with no membership reads tenants');
+
+          -- ════ No JWT at all: auth.uid() is NULL, never a wildcard ═══
+          select set_config('request.jwt.claim.sub', '', false);
+          select ci_assert(auth.uid() is null, 'auth.uid() with no claim should be null');
+          select ci_assert((select count(*) from findings) = 0, 'a null auth.uid() reads findings');
+
+          reset role;
+          \echo '════ ALL CROSS-TENANT RLS ASSERTIONS PASSED ════'
+          SQL
+
+      # ── The two integrity guarantees the product claim rests on ─────
+      # The schema is already up, so assert them here. These are the DB half of the grounded
+      # AI promise; services/engine/tests/test_ai.py covers the application half (the schema
+      # and the citation range-check). This step is layer 3: even if both were bypassed,
+      # Postgres refuses.
+      #
+      # Read the "other transitions" block below before adding to this step. The original
+      # version of this job asserted exactly two things — an uncited INSERT is rejected, an
+      # UPDATE to a claim is rejected — and both were attacks the implementation already
+      # handled. Three ways into "committed uncited ai_output" (including the ENGINE'S OWN
+      # ON CONFLICT DO UPDATE write) and a cross-tenant citation all committed cleanly while
+      # this job reported both guarantees verified. A probe that only fires at the code path
+      # you already thought of certifies your assumptions, not your schema. Every assertion
+      # here must fail against some real, reachable schema — if it cannot, it is decoration.
+      - name: evidence integrity (citation gate + append-only ledger)
+        run: |
+          psql -v ON_ERROR_STOP=1 -q <<'SQL'
+          -- ════ Guarantee 1: an uncited ai_output cannot commit ═══════
+          -- The trigger is DEFERRABLE INITIALLY DEFERRED, so SET CONSTRAINTS ALL IMMEDIATE
+          -- forces it to fire inside the block, where the failure can be caught and asserted.
+          do $$ begin
+            insert into ai_outputs (tenant_id, finding_id, kind, content, fingerprint, model)
+            values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'f1111111-1111-1111-1111-111111111111',
+                    'triage', 'uncited prose', 'fp-uncited', 'test');
+            set constraints all immediate;
+            raise exception 'CITATION GATE FAILED: an uncited ai_output was allowed to commit';
+          exception when check_violation then null;
+          end $$;
+
+          -- CONTROL: the same insert WITH evidence must commit, or the gate is just broken.
+          begin;
+          insert into ai_outputs (id, tenant_id, finding_id, kind, content, fingerprint, model)
+          values ('03333333-3333-3333-3333-333333333333', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                  'f1111111-1111-1111-1111-111111111111', 'triage', 'cited prose', 'fp-cited', 'test');
+          insert into ai_output_evidence values
+            ('03333333-3333-3333-3333-333333333333', 'a1111111-1111-1111-1111-111111111111');
+          commit;
+          select ci_assert((select count(*) from ai_outputs where fingerprint = 'fp-cited') = 1, 'CONTROL: a cited ai_output must commit');
+          select ci_assert((select count(*) from ai_outputs where fingerprint = 'fp-uncited') = 0, 'the uncited ai_output leaked into the table');
+
+          -- ════ Guarantee 1, the other transitions ════════════════════
+          -- Rejecting an uncited INSERT is only one of four ways into "committed uncited
+          -- output", and it is the one nothing in the product ever attempts. Until migration
+          -- 005 the other three all committed cleanly against this exact schema, so this job
+          -- certified the guarantee green on a database where it was already false. Each
+          -- probe below fails without 005. Every do-block's subtransaction rolls back when
+          -- the exception is caught, so the seed survives for the assertions that follow.
+
+          -- 1. Remove the citation from a committed, cited output.
+          do $$ begin
+            delete from ai_output_evidence where ai_output_id = '01111111-1111-1111-1111-111111111111';
+            set constraints all immediate;
+            raise exception 'CITATION GATE FAILED: deleting the evidence row left a committed uncited ai_output';
+          exception when check_violation then null;
+          end $$;
+
+          -- 2. Delete the cited observation. ai_output_evidence.observation_id is ON DELETE
+          --    CASCADE, so this silently strips the citation — and migration 002 explicitly
+          --    blesses deleting observations for offboarding/retention.
+          do $$ begin
+            delete from observations where id = 'a1111111-1111-1111-1111-111111111111';
+            set constraints all immediate;
+            raise exception 'CITATION GATE FAILED: deleting a cited observation orphaned its ai_output';
+          exception when check_violation then null;
+          end $$;
+
+          -- 3. The ENGINE'S OWN write path: ai.py::triage_finding upserts with ON CONFLICT DO
+          --    UPDATE. Postgres fires UPDATE triggers on the conflict path, not INSERT
+          --    triggers — so with an INSERT-only gate this was the one write in the system
+          --    the gate never saw, and it could publish fabricated content over an output
+          --    whose evidence had been removed.
+          do $$ begin
+            delete from ai_output_evidence where ai_output_id = '01111111-1111-1111-1111-111111111111';
+            insert into ai_outputs (tenant_id, finding_id, kind, content, fingerprint, model)
+            values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'f1111111-1111-1111-1111-111111111111',
+                    'triage', 'FABRICATED: no evidence supports this', 'fp-a', 'test')
+            on conflict (tenant_id, kind, fingerprint) do update set content = excluded.content;
+            set constraints all immediate;
+            raise exception 'CITATION GATE FAILED: the ON CONFLICT DO UPDATE path rewrote an ai_output with zero citations';
+          exception when check_violation then null;
+          end $$;
+
+          -- 4. Cross-tenant citation. The RLS probes above only prove B's evidence is not
+          --    READABLE through ai_output_evidence; they never proved A's output cannot CITE
+          --    it. Before 005 it could, and A's console rendered B's claim text as A's own.
+          do $$ begin
+            insert into ai_outputs (id, tenant_id, finding_id, kind, content, fingerprint, model)
+            values ('09999999-9999-9999-9999-999999999999', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                    'f1111111-1111-1111-1111-111111111111', 'triage', 'cross-tenant', 'fp-xt', 'test');
+            insert into ai_output_evidence values
+              ('09999999-9999-9999-9999-999999999999', 'a2222222-2222-2222-2222-222222222222');
+            set constraints all immediate;
+            raise exception 'CITATION GATE FAILED: tenant A ai_output cited tenant B observation';
+          exception when check_violation then null;
+          end $$;
+
+          -- CONTROLS: the gate must reject the four attacks WITHOUT breaking the operations
+          -- the product actually performs. A gate that also blocks these is not shippable.
+          -- (a) the engine's cache refresh, evidence intact.
+          begin;
+          insert into ai_outputs (tenant_id, finding_id, kind, content, fingerprint, model)
+          values ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'f1111111-1111-1111-1111-111111111111',
+                  'triage', 'A triage, refreshed', 'fp-a', 'test')
+          on conflict (tenant_id, kind, fingerprint) do update set content = excluded.content;
+          insert into ai_output_evidence values
+            ('01111111-1111-1111-1111-111111111111', 'a1111111-1111-1111-1111-111111111111')
+          on conflict do nothing;
+          commit;
+          select ci_assert((select content from ai_outputs where id = '01111111-1111-1111-1111-111111111111') = 'A triage, refreshed',
+                           'CONTROL: the engine cannot refresh a cited ai_output');
+          -- (b) retention in the right order: outputs first, then their evidence.
+          begin;
+          delete from ai_outputs where id = '03333333-3333-3333-3333-333333333333';
+          commit;
+          select ci_assert((select count(*) from ai_outputs where fingerprint = 'fp-cited') = 0, 'CONTROL: an ai_output cannot be deleted');
+          -- (c) the whole point of deferring rather than ON DELETE RESTRICT: offboarding a
+          --     tenant cascades to observations AND ai_outputs, in an order Postgres does not
+          --     promise. At COMMIT the parent output is gone, so there is nothing to protect.
+          begin;
+          insert into tenants (id, name) values ('cccccccc-cccc-cccc-cccc-cccccccccccc', 'Tenant C');
+          insert into findings (id, tenant_id, rule_id, fingerprint, title, severity) values
+            ('f3333333-3333-3333-3333-333333333333', 'cccccccc-cccc-cccc-cccc-cccccccccccc', 'KAFKA.X', 'fp-c', 'C', 'low');
+          insert into observations (id, tenant_id, finding_id, claim) values
+            ('a3333333-3333-3333-3333-333333333333', 'cccccccc-cccc-cccc-cccc-cccccccccccc', 'f3333333-3333-3333-3333-333333333333', 'TENANT-C claim');
+          insert into ai_outputs (id, tenant_id, finding_id, kind, content, fingerprint, model) values
+            ('05555555-5555-5555-5555-555555555555', 'cccccccc-cccc-cccc-cccc-cccccccccccc', 'f3333333-3333-3333-3333-333333333333', 'triage', 'C triage', 'fp-c', 'test');
+          insert into ai_output_evidence values
+            ('05555555-5555-5555-5555-555555555555', 'a3333333-3333-3333-3333-333333333333');
+          commit;
+          begin;
+          delete from tenants where id = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+          commit;
+          select ci_assert((select count(*) from ai_outputs where tenant_id = 'cccccccc-cccc-cccc-cccc-cccccccccccc') = 0,
+                           'CONTROL: tenant offboarding must still cascade cleanly');
+
+          -- The state assertion the four probes are really about.
+          select ci_assert((select count(*) from ai_outputs o
+                            where not exists (select 1 from ai_output_evidence e where e.ai_output_id = o.id)) = 0,
+                           'an uncited ai_output exists in committed state');
+          select ci_assert((select count(*) from ai_output_evidence e
+                            join ai_outputs a on a.id = e.ai_output_id
+                            join observations o on o.id = e.observation_id
+                            where o.tenant_id <> a.tenant_id) = 0,
+                           'a cross-tenant citation exists in committed state');
+
+          -- ════ Guarantee 2: the evidence ledger is append-only ═══════
+          -- An observation whose claim can be rewritten is not evidence.
+          do $$ begin
+            update observations set claim = 'rewritten after the fact'
+            where id = 'a1111111-1111-1111-1111-111111111111';
+            raise exception 'LEDGER FAILED: an observation claim was rewritten';
+          exception when insufficient_privilege then null;
+          end $$;
+
+          do $$ begin
+            update audit_log set action = 'nothing to see here';
+            raise exception 'LEDGER FAILED: audit_log was rewritten';
+          exception when insufficient_privilege then null;
+          end $$;
+
+          select ci_assert((select claim from observations where id = 'a1111111-1111-1111-1111-111111111111')
+                           like 'TENANT-A-SECRET%', 'the observation claim was mutated');
+
+          -- NOT ASSERTED, deliberately: DELETE + re-INSERT at the same observation id
+          -- rewrites a claim without ever issuing an UPDATE, and it works. DELETE on the
+          -- ledger is a documented carve-out (offboarding/retention) and closing it is a
+          -- retention-policy decision, not a bug fix — see "Known gaps" in docs/STATUS.md.
+          -- It is called out here so nobody reads this job's green as covering it. What the
+          -- guarantee means today is exactly: an observation cannot be UPDATEd.
+          \echo '════ EVIDENCE-INTEGRITY ASSERTIONS PASSED ════'
+          SQL
+
+  # ══════════════════════════════════════════════════════════════════════
+  # The single check to mark required in branch protection. Aggregating here rather than
+  # listing each job in the branch settings means a job added above is covered on day one
+  # instead of the day someone remembers to update GitHub.
+  ci:
+    name: ci
+    if: always()
+    needs: [engine, web, detectors-live, rls-cross-tenant]
+    runs-on: ubuntu-latest
+    steps:
+      - name: verify every job succeeded
+        run: |
+          echo "engine:           ${{ needs.engine.result }}"
+          echo "web:              ${{ needs.web.result }}"
+          echo "detectors-live:   ${{ needs.detectors-live.result }}"
+          echo "rls-cross-tenant: ${{ needs.rls-cross-tenant.result }}"
+          [ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" = "false" ]

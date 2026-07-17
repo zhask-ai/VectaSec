@@ -1,0 +1,1908 @@
+{
+  "_comment": "REAL output of describe_configs against the deploy/dev misconfigured Kafka (apache/kafka:3.9.0, KRaft). Captured, not hand-written \u2014 detectors are tested against what a broker actually returns, including redacted-sensitive values.",
+  "broker": {
+    "host": "localhost",
+    "id": 1,
+    "port": 9092
+  },
+  "cluster_id": "vectasec-dev-cluster-0001",
+  "config": {
+    "advertised.listeners": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "INTERNAL://kafka:29092,EXTERNAL://localhost:9092"
+    },
+    "allow.everyone.if.no.acl.found": {
+      "is_default": false,
+      "is_sensitive": true,
+      "source": 4,
+      "value": null
+    },
+    "alter.config.policy.class.name": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "alter.log.dirs.replication.quota.window.num": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "11"
+    },
+    "alter.log.dirs.replication.quota.window.size.seconds": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "authorizer.class.name": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": ""
+    },
+    "auto.create.topics.enable": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "true"
+    },
+    "auto.include.jmx.reporter": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "true"
+    },
+    "auto.leader.rebalance.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "true"
+    },
+    "background.threads": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10"
+    },
+    "broker.heartbeat.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "2000"
+    },
+    "broker.id": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "1"
+    },
+    "broker.id.generation.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "true"
+    },
+    "broker.rack": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "broker.session.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "9000"
+    },
+    "client.quota.callback.class": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "compression.gzip.level": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "-1"
+    },
+    "compression.lz4.level": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "9"
+    },
+    "compression.type": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "producer"
+    },
+    "compression.zstd.level": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "3"
+    },
+    "connection.failed.authentication.delay.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "100"
+    },
+    "connections.max.idle.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "600000"
+    },
+    "connections.max.reauth.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "0"
+    },
+    "control.plane.listener.name": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "controlled.shutdown.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "true"
+    },
+    "controlled.shutdown.max.retries": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "3"
+    },
+    "controlled.shutdown.retry.backoff.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "5000"
+    },
+    "controller.listener.names": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "CONTROLLER"
+    },
+    "controller.quorum.append.linger.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "25"
+    },
+    "controller.quorum.bootstrap.servers": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": ""
+    },
+    "controller.quorum.election.backoff.max.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1000"
+    },
+    "controller.quorum.election.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1000"
+    },
+    "controller.quorum.fetch.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "2000"
+    },
+    "controller.quorum.request.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "2000"
+    },
+    "controller.quorum.retry.backoff.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "20"
+    },
+    "controller.quorum.voters": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "1@localhost:9093"
+    },
+    "controller.quota.window.num": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "11"
+    },
+    "controller.quota.window.size.seconds": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "controller.socket.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "30000"
+    },
+    "create.topic.policy.class.name": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "default.replication.factor": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "delegation.token.expiry.check.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "3600000"
+    },
+    "delegation.token.expiry.time.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "86400000"
+    },
+    "delegation.token.master.key": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "delegation.token.max.lifetime.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "604800000"
+    },
+    "delegation.token.secret.key": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "delete.records.purgatory.purge.interval.requests": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "delete.topic.enable": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "true"
+    },
+    "early.start.listeners": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "eligible.leader.replicas.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "false"
+    },
+    "fetch.max.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "57671680"
+    },
+    "fetch.purgatory.purge.interval.requests": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1000"
+    },
+    "group.consumer.assignors": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "org.apache.kafka.coordinator.group.assignor.UniformAssignor,org.apache.kafka.coordinator.group.assignor.RangeAssignor"
+    },
+    "group.consumer.heartbeat.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "5000"
+    },
+    "group.consumer.max.heartbeat.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "15000"
+    },
+    "group.consumer.max.session.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "60000"
+    },
+    "group.consumer.max.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "2147483647"
+    },
+    "group.consumer.min.heartbeat.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "5000"
+    },
+    "group.consumer.min.session.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "45000"
+    },
+    "group.consumer.session.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "45000"
+    },
+    "group.coordinator.append.linger.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10"
+    },
+    "group.coordinator.rebalance.protocols": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "classic"
+    },
+    "group.coordinator.threads": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "group.initial.rebalance.delay.ms": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "0"
+    },
+    "group.max.session.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1800000"
+    },
+    "group.max.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "2147483647"
+    },
+    "group.min.session.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "6000"
+    },
+    "group.share.delivery.count.limit": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "5"
+    },
+    "group.share.heartbeat.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "5000"
+    },
+    "group.share.max.groups": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10"
+    },
+    "group.share.max.heartbeat.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "15000"
+    },
+    "group.share.max.record.lock.duration.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "60000"
+    },
+    "group.share.max.session.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "60000"
+    },
+    "group.share.max.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "200"
+    },
+    "group.share.min.heartbeat.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "5000"
+    },
+    "group.share.min.record.lock.duration.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "15000"
+    },
+    "group.share.min.session.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "45000"
+    },
+    "group.share.partition.max.record.locks": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "200"
+    },
+    "group.share.record.lock.duration.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "30000"
+    },
+    "group.share.session.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "45000"
+    },
+    "initial.broker.registration.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "60000"
+    },
+    "inter.broker.listener.name": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "INTERNAL"
+    },
+    "inter.broker.protocol.version": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "3.9-IV0"
+    },
+    "kafka.metrics.polling.interval.secs": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10"
+    },
+    "kafka.metrics.reporters": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": ""
+    },
+    "leader.imbalance.check.interval.seconds": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "300"
+    },
+    "leader.imbalance.per.broker.percentage": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10"
+    },
+    "listener.security.protocol.map": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
+    },
+    "listeners": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093"
+    },
+    "log.cleaner.backoff.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "15000"
+    },
+    "log.cleaner.dedupe.buffer.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "134217728"
+    },
+    "log.cleaner.delete.retention.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "86400000"
+    },
+    "log.cleaner.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "true"
+    },
+    "log.cleaner.io.buffer.load.factor": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "0.9"
+    },
+    "log.cleaner.io.buffer.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "524288"
+    },
+    "log.cleaner.io.max.bytes.per.second": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1.7976931348623157E308"
+    },
+    "log.cleaner.max.compaction.lag.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "9223372036854775807"
+    },
+    "log.cleaner.min.cleanable.ratio": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "0.5"
+    },
+    "log.cleaner.min.compaction.lag.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "0"
+    },
+    "log.cleaner.threads": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "log.cleanup.policy": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "delete"
+    },
+    "log.dir": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "/tmp/kafka-logs"
+    },
+    "log.dir.failure.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "30000"
+    },
+    "log.dirs": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "/tmp/kraft-combined-logs"
+    },
+    "log.flush.interval.messages": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "9223372036854775807"
+    },
+    "log.flush.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "log.flush.offset.checkpoint.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "60000"
+    },
+    "log.flush.scheduler.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "9223372036854775807"
+    },
+    "log.flush.start.offset.checkpoint.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "60000"
+    },
+    "log.index.interval.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "4096"
+    },
+    "log.index.size.max.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10485760"
+    },
+    "log.local.retention.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "-2"
+    },
+    "log.local.retention.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "-2"
+    },
+    "log.message.downconversion.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "true"
+    },
+    "log.message.format.version": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "3.0-IV1"
+    },
+    "log.message.timestamp.after.max.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "9223372036854775807"
+    },
+    "log.message.timestamp.before.max.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "9223372036854775807"
+    },
+    "log.message.timestamp.difference.max.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "9223372036854775807"
+    },
+    "log.message.timestamp.type": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "CreateTime"
+    },
+    "log.preallocate": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "false"
+    },
+    "log.retention.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "-1"
+    },
+    "log.retention.check.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "300000"
+    },
+    "log.retention.hours": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "168"
+    },
+    "log.retention.minutes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "log.retention.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "log.roll.hours": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "168"
+    },
+    "log.roll.jitter.hours": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "0"
+    },
+    "log.roll.jitter.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "log.roll.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "log.segment.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1073741824"
+    },
+    "log.segment.delete.delay.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "60000"
+    },
+    "max.connection.creation.rate": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "2147483647"
+    },
+    "max.connections": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "2147483647"
+    },
+    "max.connections.per.ip": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "2147483647"
+    },
+    "max.connections.per.ip.overrides": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": ""
+    },
+    "max.incremental.fetch.session.cache.slots": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1000"
+    },
+    "max.request.partition.size.limit": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "2000"
+    },
+    "message.max.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1048588"
+    },
+    "metadata.log.dir": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "metadata.log.max.record.bytes.between.snapshots": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "20971520"
+    },
+    "metadata.log.max.snapshot.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "3600000"
+    },
+    "metadata.log.segment.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1073741824"
+    },
+    "metadata.log.segment.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "604800000"
+    },
+    "metadata.max.idle.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "500"
+    },
+    "metadata.max.retention.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "104857600"
+    },
+    "metadata.max.retention.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "604800000"
+    },
+    "metric.reporters": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": ""
+    },
+    "metrics.num.samples": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "2"
+    },
+    "metrics.recording.level": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "INFO"
+    },
+    "metrics.sample.window.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "30000"
+    },
+    "min.insync.replicas": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "1"
+    },
+    "node.id": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "1"
+    },
+    "num.io.threads": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "8"
+    },
+    "num.network.threads": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "3"
+    },
+    "num.partitions": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "num.recovery.threads.per.data.dir": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "num.replica.alter.log.dirs.threads": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "num.replica.fetchers": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "offset.metadata.max.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "4096"
+    },
+    "offsets.commit.required.acks": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "-1"
+    },
+    "offsets.commit.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "5000"
+    },
+    "offsets.load.buffer.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "5242880"
+    },
+    "offsets.retention.check.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "600000"
+    },
+    "offsets.retention.minutes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10080"
+    },
+    "offsets.topic.compression.codec": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "0"
+    },
+    "offsets.topic.num.partitions": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "50"
+    },
+    "offsets.topic.replication.factor": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "1"
+    },
+    "offsets.topic.segment.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "104857600"
+    },
+    "password.encoder.cipher.algorithm": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "AES/CBC/PKCS5Padding"
+    },
+    "password.encoder.iterations": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "4096"
+    },
+    "password.encoder.key.length": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "128"
+    },
+    "password.encoder.keyfactory.algorithm": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "password.encoder.old.secret": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "password.encoder.secret": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "principal.builder.class": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "org.apache.kafka.common.security.authenticator.DefaultKafkaPrincipalBuilder"
+    },
+    "process.roles": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "broker,controller"
+    },
+    "producer.id.expiration.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "86400000"
+    },
+    "producer.purgatory.purge.interval.requests": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1000"
+    },
+    "queued.max.request.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "-1"
+    },
+    "queued.max.requests": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "500"
+    },
+    "quota.window.num": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "11"
+    },
+    "quota.window.size.seconds": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "remote.fetch.max.wait.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "500"
+    },
+    "remote.log.index.file.cache.total.size.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1073741824"
+    },
+    "remote.log.manager.copier.thread.pool.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "-1"
+    },
+    "remote.log.manager.copy.max.bytes.per.second": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "9223372036854775807"
+    },
+    "remote.log.manager.copy.quota.window.num": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "11"
+    },
+    "remote.log.manager.copy.quota.window.size.seconds": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "remote.log.manager.expiration.thread.pool.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "-1"
+    },
+    "remote.log.manager.fetch.max.bytes.per.second": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "9223372036854775807"
+    },
+    "remote.log.manager.fetch.quota.window.num": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "11"
+    },
+    "remote.log.manager.fetch.quota.window.size.seconds": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "remote.log.manager.task.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "30000"
+    },
+    "remote.log.manager.thread.pool.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10"
+    },
+    "remote.log.metadata.custom.metadata.max.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "128"
+    },
+    "remote.log.metadata.manager.class.name": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "org.apache.kafka.server.log.remote.metadata.storage.TopicBasedRemoteLogMetadataManager"
+    },
+    "remote.log.metadata.manager.class.path": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "remote.log.metadata.manager.impl.prefix": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "rlmm.config."
+    },
+    "remote.log.metadata.manager.listener.name": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "remote.log.reader.max.pending.tasks": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "100"
+    },
+    "remote.log.reader.threads": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10"
+    },
+    "remote.log.storage.manager.class.name": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "remote.log.storage.manager.class.path": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "remote.log.storage.manager.impl.prefix": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "rsm.config."
+    },
+    "remote.log.storage.system.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "false"
+    },
+    "replica.fetch.backoff.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1000"
+    },
+    "replica.fetch.max.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1048576"
+    },
+    "replica.fetch.min.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "replica.fetch.response.max.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10485760"
+    },
+    "replica.fetch.wait.max.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "500"
+    },
+    "replica.high.watermark.checkpoint.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "5000"
+    },
+    "replica.lag.time.max.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "30000"
+    },
+    "replica.selector.class": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "replica.socket.receive.buffer.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "65536"
+    },
+    "replica.socket.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "30000"
+    },
+    "replication.quota.window.num": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "11"
+    },
+    "replication.quota.window.size.seconds": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1"
+    },
+    "request.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "30000"
+    },
+    "reserved.broker.max.id": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1000"
+    },
+    "sasl.client.callback.handler.class": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.enabled.mechanisms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "GSSAPI"
+    },
+    "sasl.jaas.config": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "sasl.kerberos.kinit.cmd": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "/usr/bin/kinit"
+    },
+    "sasl.kerberos.min.time.before.relogin": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "60000"
+    },
+    "sasl.kerberos.principal.to.local.rules": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "DEFAULT"
+    },
+    "sasl.kerberos.service.name": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.kerberos.ticket.renew.jitter": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "0.05"
+    },
+    "sasl.kerberos.ticket.renew.window.factor": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "0.8"
+    },
+    "sasl.login.callback.handler.class": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.login.class": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.login.connect.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.login.read.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.login.refresh.buffer.seconds": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "300"
+    },
+    "sasl.login.refresh.min.period.seconds": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "60"
+    },
+    "sasl.login.refresh.window.factor": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "0.8"
+    },
+    "sasl.login.refresh.window.jitter": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "0.05"
+    },
+    "sasl.login.retry.backoff.max.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10000"
+    },
+    "sasl.login.retry.backoff.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "100"
+    },
+    "sasl.mechanism.controller.protocol": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "GSSAPI"
+    },
+    "sasl.mechanism.inter.broker.protocol": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "GSSAPI"
+    },
+    "sasl.oauthbearer.clock.skew.seconds": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "30"
+    },
+    "sasl.oauthbearer.expected.audience": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.oauthbearer.expected.issuer": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.oauthbearer.jwks.endpoint.refresh.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "3600000"
+    },
+    "sasl.oauthbearer.jwks.endpoint.retry.backoff.max.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10000"
+    },
+    "sasl.oauthbearer.jwks.endpoint.retry.backoff.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "100"
+    },
+    "sasl.oauthbearer.jwks.endpoint.url": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.oauthbearer.scope.claim.name": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "scope"
+    },
+    "sasl.oauthbearer.sub.claim.name": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "sub"
+    },
+    "sasl.oauthbearer.token.endpoint.url": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.server.callback.handler.class": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "sasl.server.max.receive.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "524288"
+    },
+    "security.inter.broker.protocol": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "PLAINTEXT"
+    },
+    "security.providers": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "socket.connection.setup.timeout.max.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "30000"
+    },
+    "socket.connection.setup.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10000"
+    },
+    "socket.listen.backlog.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "50"
+    },
+    "socket.receive.buffer.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "102400"
+    },
+    "socket.request.max.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "104857600"
+    },
+    "socket.send.buffer.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "102400"
+    },
+    "ssl.allow.dn.changes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "false"
+    },
+    "ssl.allow.san.changes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "false"
+    },
+    "ssl.cipher.suites": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": ""
+    },
+    "ssl.client.auth": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "none"
+    },
+    "ssl.enabled.protocols": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "TLSv1.2,TLSv1.3"
+    },
+    "ssl.endpoint.identification.algorithm": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "https"
+    },
+    "ssl.engine.factory.class": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "ssl.key.password": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "ssl.keymanager.algorithm": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "SunX509"
+    },
+    "ssl.keystore.certificate.chain": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "ssl.keystore.key": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "ssl.keystore.location": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "ssl.keystore.password": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "ssl.keystore.type": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "JKS"
+    },
+    "ssl.principal.mapping.rules": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "DEFAULT"
+    },
+    "ssl.protocol": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "TLSv1.3"
+    },
+    "ssl.provider": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "ssl.secure.random.implementation": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "ssl.trustmanager.algorithm": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "PKIX"
+    },
+    "ssl.truststore.certificates": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "ssl.truststore.location": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "ssl.truststore.password": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "ssl.truststore.type": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "JKS"
+    },
+    "telemetry.max.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "1048576"
+    },
+    "transaction.abort.timed.out.transaction.cleanup.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10000"
+    },
+    "transaction.max.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "900000"
+    },
+    "transaction.partition.verification.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "true"
+    },
+    "transaction.remove.expired.transaction.cleanup.interval.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "3600000"
+    },
+    "transaction.state.log.load.buffer.size": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "5242880"
+    },
+    "transaction.state.log.min.isr": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "1"
+    },
+    "transaction.state.log.num.partitions": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "50"
+    },
+    "transaction.state.log.replication.factor": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "1"
+    },
+    "transaction.state.log.segment.bytes": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "104857600"
+    },
+    "transactional.id.expiration.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "604800000"
+    },
+    "unclean.leader.election.enable": {
+      "is_default": false,
+      "is_sensitive": false,
+      "source": 4,
+      "value": "true"
+    },
+    "zookeeper.clientCnxnSocket": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "zookeeper.connect": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "zookeeper.connection.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "zookeeper.max.in.flight.requests": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "10"
+    },
+    "zookeeper.metadata.migration.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "false"
+    },
+    "zookeeper.session.timeout.ms": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "18000"
+    },
+    "zookeeper.set.acl": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "false"
+    },
+    "zookeeper.ssl.cipher.suites": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "zookeeper.ssl.client.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "false"
+    },
+    "zookeeper.ssl.crl.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "false"
+    },
+    "zookeeper.ssl.enabled.protocols": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "zookeeper.ssl.endpoint.identification.algorithm": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "HTTPS"
+    },
+    "zookeeper.ssl.keystore.location": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "zookeeper.ssl.keystore.password": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "zookeeper.ssl.keystore.type": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "zookeeper.ssl.ocsp.enable": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "false"
+    },
+    "zookeeper.ssl.protocol": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": "TLSv1.2"
+    },
+    "zookeeper.ssl.truststore.location": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    },
+    "zookeeper.ssl.truststore.password": {
+      "is_default": true,
+      "is_sensitive": true,
+      "source": 5,
+      "value": null
+    },
+    "zookeeper.ssl.truststore.type": {
+      "is_default": true,
+      "is_sensitive": false,
+      "source": 5,
+      "value": null
+    }
+  },
+  "topics": [
+    "audit-events",
+    "customer-pii",
+    "internal-metrics",
+    "orders",
+    "payments"
+  ]
+}

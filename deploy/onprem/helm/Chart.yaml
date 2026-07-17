@@ -1,0 +1,28 @@
+apiVersion: v2
+name: vectasec
+description: VectaSec — integration-layer security posture scanner (self-hosted)
+type: application
+
+# Chart version moves on chart changes; appVersion tracks the engine's pyproject version.
+version: 0.1.0
+appVersion: "0.0.1"
+
+kubeVersion: ">=1.25.0-0"
+
+home: https://github.com/Zhask/VectaSec
+keywords:
+  - security
+  - posture
+  - kafka
+  - kong
+  - rabbitmq
+  - mcp
+
+# No dependencies, and that is the chart's most important statement: it does NOT bring
+# Postgres, gotrue, postgrest or realtime. It deploys the three VectaSec workloads and expects
+# you to point them at a Supabase you already run (self-hosted or otherwise).
+#
+# Why not vendor a Postgres subchart: this database holds the evidence ledger, and the ledger is
+# the product's credibility. A convenience Postgres with a default password and an emptyDir
+# would be the wrong default in the exact deployments this chart exists for. The compose stack
+# is the batteries-included path; this chart is the "we already have a DBA" path.
