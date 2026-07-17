@@ -87,6 +87,14 @@ jobs:
       # `next lint` is gone in Next 16 and there is no eslint config in the repo, so tsc is
       # the console's real static gate. It is not a formality: every page reads findings out
       # of Supabase, and lib/types.ts is what keeps those row shapes honest.
+      #
+      # The `typecheck` script runs `next typegen` before tsc, and that is load-bearing here.
+      # Pages type their props as PageProps<'/findings/[id]'> — a GLOBAL that Next generates
+      # from the route tree into .next/types, not something tsconfig can resolve on its own.
+      # A clean checkout has no .next, so a bare `tsc --noEmit` fails with
+      # "TS2304: Cannot find name 'PageProps'" — which is exactly what this job did until the
+      # script was made self-contained. Do not "fix" that by hand-writing the props shape:
+      # the generated type is what stops params/searchParams drifting from the real route.
       - name: typecheck
         working-directory: apps/web
         run: pnpm typecheck
