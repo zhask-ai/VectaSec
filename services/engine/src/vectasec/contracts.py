@@ -43,6 +43,16 @@ class Hit:
                                     # seriousness depends on the resource (e.g. a PII topic)
     source_ref: dict = field(default_factory=dict)  # provenance: {"config_key": "...", "api": "..."}
 
+    # The third honest outcome. A detector that fires to say "I could NOT determine this — the
+    # value I needed was redacted / absent / unreachable" returns a Hit with assessable=False.
+    # That finding is a COVERAGE GAP, not a vulnerability: the console shows it as "Not assessed"
+    # and compliance maps it to 'unknown', never 'fail'. `observation` still states what WAS
+    # read ("config X is redacted to null"); `assessment_reason` says what could not be settled.
+    # Returning [] still means "checked, nothing wrong" — silence and not-assessable are
+    # different answers and must not be conflated. See docs/STATUS.md gap 19.
+    assessable: bool = True
+    assessment_reason: str = ""
+
 
 @dataclass
 class ScanContext:

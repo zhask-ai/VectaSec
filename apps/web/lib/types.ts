@@ -13,6 +13,12 @@
 /** Severity is a property of the RULE. Priority is a property of the occurrence — keep separate. */
 export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
+/** The third honest outcome of a detector (migration 006). `assessed` = we checked; `not_assessable`
+ * = we could NOT check (e.g. the target redacts the very config the rule needs). A not_assessable
+ * finding is a COVERAGE GAP, not a vulnerability — it must never be rendered as a real finding or as
+ * a clean pass, and compliance maps it to `unknown`, never `fail`. */
+export type Assessment = 'assessed' | 'not_assessable';
+
 /** The six DB states. The UI collapses these to four (see UiStatus) — the DB keeps all six. */
 export type FindingStatus =
   | 'open'
@@ -130,6 +136,11 @@ export interface Finding {
   due_at: string | null;
   remediation: string | null;
   detail: string | null;
+  /** Whether the detector could actually check this. `not_assessable` is a coverage gap, not a
+   * vulnerability — render it distinctly (never a severity colour). Defaults to 'assessed'. */
+  assessment: Assessment;
+  /** Why the rule could not assess (only meaningful when assessment = 'not_assessable'). */
+  assessment_reason: string | null;
   first_seen: string;
   last_seen: string;
 }
@@ -158,6 +169,27 @@ export interface Control {
   status: ControlStatus;
   failing_finding_ids: Json;
   evaluated_at: string | null;
+}
+
+/** A human's sign-off that a control is met (migration 006). This is the ONLY thing that can turn a
+ * control 'pass' — a clean scan never can, and a live assessed failing finding always overrides it
+ * (fail beats attestation). RLS grants `authenticated` a SELECT policy scoped to the tenant, so the
+ * console reads who/when directly; the WRITE happens through the engine API. */
+export interface ControlAttestation {
+  id: string;
+  tenant_id: string;
+  framework: string;
+  control_id: string;
+  /** auth.users(id) of the human who signed. */
+  attested_by: string;
+  /** What was attested — which systems, which period. Required: an attestation that does not say
+   * what it covers is not an attestation. */
+  scope: string;
+  note: string | null;
+  evidence_ref: Json;
+  created_at: string;
+  /** null = permanent (discouraged). An expired attestation stops producing a pass. */
+  expires_at: string | null;
 }
 
 /** Cannot exist in a committed transaction without ≥1 linked observation — a deferred

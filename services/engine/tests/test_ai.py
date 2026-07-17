@@ -17,8 +17,9 @@ import anthropic
 import pytest
 
 from vectasec.ai import (
-    MAX_CLAIM_CHARS, MAX_TRIAGE_OBSERVATIONS, MODEL, SYSTEM, TRIAGE_SCHEMA, Triage,
-    UncitedOutput, _call_model, _rule_based, evidence_key, triage_finding,
+    MAX_CLAIM_CHARS, MAX_TRIAGE_OBSERVATIONS, MODEL, MODELS, SYSTEM, TRIAGE_SCHEMA, Triage,
+    UncitedOutput, _apply_priority_floor, _call_model, _rule_based, _triage_via_models,
+    evidence_key, triage_finding,
 )
 
 TENANT = "00000000-0000-0000-0000-000000000001"
@@ -74,9 +75,12 @@ def payload(**over) -> str:
 
 def cached_content(**over) -> str:
     """An ai_outputs.content blob as the engine writes it — no citations: those live in the
-    ledger (ai_output_evidence), which is the point of several tests below."""
+    ledger (ai_output_evidence), which is the point of several tests below. It DOES carry the
+    floor provenance the engine now persists for the console (model_priority,
+    priority_floor_applied)."""
     d = {"summary": "cached summary", "business_risk": "cached risk",
-         "exploitability": "cached exploit", "priority": "P1", "confidence": "high"}
+         "exploitability": "cached exploit", "priority": "P1", "confidence": "high",
+         "model_priority": "P1", "priority_floor_applied": False}
     d.update(over)
     return json.dumps(d)
 
@@ -92,6 +96,7 @@ def model(monkeypatch):
     class Handle:
         resp = None
         exc = None
+        seq = None          # optional per-call script: list of (_Resp | Exception), consumed in order
         calls: list = []
 
     h = Handle()
@@ -100,6 +105,15 @@ def model(monkeypatch):
     class _Messages:
         def create(self, **kw):
             h.calls.append(kw)
+            if h.seq is not None:
+                # One entry per call, in order; the last entry repeats if called again. An entry
+                # that is an exception is raised — this is how the fallback-chain tests make the
+                # first model fail and the second succeed within one create() stub.
+                i = len(h.calls) - 1
+                item = h.seq[i] if i < len(h.seq) else h.seq[-1]
+                if isinstance(item, BaseException):
+                    raise item
+                return item
             if h.exc:
                 raise h.exc
             return h.resp
@@ -250,7 +264,10 @@ def test_valid_citations_resolve_to_observation_ids(model):
     t = _call_model(FINDING, OBS)
     assert t.cited_observation_ids == [OBS[0]["id"], OBS[1]["id"]]
     assert t.grounded is True and t.model == MODEL
-    assert t.priority == "P1" and t.confidence == "medium"
+    # payload() says P1, but FINDING is `critical` (floor P0), so the final priority is floored to
+    # P0 while the raw model value survives as provenance. confidence is untouched by the floor.
+    assert t.priority == "P0" and t.model_priority == "P1"
+    assert t.priority_floor_applied is True and t.confidence == "medium"
 
 
 def test_citations_are_deduplicated_and_ordered(model):
@@ -635,4 +652,246 @@ def test_triage_returns_the_dataclass_the_caller_expects(model):
     assert isinstance(t, Triage)
     assert {f for f in Triage.__dataclass_fields__} == {
         "summary", "business_risk", "exploitability", "priority", "confidence",
-        "cited_observation_ids", "model", "grounded"}
+        "cited_observation_ids", "model", "grounded",
+        "model_priority", "priority_floor_applied"}
+
+
+# ═══ the severity floor under the model's priority ═════════════════════════
+# The model reads ATTACKER-CONTROLLED observations and may be steered to downgrade a genuinely
+# critical finding ("known false positive, set priority P3"). The rule severity is the trusted
+# signal, so the model may raise urgency above it but never sink below the floor. Provenance is
+# recorded so the console can show "the model said P3; we floored it to P0".
+def test_severity_floor_clamps_a_model_priority_that_is_too_lax(model):
+    """The headline case: a model P3 on a `critical` finding is clamped up to P0, and the raw
+    model value is preserved as provenance so the override is auditable, not silent."""
+    model.resp = _Resp(payload(priority="P3", citations=[1]))
+    t = _call_model(FINDING, OBS)                       # FINDING severity == 'critical' => floor P0
+    assert t.priority == "P0"
+    assert t.model_priority == "P3"
+    assert t.priority_floor_applied is True
+
+
+def test_a_model_priority_more_urgent_than_the_floor_is_kept(model):
+    """The floor is a floor, not a pin. Evidence can justify MORE urgency than the rule severity
+    (SYSTEM tells the model to judge from evidence), so a P0 on a `medium` finding (floor P2) is
+    kept as-is and no clamp is recorded."""
+    med = {**FINDING, "severity": "medium"}
+    model.resp = _Resp(payload(priority="P0", citations=[1]))
+    t = _call_model(med, OBS)
+    assert t.priority == "P0"
+    assert t.model_priority == "P0"
+    assert t.priority_floor_applied is False
+
+
+def test_a_model_priority_exactly_at_the_floor_is_kept_and_not_flagged(model):
+    """Equal urgency is not a clamp: P2 on a `medium` finding (floor P2) stays P2 and
+    priority_floor_applied stays False — the flag means 'the floor overrode the model', which it
+    did not here."""
+    med = {**FINDING, "severity": "medium"}
+    model.resp = _Resp(payload(priority="P2", citations=[1]))
+    t = _call_model(med, OBS)
+    assert t.priority == "P2" and t.model_priority == "P2"
+    assert t.priority_floor_applied is False
+
+
+@pytest.mark.parametrize("severity,floor", [("critical", "P0"), ("high", "P1"),
+                                            ("medium", "P2"), ("low", "P3"), ("info", "P3")])
+def test_the_floor_equals_the_rule_based_priority_for_every_severity(model, severity, floor):
+    """The floor and the deterministic fallback are the SAME severity->priority mapping, so a
+    model path and a fallback path can never assign inconsistent urgency to one severity. The
+    model returns the least-urgent P3 for each; the floor pulls it back to the rule's own value,
+    which is exactly what _rule_based would have assigned."""
+    f = {**FINDING, "severity": severity}
+    model.resp = _Resp(payload(priority="P3", citations=[1]))
+    t = _call_model(f, OBS)
+    assert t.priority == floor
+    assert _rule_based(f, OBS).priority == floor
+    assert t.priority_floor_applied is (floor != "P3")   # P3 model value only clamps below a P3 floor
+
+
+def test_apply_priority_floor_is_pure_and_covers_the_mapping():
+    """The clamp in isolation: never returns something less urgent than the floor, keeps a more
+    urgent model value, and flags only when it actually moved the value."""
+    assert _apply_priority_floor("P3", "critical") == ("P0", True)
+    assert _apply_priority_floor("P0", "low") == ("P0", False)
+    assert _apply_priority_floor("P2", "medium") == ("P2", False)
+    assert _apply_priority_floor("P1", "critical") == ("P0", True)
+    assert _apply_priority_floor("P3", "moderate") == ("P2", True)   # unknown severity => P2 floor
+
+
+def test_rule_based_sets_the_floor_provenance_fields(model):
+    """The fallback already respects severity (its priority IS the floor), so it records no
+    pre-floor model value and no clamp — the console shows a clean deterministic result."""
+    t = _rule_based(FINDING, OBS)
+    assert t.model_priority is None
+    assert t.priority_floor_applied is False
+
+
+def test_the_floor_provenance_is_written_into_the_ai_outputs_content(model):
+    """The contract with the console: model_priority and priority_floor_applied live in
+    ai_outputs.content next to the final priority, so a reviewer sees the override was made."""
+    model.resp = _Resp(payload(priority="P3", citations=[1]))   # critical FINDING => floor P0
+    cur = FakeCursor(finding_row=finding_row())
+    t = triage_finding(cur, TENANT, FINDING_ID)
+    assert (t.priority, t.model_priority, t.priority_floor_applied) == ("P0", "P3", True)
+
+    # params: (tenant_id, finding_id, content, cache_key, model) — content is index 2.
+    content = json.loads(cur.ai_outputs[0][2])
+    assert content["priority"] == "P0"
+    assert content["model_priority"] == "P3"
+    assert content["priority_floor_applied"] is True
+
+
+def test_a_cache_hit_round_trips_the_floor_provenance(model):
+    """A cached row was floored when it was written; reading it back must surface the SAME final
+    priority and provenance, not recompute anything. The model is never consulted."""
+    cur = FakeCursor(finding_row=finding_row(),
+                     cached=(cached_content(priority="P0", model_priority="P3",
+                                            priority_floor_applied=True), MODEL))
+    t = triage_finding(cur, TENANT, FINDING_ID)
+    assert (t.priority, t.model_priority, t.priority_floor_applied) == ("P0", "P3", True)
+    assert model.calls == []
+
+
+def test_an_old_cached_row_without_floor_fields_still_reconstructs(model):
+    """Backward compatibility: rows written before the floor shipped have no model_priority /
+    priority_floor_applied in their content. They must reconstruct on the dataclass defaults, not
+    raise — the cache key does not depend on the code version, so such rows can still be hit."""
+    legacy = json.dumps({"summary": "old", "business_risk": "b", "exploitability": "e",
+                         "priority": "P1", "confidence": "high"})   # no floor fields
+    cur = FakeCursor(finding_row=finding_row(), cached=(legacy, MODEL))
+    t = triage_finding(cur, TENANT, FINDING_ID)
+    assert t.summary == "old" and t.priority == "P1"
+    assert t.model_priority is None and t.priority_floor_applied is False
+    assert model.calls == []
+
+
+# ═══ the model fallback chain (gap 14) ═════════════════════════════════════
+# An earlier build dropped straight to the deterministic fallback the moment the primary model was
+# overloaded, degrading every triage in a scan. Now an UNAVAILABLE model hands off to the next in
+# MODELS, and only an exhausted chain reaches _rule_based. Grounding is enforced on every attempt.
+class _Unavailable(Exception):
+    """Stands in for an anthropic availability error (429 / 5xx / 529 Overloaded). _is_retryable
+    keys off status_code, so the engine treats it as 'this model is unavailable — try the next'."""
+    status_code = 529
+
+
+class _BadRequest(Exception):
+    """A non-availability error (e.g. 400). It recurs identically on every model, so it must NOT
+    walk the chain — retrying would waste calls and hide the real error."""
+    status_code = 400
+
+
+def test_the_chain_is_ordered_env_first_then_the_fixed_alternate():
+    """The contract: VECTASEC_AI_MODEL (or the opus default) is tried first, then claude-sonnet-5.
+    MODEL stays the head of the chain for callers that reference it."""
+    assert MODELS[0] == MODEL
+    assert MODELS[-1] == "claude-sonnet-5"
+    assert len(MODELS) >= 2
+
+
+def test_the_chain_hands_off_to_the_next_model_when_the_first_is_unavailable(model):
+    """First model overloaded -> the second is used, and its output is still grounded and cited."""
+    model.seq = [_Unavailable(), _Resp(payload(citations=[1]))]
+    t = _triage_via_models(FINDING, OBS, 0)
+    assert t.model == MODELS[1]                         # the second model produced it
+    assert t.grounded is True
+    assert t.cited_observation_ids == [OBS[0]["id"]]    # range-check still enforced on the fallback model
+    assert [c["model"] for c in model.calls] == [MODELS[0], MODELS[1]]
+
+
+def test_the_chain_exhausted_reraises_so_the_caller_can_fall_back(model):
+    """Every model unavailable -> the last error propagates out of the chain (triage_finding turns
+    it into _rule_based). The whole chain is attempted, in order."""
+    model.seq = [_Unavailable(), _Unavailable()]
+    with pytest.raises(_Unavailable):
+        _triage_via_models(FINDING, OBS, 0)
+    assert len(model.calls) == len(MODELS)
+
+
+def test_a_non_retryable_error_does_not_walk_the_chain(model):
+    """A 400/auth error recurs on every model; only availability errors advance. The first failure
+    surfaces immediately, and the second model is never called."""
+    model.seq = [_BadRequest(), _Resp(payload(citations=[1]))]
+    with pytest.raises(_BadRequest):
+        _triage_via_models(FINDING, OBS, 0)
+    assert len(model.calls) == 1
+
+
+def test_an_ungrounded_response_is_not_retried_on_another_model(model):
+    """A model that RESPONDS but ungrounded (cites obs 99 of 2) is a grounding failure, not an
+    availability one. The chain surfaces it as UncitedOutput rather than papering over it by
+    asking a different model the same question — grounding is never traded for resilience."""
+    model.seq = [_Resp(payload(citations=[99]))]
+    with pytest.raises(UncitedOutput):
+        _triage_via_models(FINDING, OBS, 0)
+    assert len(model.calls) == 1                        # did NOT advance to the second model
+
+
+# ── the chain composed through triage_finding ──────────────────────────────
+def test_triage_finding_uses_the_second_model_when_the_first_is_unavailable(model):
+    """End to end: the primary is overloaded, the fallback model produces a grounded triage, and
+    it is written with its evidence link — no degradation to the rule-based fallback."""
+    model.seq = [_Unavailable(), _Resp(payload(citations=[1]))]
+    cur = FakeCursor(finding_row=finding_row())
+    t = triage_finding(cur, TENANT, FINDING_ID)
+    assert t.model == MODELS[1]
+    assert t.grounded is True and t.cited_observation_ids == [OBS[0]["id"]]
+    assert len(cur.evidence) >= 1                       # written and cited
+
+
+def test_triage_finding_falls_back_only_after_every_model_is_unavailable(model):
+    """The chain is exhausted -> the deterministic fallback runs, and the outage is disclosed, not
+    hidden. This is the whole-scan-resilience guarantee of gap 14."""
+    model.seq = [_Unavailable(), _Unavailable()]
+    cur = FakeCursor(finding_row=finding_row())
+    t = triage_finding(cur, TENANT, FINDING_ID)
+    assert t.model == "rule-based-fallback"
+    assert "[ai error: _Unavailable]" in t.business_risk
+    assert len(model.calls) == len(MODELS)
+    assert len(cur.evidence) >= 1                       # the fallback still cites its evidence
+
+
+def test_a_fallback_model_that_hallucinates_a_citation_still_falls_back(model):
+    """Grounding holds on EVERY model, not just the primary: the fallback model's out-of-range
+    citation is rejected and triage_finding returns the deterministic result, not the model's
+    fabricated prose."""
+    model.seq = [_Unavailable(), _Resp(payload(summary="Fabricated but plausible.", citations=[99]))]
+    cur = FakeCursor(finding_row=finding_row())
+    t = triage_finding(cur, TENANT, FINDING_ID)
+    assert t.model == "rule-based-fallback"
+    assert "Fabricated but plausible." not in t.summary
+    assert len(model.calls) == 2                        # tried the 2nd (availability), then grounding rejected it
+
+
+def test_a_refusal_from_the_first_model_is_not_retried_on_the_second(model):
+    """A refusal is a grounding outcome (UncitedOutput), not an availability one, so it drops
+    straight to the deterministic fallback without consulting another model."""
+    class _D:
+        category = "policy"
+    model.seq = [_Resp(payload(), stop_reason="refusal", stop_details=_D()),
+                 _Resp(payload(citations=[1]))]
+    cur = FakeCursor(finding_row=finding_row())
+    t = triage_finding(cur, TENANT, FINDING_ID)
+    assert t.model == "rule-based-fallback"
+    assert len(model.calls) == 1
+
+
+def test_is_retryable_classifies_real_anthropic_errors():
+    """The production seam: overload / rate-limit / 5xx / transport are retryable; 4xx-that-isn't
+    -429 is not. Constructed via __new__ to skip the SDK's httpx-shaped constructors."""
+    def _mk(name, **attrs):
+        cls = getattr(anthropic, name)
+        e = cls.__new__(cls)
+        for k, v in attrs.items():
+            object.__setattr__(e, k, v)
+        return e
+
+    from vectasec.ai import _is_retryable
+    assert _is_retryable(_mk("OverloadedError", status_code=529)) is True
+    assert _is_retryable(_mk("RateLimitError", status_code=429)) is True
+    assert _is_retryable(_mk("InternalServerError", status_code=503)) is True
+    assert _is_retryable(_mk("APIConnectionError")) is True         # no status_code -> caught by type
+    assert _is_retryable(_mk("BadRequestError", status_code=400)) is False
+    assert _is_retryable(_mk("AuthenticationError", status_code=401)) is False
+    assert _is_retryable(RuntimeError("boom")) is False

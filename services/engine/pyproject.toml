@@ -11,6 +11,7 @@ dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",
   "pydantic>=2.9",
+  "pyjwt[crypto]>=2.9",       # verify Supabase ES256 JWTs on the engine API (public JWKS)
 ]
 
 [dependency-groups]

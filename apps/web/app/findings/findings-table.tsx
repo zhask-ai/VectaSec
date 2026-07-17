@@ -5,6 +5,7 @@ import { useState } from 'react';
 
 import { SeverityBadge } from '@/components/ui/severity';
 import { TBody, THead, TD, TH, TR, Table } from '@/components/ui/table';
+import { NotAssessedBadge } from './assessment';
 import type { FindingRow, RuleGroup } from './group';
 import { findingHref } from './query';
 import { StatusPill } from './status';
@@ -86,11 +87,13 @@ export function FindingsTable({ groups }: { groups: RuleGroup[] }) {
 /** One occurrence, so the group IS the finding — no expander, and the row links straight to it.
  * Wrapping a single occurrence in a collapsed group would add a click that reveals one row. */
 function SingleRow({ group, finding }: { group: RuleGroup; finding: FindingRow }) {
+  const gap = finding.assessment === 'not_assessable';
   return (
     <TR>
       <TD>{null}</TD>
       <TD>
-        <SeverityBadge severity={finding.severity} />
+        {/* A coverage gap carries no severity mark — it is not a vulnerability on that axis. */}
+        {gap ? <NotAssessedBadge /> : <SeverityBadge severity={finding.severity} />}
       </TD>
       <TD mono muted>
         {group.ruleId}
@@ -99,6 +102,7 @@ function SingleRow({ group, finding }: { group: RuleGroup; finding: FindingRow }
         <Link href={findingHref(finding.id)} style={{ color: 'var(--text-primary)' }}>
           {finding.title}
         </Link>
+        {gap && <GapReason reason={finding.assessmentReason} />}
       </TD>
       <TD>
         <ResourceCell finding={finding} />
@@ -160,16 +164,31 @@ function GroupRows({
         </TD>
 
         <TD>
-          {/* The ×N is the whole point of the row: one badge, one decision. */}
-          <SeverityBadge severity={group.severity} count={group.count} />
+          {/* The ×N is the whole point of the row: one badge, one decision. When every occurrence
+              is a coverage gap the whole group is "we could not check", so it shows the neutral
+              mark instead of a severity — the stored severity only drove its sort position. */}
+          {group.allNotAssessable ? (
+            <NotAssessedBadge count={group.count} />
+          ) : (
+            <SeverityBadge severity={group.severity} count={group.count} />
+          )}
           {/* A detector may override severity per hit (scan.py: `h.severity or d.severity`), so
               a group can genuinely be mixed. Saying so prevents the worst outcome of grouping —
               a critical occurrence hidden inside a row labelled with a lower severity. */}
-          {group.mixedSeverity && (
+          {!group.allNotAssessable && group.mixedSeverity && (
             <span
               style={{ marginLeft: 'var(--space-1)', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}
             >
               mixed
+            </span>
+          )}
+          {/* A partly-uncheckable group: some occurrences are real findings, some are coverage
+              gaps. Flag the gaps so the severity badge is not read as covering all N. */}
+          {!group.allNotAssessable && group.notAssessableCount > 0 && (
+            <span
+              style={{ marginLeft: 'var(--space-1)', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}
+            >
+              +{group.notAssessableCount} not assessed
             </span>
           )}
         </TD>
@@ -225,11 +244,19 @@ function OccurrenceRow({ finding }: { finding: FindingRow }) {
           <span aria-hidden="true" style={{ color: 'var(--text-secondary)' }}>
             ↳
           </span>
-          <SeverityBadge severity={finding.severity} variant="inline" />
+          {finding.assessment === 'not_assessable' ? (
+            <NotAssessedBadge variant="inline" />
+          ) : (
+            <SeverityBadge severity={finding.severity} variant="inline" />
+          )}
         </span>
       </td>
       <td />
-      <td />
+      {/* The otherwise-empty title column carries the coverage-gap reason for this occurrence —
+          each not_assessable finding can have a different reason, so it belongs on the row. */}
+      <td style={{ padding: '0 var(--space-3)' }}>
+        {finding.assessment === 'not_assessable' && <GapReason reason={finding.assessmentReason} />}
+      </td>
       <td style={{ padding: '0 var(--space-3)' }}>
         {/* The link lives on the resource here, and on the title in a single-occurrence row:
             in both cases it is the most specific identity the row carries. A finding is
@@ -266,6 +293,25 @@ function ResourceCell({ finding }: { finding: FindingRow }) {
       {r.namespace && (
         <span style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-2xs)' }}>· {r.namespace}</span>
       )}
+    </span>
+  );
+}
+
+/** The reason a coverage gap could not be checked, shown inline and muted. A not_assessable
+ * finding with no stated reason is still a gap — say so rather than rendering nothing, so the
+ * badge is never left unexplained. */
+function GapReason({ reason }: { reason: string | null }) {
+  return (
+    <span
+      style={{
+        display: 'block',
+        marginTop: '2px',
+        fontSize: 'var(--text-2xs)',
+        lineHeight: 'var(--leading-2xs)',
+        color: 'var(--text-secondary)',
+      }}
+    >
+      {reason?.trim() ? reason : 'No reason recorded for why this could not be assessed.'}
     </span>
   );
 }

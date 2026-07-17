@@ -218,8 +218,15 @@ def _mark_scan_error(conn, scan_id: str, e: BaseException) -> None:
 
 
 def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
-             connection_name: Optional[str] = None) -> dict:
-    """Run one scan end to end. Returns stats."""
+             connection_name: Optional[str] = None, scan_id: Optional[str] = None) -> dict:
+    """Run one scan end to end. Returns stats.
+
+    `scan_id` lets a QUEUE WORKER adopt a scan row that `POST /scans` already created and
+    enqueued, instead of run_scan opening its own — which would orphan the queued row as a
+    permanent `queued` placeholder (STATUS.md gap 2). When scan_id is given we transition that
+    existing row to 'running'; when it is None (the CLI path) we create one, exactly as before.
+    Either way the connection is resolved/created and the row is committed before collecting.
+    """
     from .db import connect
 
     tenant_id = tenant_id or settings.demo_tenant
@@ -233,12 +240,23 @@ def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
         conn.autocommit = False
         with conn.cursor() as cur:
             connection_id = _ensure_connection(cur, tenant_id, type_, name, config)
-            cur.execute(
-                """insert into scans (tenant_id, connection_id, status)
-                   values (%s,%s,'running') returning id""",
-                (tenant_id, connection_id),
-            )
-            scan_id = cur.fetchone()[0]
+            if scan_id is not None:
+                # Adopt the queued row. Scope the UPDATE by tenant_id too — a worker must never
+                # move another tenant's scan even if handed a wrong id.
+                cur.execute(
+                    """update scans set status='running', connection_id=%s, started_at=now()
+                       where id=%s and tenant_id=%s returning id""",
+                    (connection_id, scan_id, tenant_id),
+                )
+                if cur.fetchone() is None:
+                    raise SystemExit(f"scan {scan_id} not found for tenant {tenant_id}")
+            else:
+                cur.execute(
+                    """insert into scans (tenant_id, connection_id, status)
+                       values (%s,%s,'running') returning id""",
+                    (tenant_id, connection_id),
+                )
+                scan_id = cur.fetchone()[0]
 
         # COMMIT the connection + scans('running') rows before collecting. This is what makes
         # the claim below true: _ensure_connection's UPDATE takes an exclusive row lock on the
@@ -268,6 +286,137 @@ def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
 
     stats["scan_id"] = str(scan_id)
     stats["connection_id"] = str(connection_id)
+    return stats
+
+
+def persist_pushed(conn, tenant_id: str, connection_id: str, scan_id: str, payload: dict) -> dict:
+    """Persist a scan a COLLECTOR ran in the customer's network and pushed to us.
+
+    The collector did the collection and detection locally and holds the credentials there; what
+    crosses the boundary is normalized findings + resource METADATA, never Resource.raw (the
+    config). So this is a persist-only path: unlike run_scan it does NOT re-run detectors — it
+    cannot, there is no raw config here — it trusts the collector's findings (same detector code,
+    imported from this package: one codebase, two topologies) and writes them under the tenant,
+    grouped into finding rows by fingerprint with worst-severity representative, in ONE
+    transaction, with the evidence ledger and compliance recomputed just like the local path.
+
+    payload shape (collector/main.py run_job): {resources:[{kind,name,ext_id,namespace,labels}],
+    edges:[{src_ext_id,dst_ext_id,kind,labels}], findings:[{rule_id,fingerprint,resource_ext_id,
+    title,severity,remediation,detail,observation,source_ref,assessable?,assessment_reason?}],
+    stats:{...}}.
+    """
+    t0 = time.time()
+    resources = payload.get("resources") or []
+    edges_in = payload.get("edges") or []
+    findings_in = payload.get("findings") or []
+
+    with conn.cursor() as cur:
+        # Resources: metadata only, raw is '{}' — the collector gives raw no route out, by design.
+        ext_to_id: dict[str, str] = {}
+        seen: list[str] = []
+        for r in resources:
+            cur.execute(
+                """insert into resources (tenant_id, connection_id, kind, name, namespace, ext_id, labels, raw)
+                   values (%s,%s,%s,%s,%s,%s,%s,'{}'::jsonb)
+                   on conflict (connection_id, ext_id) do update
+                     set last_seen=now(), labels=excluded.labels, name=excluded.name, stale=false
+                   returning id""",
+                (tenant_id, connection_id, r["kind"], r["name"], r.get("namespace"),
+                 r["ext_id"], json.dumps(r.get("labels") or {})),
+            )
+            rid = cur.fetchone()[0]
+            ext_to_id[r["ext_id"]] = rid
+            seen.append(r["ext_id"])
+        if seen:
+            cur.execute(
+                "update resources set stale=true where connection_id=%s and not (ext_id = any(%s))",
+                (connection_id, seen),
+            )
+
+        # Edges.
+        cur.execute("delete from edges where src_resource_id in "
+                    "(select id from resources where connection_id=%s)", (connection_id,))
+        n_edges = 0
+        for e in edges_in:
+            src, dst = ext_to_id.get(e["src_ext_id"]), ext_to_id.get(e["dst_ext_id"])
+            if not src or not dst:
+                continue
+            cur.execute("insert into edges (tenant_id, src_resource_id, dst_resource_id, kind, labels) "
+                        "values (%s,%s,%s,%s,%s)",
+                        (tenant_id, src, dst, e["kind"], json.dumps(e.get("labels") or {})))
+            n_edges += 1
+
+        # Group the per-Hit findings by fingerprint — the collector sends one dict per Hit, and
+        # several Hits share a fingerprint, exactly as the local path (representative() picks the
+        # worst-severity summary; every Hit still files its own observation).
+        groups: dict[str, list] = {}
+        for f in findings_in:
+            groups.setdefault(f["fingerprint"], []).append(f)
+
+        supps = _active_suppressions(cur, tenant_id)
+        n_findings = n_obs = n_suppressed = 0
+        for fp, hits in groups.items():
+            worst = max(hits, key=lambda h: _RANK.index(h["severity"]) if h["severity"] in _RANK else -1)
+            r_ext = worst["resource_ext_id"]
+            # Reconstruct a minimal resource stand-in for suppression matching (ext_id + kind).
+            kind = next((rr["kind"] for rr in resources if rr["ext_id"] == r_ext), "")
+            suppressed = _is_suppressed(supps, worst["rule_id"], type("R", (), {"ext_id": r_ext, "kind": kind}))
+            assessable = worst.get("assessable", True)
+            assessment = "assessed" if assessable else "not_assessable"
+
+            cur.execute(
+                """insert into findings
+                     (tenant_id, scan_id, resource_id, rule_id, fingerprint, title, severity,
+                      status, remediation, detail, assessment, assessment_reason)
+                   values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   on conflict (tenant_id, fingerprint) do update
+                     set last_seen=now(), scan_id=excluded.scan_id, severity=excluded.severity,
+                         remediation=excluded.remediation, detail=excluded.detail,
+                         resource_id=excluded.resource_id, assessment=excluded.assessment,
+                         assessment_reason=excluded.assessment_reason,
+                         status = case when excluded.status='suppressed' then 'suppressed'
+                                       when findings.status='suppressed' then 'open'
+                                       else findings.status end
+                   returning id""",
+                (tenant_id, scan_id, ext_to_id.get(r_ext), worst["rule_id"], fp, worst["title"],
+                 worst["severity"], "suppressed" if suppressed else "open",
+                 worst.get("remediation", ""), worst.get("detail", ""),
+                 assessment, worst.get("assessment_reason") or None),
+            )
+            finding_id = cur.fetchone()[0]
+            n_findings += 1
+            n_suppressed += 1 if suppressed else 0
+            for h in hits:
+                cur.execute(
+                    "insert into observations (tenant_id, finding_id, resource_id, claim, source_ref) "
+                    "values (%s,%s,%s,%s,%s)",
+                    (tenant_id, finding_id, ext_to_id.get(r_ext), h["observation"],
+                     json.dumps({**(h.get("source_ref") or {}), "scan_id": str(scan_id),
+                                 "via": "collector"})),
+                )
+                n_obs += 1
+
+        stats = {
+            "resources": len(resources), "edges": n_edges, "findings": n_findings,
+            "suppressed": n_suppressed, "observations": n_obs,
+            "duration_ms": int((time.time() - t0) * 1000),
+            "collector": payload.get("collector_version"),
+            "collector_stats": payload.get("stats"),
+        }
+        from .compliance import map as compliance
+        try:
+            stats["compliance"] = compliance.evaluate(cur, tenant_id)
+        except Exception as e:  # pragma: no cover
+            stats["compliance_error"] = f"{type(e).__name__}: {e}"
+
+        cur.execute("update scans set status='done', finished_at=now(), stats=%s where id=%s",
+                    (json.dumps(stats), scan_id))
+        cur.execute("update connections set last_scanned_at=now() where id=%s", (connection_id,))
+        cur.execute("insert into audit_log (tenant_id, actor, action, target, detail) "
+                    "values (%s,%s,'collector.scan.pushed',%s,%s)",
+                    (tenant_id, "collector", str(scan_id), json.dumps(stats)))
+    conn.commit()
+    stats["scan_id"] = str(scan_id)
     return stats
 
 
@@ -306,11 +455,16 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
                 suppressed = _is_suppressed(supps, d.rule_id, r)
                 rep, severity = representative(hits, d.severity)
 
+                # The third outcome (contracts.Hit.assessable): a rule that fired to say "I
+                # could not read the evidence" records a coverage gap, not a vulnerability.
+                assessment = "assessed" if rep.assessable else "not_assessable"
+
                 cur.execute(
                     """insert into findings
                          (tenant_id, scan_id, resource_id, rule_id, fingerprint,
-                          title, severity, status, remediation, detail)
-                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                          title, severity, status, remediation, detail,
+                          assessment, assessment_reason)
+                       values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                        on conflict (tenant_id, fingerprint) do update
                          set last_seen   = now(),
                              scan_id     = excluded.scan_id,
@@ -318,6 +472,8 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
                              remediation = excluded.remediation,
                              detail      = excluded.detail,
                              resource_id = excluded.resource_id,
+                             assessment  = excluded.assessment,
+                             assessment_reason = excluded.assessment_reason,
                              -- Suppression state is RE-EVALUATED every scan. Status used
                              -- to be written on INSERT only, which runs exactly once in a
                              -- finding's life — so `expires_at` was a no-op for any
@@ -333,7 +489,8 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
                        returning id""",
                     (tenant_id, scan_id, ext_to_id.get(r.ext_id), d.rule_id, fp,
                      d.title, severity, "suppressed" if suppressed else "open",
-                     rep.remediation, rep.detail),
+                     rep.remediation, rep.detail,
+                     assessment, rep.assessment_reason or None),
                 )
                 finding_id = cur.fetchone()[0]
                 # Counts one findings ROW per (rule, resource), which is what the console shows.
@@ -366,6 +523,19 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
         }
         if errors:
             stats["detector_errors"] = errors
+
+        # Recompute compliance from the findings this scan just wrote, in the SAME transaction —
+        # so the controls table can never lag the findings it is derived from. evaluate() reads
+        # findings.assessment (not_assessable => the mapped control goes 'unknown', never 'fail')
+        # and control_attestations (a live human sign-off => 'pass'); a clean scan alone never
+        # writes 'pass'. Import locally to keep the module import graph acyclic and side-effect
+        # free (config.py's contract). A compliance failure must not void a completed scan, so it
+        # is caught and recorded in stats rather than raised.
+        from .compliance import map as compliance
+        try:
+            stats["compliance"] = compliance.evaluate(cur, tenant_id)
+        except Exception as e:  # pragma: no cover - defensive
+            stats["compliance_error"] = f"{type(e).__name__}: {e}"
 
         cur.execute(
             "update scans set status='done', finished_at=now(), stats=%s where id=%s",

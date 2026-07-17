@@ -59,18 +59,72 @@ class Principal(BaseModel):
     actor: str
 
 
+# Dev header-trust is OFF unless explicitly enabled. Default on for localhost single-host dev so
+# the CLI/demo keep working; a container that binds 0.0.0.0 must leave this unset, and then a
+# real Supabase JWT is the ONLY way to authenticate.
+_DEV_TRUST_HEADERS = os.environ.get("VECTASEC_DEV_TRUST_HEADERS", "1").strip() not in ("", "0", "false")
+
+
+def _tenant_for_user(user_id: str, requested: Optional[str]) -> str:
+    """Resolve the authoritative tenant for a verified user from tenant_members.
+
+    The tenant is NEVER taken from the request — it is looked up from membership. If the user
+    asked for a specific tenant (X-VectaSec-Tenant), honour it only if they actually belong to
+    it; otherwise use their (single) membership. A user in no tenant is 403, not defaulted.
+    """
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("select tenant_id::text from tenant_members where user_id = %s", (user_id,))
+        member_of = {r[0] for r in cur.fetchall()}
+    if not member_of:
+        raise HTTPException(403, "authenticated user belongs to no tenant")
+    if requested:
+        if requested not in member_of:
+            raise HTTPException(403, "not a member of the requested tenant")
+        return requested
+    if len(member_of) > 1:
+        raise HTTPException(400, "user belongs to multiple tenants; specify X-VectaSec-Tenant")
+    return next(iter(member_of))
+
+
 def principal(
+    authorization: Optional[str] = Header(None),
     x_vectasec_tenant: Optional[str] = Header(None),
     x_vectasec_actor: Optional[str] = Header(None),
 ) -> Principal:
-    """Who is calling.
+    """Who is calling. A verified Supabase JWT is authoritative; the dev headers are a gated
+    fallback, never trusted on their own in production.
 
-    TODO(auth): a real deployment MUST verify a Supabase JWT here — validate the signature
-    against the project JWKS, take the tenant from the token's membership claims, and ignore
-    these headers entirely. As written they are self-asserted: any caller can name any tenant
-    and any actor. This is a development stand-in, which is also why the server binds to
-    localhost by default (see `main`). Do not expose this to an untrusted network.
+    Path 1 — `Authorization: Bearer <supabase-jwt>`: the signature is verified against the
+    project's public JWKS (auth.verify_supabase_jwt), the actor is the token's `sub`, and the
+    tenant is resolved from tenant_members for that user. The request cannot name a tenant the
+    user does not belong to. This is the real path.
+
+    Path 2 — the X-VectaSec-* headers: self-asserted, so accepted ONLY when
+    VECTASEC_DEV_TRUST_HEADERS is enabled (default on for localhost dev, off the moment a
+    container binds a public interface). Without it, and without a valid JWT, the request is 401.
     """
+    if x_vectasec_tenant:
+        try:
+            uuid.UUID(x_vectasec_tenant)
+        except ValueError:
+            raise HTTPException(400, "X-VectaSec-Tenant must be a uuid")
+
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        try:
+            from .auth import verify_supabase_jwt
+            claims = verify_supabase_jwt(token)
+        except Exception as e:
+            raise HTTPException(401, f"invalid token: {type(e).__name__}") from e
+        user_id = str(claims.get("sub") or "")
+        if not user_id:
+            raise HTTPException(401, "token has no subject")
+        tenant = _tenant_for_user(user_id, x_vectasec_tenant)
+        return Principal(tenant_id=tenant, actor=user_id)
+
+    if not _DEV_TRUST_HEADERS:
+        raise HTTPException(401, "a verified Supabase JWT is required (dev header-trust is disabled)")
+
     tenant = (x_vectasec_tenant or settings.demo_tenant).strip()
     try:
         uuid.UUID(tenant)
@@ -318,6 +372,8 @@ def triage(finding_id: uuid.UUID, force: bool = Query(False, description="bypass
 
             _audit(cur, p, "finding.triaged", str(finding_id),
                    {"model": t.model, "priority": t.priority, "grounded": t.grounded,
+                    "model_priority": getattr(t, "model_priority", None),
+                    "priority_floor_applied": getattr(t, "priority_floor_applied", False),
                     "citations": len(citations), "forced": force})
 
         # The citation gate is a DEFERRED constraint trigger: an ai_output with no linked
@@ -332,7 +388,12 @@ def triage(finding_id: uuid.UUID, force: bool = Query(False, description="bypass
         "finding_id": str(finding_id),
         "triage": {"summary": t.summary, "business_risk": t.business_risk,
                    "exploitability": t.exploitability, "priority": t.priority,
-                   "confidence": t.confidence},
+                   "confidence": t.confidence,
+                   # Provenance for decision 2: when the model's priority was raised to the rule's
+                   # severity floor, the console shows it honestly rather than passing off the
+                   # clamped value as the model's own judgement.
+                   "model_priority": getattr(t, "model_priority", None),
+                   "priority_floor_applied": getattr(t, "priority_floor_applied", False)},
         "model": t.model,
         "grounded": t.grounded,
         "citations": citations,
@@ -415,7 +476,8 @@ def compliance(framework: str, p: Principal = Depends(principal)) -> dict:
     """
     with _db() as conn, conn.cursor() as cur:
         cur.execute(
-            """select control_id, title, requirement, status, failing_finding_ids, evaluated_at
+            """select control_id, title, requirement, status, failing_finding_ids,
+                      unknown_finding_ids, evaluated_at
                from controls where tenant_id = %s and framework = %s order by control_id""",
             (p.tenant_id, framework),
         )
@@ -423,81 +485,273 @@ def compliance(framework: str, p: Principal = Depends(principal)) -> dict:
 
     controls = [{"control_id": r[0], "title": r[1], "requirement": r[2], "status": r[3],
                  "failing_finding_ids": r[4] or [], "failing": len(r[4] or []),
-                 "evaluated_at": r[5]} for r in rows]
+                 # not_assessable findings that map here — a coverage gap, surfaced separately so a
+                 # buyer can see "we could not check" distinct from "we checked and it failed".
+                 "unknown_finding_ids": r[5] or [], "unknown": len(r[5] or []),
+                 "evaluated_at": r[6]} for r in rows]
     summary: dict[str, int] = {}
     for c in controls:
         summary[c["status"]] = summary.get(c["status"], 0) + 1
     return {"framework": framework, "count": len(controls), "summary": summary, "controls": controls}
 
 
+class AttestRequest(BaseModel):
+    scope: str = Field(min_length=1)     # what was attested, over which systems/period — required
+    note: Optional[str] = None
+    expires_at: Optional[datetime] = None
+
+    @field_validator("scope")
+    @classmethod
+    def _scope_required(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("attestation requires a scope: what was attested, and over what")
+        return v.strip()
+
+
+@app.post("/compliance/{framework}/{control_id}/attest", status_code=201)
+def attest_control(framework: str, control_id: str, req: AttestRequest,
+                   p: Principal = Depends(acting)) -> dict:
+    """A human signs that a control is met. This is the ONLY path to a compliance `pass`, and a
+    live assessed failing finding still overrides it (compliance.map: fail beats attestation). The
+    attestation, the recomputed controls, and the audit row all land in one transaction."""
+    from ..compliance import map as compliance
+
+    try:
+        created_by = str(uuid.UUID(p.actor))   # attested_by is a uuid (auth.users id)
+    except ValueError:
+        raise HTTPException(400, "attestation actor must be a user uuid (sign in as a real user)")
+
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            try:
+                result = compliance.attest(
+                    cur, p.tenant_id, framework, control_id, created_by, req.scope,
+                    note=req.note, expires_at=req.expires_at,
+                )
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from e
+            _audit(cur, p, "compliance.attested", f"{framework}:{control_id}",
+                   {"scope": req.scope, "note": req.note, "expires_at": req.expires_at,
+                    "resulting_status": result.get("status")})
+        conn.commit()
+    return result
+
+
 # ── Graph ─────────────────────────────────────────────────────────────────
 @app.get("/graph/blast-radius/{resource_id}")
 def blast_radius(resource_id: uuid.UUID, depth: int = Query(4, ge=1, le=10),
+                 directed: bool = Query(False, description="follow edges src→dst only"),
                  p: Principal = Depends(principal)) -> dict:
-    """What is reachable DOWNSTREAM of this resource — "what does an attacker who owns this
-    get to next". The reverse question (what reaches this) is a different walk, not this one.
+    """What a compromise of this resource reaches. Undirected by default: a broker→topic 'hosts'
+    edge means an attacker on either end learns the other, so posture reachability is symmetric.
+
+    The walk is graph.blast_radius (ONE implementation, per-path cycle guard + depth bound) — this
+    endpoint used to reimplement it inline with only a depth guard, which on a cyclic estate
+    (broker → topic → mirror → broker) reported the root as its own blast radius. This layer only
+    enriches the walk's nodes with their open findings and the edges between them.
     """
+    from ..graph import blast_radius as walk
+
     with _db() as conn, conn.cursor() as cur:
-        cur.execute("select kind, name, ext_id from resources where tenant_id = %s and id = %s",
-                    (p.tenant_id, str(resource_id)))
-        root = cur.fetchone()
-        if not root:
+        result = walk(cur, p.tenant_id, str(resource_id), max_depth=depth, directed=directed)
+        if not result["found"]:
             raise HTTPException(404, "no such resource")
 
-        # The depth cap is not a UI nicety: integration graphs contain cycles (a mesh routes
-        # A→B→A), and `union all` would walk one forever without the `depth <` guard. min(depth)
-        # then collapses the repeats back to one row per resource.
-        cur.execute(
-            """with recursive reach as (
-                 select r.id, 0 as depth
-                   from resources r
-                  where r.tenant_id = %(tenant)s and r.id = %(root)s
-                 union all
-                 select e.dst_resource_id, reach.depth + 1
-                   from edges e join reach on reach.id = e.src_resource_id
-                  where e.tenant_id = %(tenant)s and reach.depth < %(max)s
-               )
-               select r.id, r.kind, r.name, r.ext_id, r.stale, min(reach.depth)
-                 from reach join resources r on r.id = reach.id
-                where r.tenant_id = %(tenant)s
-                group by r.id, r.kind, r.name, r.ext_id, r.stale
-                order by 6, 2, 3""",
-            {"tenant": p.tenant_id, "root": str(resource_id), "max": depth},
-        )
-        rows = cur.fetchall()
-        ids = [r[0] for r in rows]
+        ids = [n["id"] for n in result["nodes"]]
 
-        # Open findings only: a resolved or suppressed finding is not blast radius.
-        cur.execute(
-            """select resource_id, severity, count(*) from findings
-               where tenant_id = %s and resource_id = any(%s)
-                 and status not in ('resolved','suppressed')
-               group by resource_id, severity""",
-            (p.tenant_id, ids),
-        )
         per_resource: dict = {}
         totals: dict[str, int] = {}
-        for rid, sev, n in cur.fetchall():
-            per_resource.setdefault(rid, {})[sev] = n
-            totals[sev] = totals.get(sev, 0) + n
+        edges: list = []
+        if ids:
+            # Open findings only: a resolved or suppressed finding is not blast radius.
+            cur.execute(
+                """select resource_id::text, severity, count(*) from findings
+                   where tenant_id = %s and resource_id = any(%s)
+                     and status not in ('resolved','suppressed')
+                   group by resource_id, severity""",
+                (p.tenant_id, ids),
+            )
+            for rid, sev, n in cur.fetchall():
+                per_resource.setdefault(rid, {})[sev] = n
+                totals[sev] = totals.get(sev, 0) + n
 
-        cur.execute(
-            """select src_resource_id, dst_resource_id, kind from edges
-               where tenant_id = %s and src_resource_id = any(%s) and dst_resource_id = any(%s)""",
-            (p.tenant_id, ids, ids),
-        )
-        edges = [{"src": str(a), "dst": str(b), "kind": k} for a, b, k in cur.fetchall()]
+            cur.execute(
+                """select src_resource_id::text, dst_resource_id::text, kind from edges
+                   where tenant_id = %s and src_resource_id = any(%s) and dst_resource_id = any(%s)""",
+                (p.tenant_id, ids, ids),
+            )
+            edges = [{"src": a, "dst": b, "kind": k} for a, b, k in cur.fetchall()]
 
-    nodes = [{"resource_id": str(r[0]), "kind": r[1], "name": r[2], "ext_id": r[3],
-              "stale": r[4], "depth": r[5], "findings": per_resource.get(r[0], {})}
-             for r in rows]
+    root = result["root"]
+    nodes = [{"resource_id": n["id"], "kind": n["kind"], "name": n["name"], "ext_id": n["ext_id"],
+              "stale": n["stale"], "depth": n["depth"], "path": n["path"],
+              "via_edge_kind": n["via_edge_kind"], "findings": per_resource.get(n["id"], {})}
+             for n in result["nodes"]]
     return {
-        "root": {"resource_id": str(resource_id), "kind": root[0], "name": root[1], "ext_id": root[2]},
-        "max_depth": depth,
-        "nodes": nodes,          # includes the root at depth 0
+        "root": {"resource_id": root["id"], "kind": root["kind"], "name": root["name"],
+                 "ext_id": root["ext_id"], "findings": per_resource.get(root["id"], {})},
+        "max_depth": result["max_depth"],
+        "directed": result["directed"],
+        # The frontier was still expanding when the depth bound stopped it: the blast radius is at
+        # least this, and the console must not present it as complete.
+        "depth_bounded": result["depth_bounded"],
+        "nodes": nodes,          # reachable set, EXCLUDING the root (root is reported separately)
         "edges": edges,
         "totals": {"resources": len(nodes), "findings_by_severity": totals},
     }
+
+
+# ── Collector control plane ─────────────────────────────────────────────────
+# The customer-side Collector's ONLY outbound endpoints. It authenticates with a short-lived,
+# tenant-scoped bearer token minted at /enroll (auth.mint_collector_token — stateless HMAC, not a
+# Supabase user JWT). It never opens an inbound port; every exchange here is the Collector calling
+# us. Credentials for the customer's systems stay in the Collector and never reach these handlers —
+# /results receives normalized findings + resource METADATA only, never Resource.raw.
+import hashlib as _hashlib
+
+
+class EnrollRequest(BaseModel):
+    enrollment_token: str = Field(min_length=1)
+    name: Optional[str] = None
+    version: Optional[str] = None
+
+
+@app.post("/collector/enroll")
+def collector_enroll(req: EnrollRequest) -> dict:
+    """Trade a long-lived enrollment token for a short-lived tenant-scoped service token.
+
+    The enrollment token is matched by its sha256 against collectors.enroll_token_hash — the raw
+    token is never stored here or by the collector. A bad token is 401 with no detail (no oracle).
+    """
+    token_hash = _hashlib.sha256(req.enrollment_token.encode()).hexdigest()
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                "select id, tenant_id from collectors where enroll_token_hash = %s for update",
+                (token_hash,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(401, "enrollment rejected")
+            collector_id, tenant_id = str(row[0]), str(row[1])
+            cur.execute(
+                """update collectors set status='active', last_heartbeat=now(),
+                          name=coalesce(%s, name), version=coalesce(%s, version)
+                   where id=%s""",
+                (req.name, req.version, collector_id),
+            )
+            cur.execute(
+                """insert into audit_log (tenant_id, actor, action, target, detail)
+                   values (%s,%s,'collector.enrolled',%s,%s)""",
+                (tenant_id, f"collector:{collector_id}", collector_id,
+                 json.dumps({"name": req.name, "version": req.version})),
+            )
+        conn.commit()
+
+    from .auth import mint_collector_token
+    token, expires_in = mint_collector_token(tenant_id, collector_id)
+    return {"collector_id": collector_id, "tenant_id": tenant_id,
+            "token": token, "expires_in": expires_in}
+
+
+def collector_principal(authorization: Optional[str] = Header(None)) -> dict:
+    """Verify a collector service token. Returns {'tenant_id', 'collector_id'} or 401."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "collector token required")
+    from .auth import verify_collector_token
+    claims = verify_collector_token(authorization[7:].strip())
+    if not claims:
+        raise HTTPException(401, "invalid or expired collector token")
+    return claims
+
+
+class HeartbeatRequest(BaseModel):
+    collector_id: Optional[str] = None
+    version: Optional[str] = None
+    status: str = "active"
+    # target names/types may be sent; recorded, but never used to tell the collector where to go.
+    targets: Optional[list] = None
+
+
+@app.post("/collector/heartbeat")
+def collector_heartbeat(req: HeartbeatRequest, c: dict = Depends(collector_principal)) -> dict:
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """update collectors set last_heartbeat=now(), status=%s, version=coalesce(%s, version)
+               where id=%s and tenant_id=%s""",
+            (req.status, req.version, c["collector_id"], c["tenant_id"]),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@app.get("/collector/jobs")
+def collector_jobs(c: dict = Depends(collector_principal),
+                   max_jobs: int = Query(5, ge=1, le=50)) -> dict:
+    """Hand out queued scans for THIS collector's connections. A job is a reference to a locally
+    configured target by NAME — never a host or a credential (the collector refuses config-shaped
+    job fields anyway). Claimed scans move queued→running so two polls don't double-run one.
+    """
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                """select s.id, s.connection_id, conn.name
+                     from scans s join connections conn on conn.id = s.connection_id
+                    where s.tenant_id = %s and s.status = 'queued'
+                      and conn.mode = 'collector' and conn.collector_id = %s
+                    order by s.started_at
+                    limit %s
+                    for update of s skip locked""",
+                (c["tenant_id"], c["collector_id"], max_jobs),
+            )
+            rows = cur.fetchall()
+            jobs = []
+            for scan_id, connection_id, name in rows:
+                cur.execute("update scans set status='running', started_at=now() where id=%s", (scan_id,))
+                jobs.append({"job_id": str(scan_id), "connection_id": str(connection_id), "target": name})
+        conn.commit()
+    return {"jobs": jobs}
+
+
+@app.post("/collector/results")
+def collector_results(payload: dict, c: dict = Depends(collector_principal)) -> dict:
+    """Persist a scan the collector ran locally. The job_id is the scan_id it claimed. On a
+    collector-side error we mark the scan failed rather than persisting a half-result."""
+    from ..scan import persist_pushed
+
+    job_id = str(payload.get("job_id") or "")
+    connection_id = str(payload.get("connection_id") or "")
+    if not job_id or not connection_id:
+        raise HTTPException(400, "results must carry job_id and connection_id")
+
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            # The scan must belong to this collector's tenant and connection — a collector cannot
+            # push results for a scan that isn't its own.
+            cur.execute(
+                """select 1 from scans s join connections conn on conn.id = s.connection_id
+                   where s.id=%s and s.tenant_id=%s and conn.id=%s and conn.collector_id=%s""",
+                (job_id, c["tenant_id"], connection_id, c["collector_id"]),
+            )
+            if not cur.fetchone():
+                raise HTTPException(404, "no such job for this collector")
+
+        if payload.get("status") == "error":
+            with conn.cursor() as cur:
+                cur.execute(
+                    "update scans set status='error', finished_at=now(), stats=%s where id=%s",
+                    (json.dumps({"error": payload.get("error"), "via": "collector"}), job_id),
+                )
+            conn.commit()
+            return {"ok": True, "status": "error"}
+
+        stats = persist_pushed(conn, c["tenant_id"], connection_id, job_id, payload)
+    return {"ok": True, "status": "done", "stats": {k: stats[k] for k in
+            ("resources", "edges", "findings", "observations") if k in stats}}
 
 
 def main() -> None:

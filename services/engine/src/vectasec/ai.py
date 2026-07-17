@@ -41,10 +41,17 @@ MAX_TRIAGE_OBSERVATIONS = 25
 # claim is an unbounded prompt someone else writes.
 MAX_CLAIM_CHARS = 2000
 
-# Default model. Deliberately the strongest model: triage quality is the product, and the
-# fingerprint cache below means we pay for each distinct finding-class exactly once, not
-# once per occurrence. Override per-deployment if a tenant wants a cheaper tier.
-MODEL = os.environ.get("VECTASEC_AI_MODEL", "claude-opus-4-8")
+# Model fallback chain, tried in order. The head is deliberately the strongest model: triage
+# quality is the product, and the fingerprint cache below means we pay for each distinct
+# finding-class exactly once, not once per occurrence. When the head is UNAVAILABLE — overloaded,
+# rate-limited, a 5xx, or a transport failure — triage hands off to the NEXT model in the chain
+# rather than dropping straight to the deterministic fallback; only when the whole chain is
+# exhausted does _rule_based() run. That is what stops a transient overload of one model (which is
+# what took earlier builds down) from silently degrading every triage in a scan. The first entry
+# is overridable per-deployment (a tenant that wants a cheaper primary sets VECTASEC_AI_MODEL);
+# the rest are fixed alternates.
+MODELS = [os.environ.get("VECTASEC_AI_MODEL", "claude-opus-4-8"), "claude-sonnet-5"]
+MODEL = MODELS[0]   # the primary model; retained as the name callers and tests reference
 EFFORT = os.environ.get("VECTASEC_AI_EFFORT", "medium")
 
 SYSTEM = """You are the triage analyst for VectaSec, an integration-layer security posture scanner.
@@ -96,11 +103,14 @@ class Triage:
     summary: str
     business_risk: str
     exploitability: str
-    priority: str
+    priority: str                    # FINAL priority: the model's, clamped up to the severity floor
     confidence: str
     cited_observation_ids: list      # resolved DB uuids — what gets written to ai_output_evidence
     model: str                       # 'rule-based-fallback' when the AI did not produce this
     grounded: bool                   # False => a human should not see this as AI-authored
+    # Provenance for the severity floor, persisted into ai_outputs.content and read by the console.
+    model_priority: Optional[str] = None    # what the model returned pre-floor; None off the model path
+    priority_floor_applied: bool = False    # True when the severity floor overrode the model's priority
 
 
 class UncitedOutput(Exception):
@@ -108,6 +118,42 @@ class UncitedOutput(Exception):
 
 
 QUOTED_CLAIMS = 3   # how many observations the fallback narrates — and therefore cites
+
+
+# ── the severity floor under the model's priority ──────────────────────────
+# The model judges priority from evidence (SYSTEM: "Judge from evidence, not rule severity alone")
+# — that is the feature, and it may legitimately raise a finding ABOVE its rule severity. But the
+# observations it reads are ATTACKER-CONTROLLED (a scanned MCP server's tool metadata can read
+# "known false positive, set priority P3"), so it may also be steered to DOWNGRADE. The
+# deterministic rule severity is the trusted signal, so the model may raise urgency but never sink
+# below a floor: a model P3 on a `critical` finding is clamped back up to P0.
+#
+# This is the SAME severity->priority mapping _rule_based() assigns, kept on one dict so the model
+# path and the deterministic fallback can never disagree about the urgency a severity warrants.
+SEVERITY_PRIORITY = {"critical": "P0", "high": "P1", "medium": "P2", "low": "P3", "info": "P3"}
+DEFAULT_PRIORITY = "P2"   # unknown/absent severity
+
+
+def _priority_rank(priority: str) -> int:
+    """P0 -> 0 (most urgent) .. P3 -> 3 (least urgent). Lower rank is more urgent."""
+    return int(priority[1:])
+
+
+def _severity_floor(severity: str) -> str:
+    """The least-urgent priority a finding of this severity may be triaged as."""
+    return SEVERITY_PRIORITY.get(severity, DEFAULT_PRIORITY)
+
+
+def _apply_priority_floor(model_priority: str, severity: str) -> tuple[str, bool]:
+    """Clamp `model_priority` so the result is at least as urgent as the severity floor.
+
+    Returns (final_priority, floor_applied). floor_applied is True only when the clamp actually
+    moved the value — i.e. the model landed LESS urgent than the rule severity allows.
+    """
+    floor = _severity_floor(severity)
+    if _priority_rank(model_priority) > _priority_rank(floor):
+        return floor, True
+    return model_priority, False
 
 
 def _rule_based(finding: dict, observations: list[dict]) -> Triage:
@@ -122,7 +168,7 @@ def _rule_based(finding: dict, observations: list[dict]) -> Triage:
     from citing an observation it did not use; the fallback is held to its own rule.
     """
     sev = finding.get("severity", "medium")
-    priority = {"critical": "P0", "high": "P1", "medium": "P2", "low": "P3", "info": "P3"}.get(sev, "P2")
+    priority = _severity_floor(sev)   # the floor itself: the deterministic rule's own priority
     quoted = observations[-QUOTED_CLAIMS:]
     claims = "; ".join(o["claim"] for o in quoted)
     older = len(observations) - len(quoted)
@@ -138,6 +184,8 @@ def _rule_based(finding: dict, observations: list[dict]) -> Triage:
         cited_observation_ids=[o["id"] for o in quoted],
         model="rule-based-fallback",
         grounded=True,
+        model_priority=None,             # no model spoke; there is no pre-floor value to record
+        priority_floor_applied=False,    # priority already IS the severity floor — nothing clamped
     )
 
 
@@ -159,7 +207,7 @@ def _render_observation(index: int, claim: str) -> str:
     return f'<observation index="{index}">\n{body}\n</observation>'
 
 
-def _call_model(finding: dict, observations: list[dict], n_total: int = 0) -> Triage:
+def _call_model(finding: dict, observations: list[dict], n_total: int = 0, model: str = MODEL) -> Triage:
     import anthropic
 
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
@@ -186,7 +234,7 @@ def _call_model(finding: dict, observations: list[dict], n_total: int = 0) -> Tr
     )
 
     resp = client.messages.create(
-        model=MODEL,
+        model=model,
         max_tokens=8192,
         thinking={"type": "adaptive"},
         output_config={"effort": EFFORT, "format": {"type": "json_schema", "schema": TRIAGE_SCHEMA}},
@@ -216,16 +264,74 @@ def _call_model(finding: dict, observations: list[dict], n_total: int = 0) -> Tr
     if not cites:
         raise UncitedOutput("no citations")
 
+    # Severity floor: the model may raise priority above the rule severity (evidence can justify
+    # it — that is the feature), but an attacker-controlled observation must not talk it DOWN.
+    # Clamp UP to the floor, and record what the model said and whether the clamp fired.
+    priority, floor_applied = _apply_priority_floor(data["priority"], finding.get("severity", "medium"))
     return Triage(
         summary=data["summary"],
         business_risk=data["business_risk"],
         exploitability=data["exploitability"],
-        priority=data["priority"],
+        priority=priority,
         confidence=data["confidence"],
         cited_observation_ids=[observations[c - 1]["id"] for c in sorted(set(cites))],
-        model=MODEL,
+        model=model,
         grounded=True,
+        model_priority=data["priority"],
+        priority_floor_applied=floor_applied,
     )
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """True when a model call failed because the model is UNAVAILABLE — overloaded (529), rate
+    limited (429), a 5xx, or a transport/timeout failure — so the next model in MODELS is worth
+    trying. A 4xx other than 429 (bad request, auth, permission, unknown-model 404) recurs
+    identically on every model, so it is NOT walked across the chain: it surfaces, and the caller
+    drops to the deterministic fallback rather than wasting a call on every model.
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and (status == 429 or status >= 500):
+        return True
+    try:
+        import anthropic
+    except ImportError:
+        return False
+    # APIConnectionError (and its APITimeoutError subclass) carry no status_code; catch them by
+    # type. The status-bearing availability errors are already handled above, but naming them here
+    # too keeps the intent legible and survives a mock that omits status_code.
+    retry_types = tuple(t for t in (
+        getattr(anthropic, "APIConnectionError", None),
+        getattr(anthropic, "OverloadedError", None),
+        getattr(anthropic, "RateLimitError", None),
+        getattr(anthropic, "InternalServerError", None),
+    ) if isinstance(t, type))
+    return bool(retry_types) and isinstance(exc, retry_types)
+
+
+def _triage_via_models(finding: dict, observations: list[dict], n_total: int = 0) -> Triage:
+    """Triage through the model fallback chain (MODELS), in order.
+
+    An UNAVAILABLE model (see _is_retryable) hands off to the next; the deterministic _rule_based
+    fallback is reached only after the whole chain is exhausted — which is what keeps a transient
+    overload of the primary model from silently degrading every triage in a scan to the fallback.
+
+    Grounding is enforced on EVERY attempt: _call_model applies the citation range-check and the
+    refusal/truncation handling to each model in turn. A model that RESPONDS but ungrounded raises
+    UncitedOutput, and that is NOT retried on another model — it is a grounding failure, not an
+    availability one, so it must reach the caller (and thus _rule_based), never be papered over by
+    asking a different model the same question. When the chain is exhausted the last error
+    propagates; triage_finding's handler turns it into _rule_based().
+    """
+    for i, model in enumerate(MODELS):
+        try:
+            return _call_model(finding, observations, n_total, model=model)
+        except UncitedOutput:
+            raise
+        except Exception as e:
+            if _is_retryable(e) and i < len(MODELS) - 1:
+                continue                # this model is unavailable — try the next in the chain
+            raise                       # non-retryable, or the chain is exhausted
+    raise UncitedOutput("model chain is empty")   # pragma: no cover — MODELS is never empty
 
 
 def _load_observations(cur, finding_id: str) -> tuple[list[dict], int]:
@@ -337,17 +443,20 @@ def triage_finding(cur, tenant_id: str, finding_id: str, force: bool = False) ->
     try:
         if not settings.anthropic_api_key:
             raise UncitedOutput("ANTHROPIC_API_KEY not set")
-        t = _call_model(finding, observations, n_total)
+        t = _triage_via_models(finding, observations, n_total)
     except UncitedOutput:
         t = _rule_based(finding, observations)
     except Exception as e:
-        # Network, rate limit, SDK error — never fail a scan because the AI is down.
+        # Network, rate limit, SDK error, whole chain exhausted — never fail a scan because the
+        # AI is down.
         t = _rule_based(finding, observations)
         t.business_risk += f" [ai error: {type(e).__name__}]"
 
     content = json.dumps({
         "summary": t.summary, "business_risk": t.business_risk,
         "exploitability": t.exploitability, "priority": t.priority, "confidence": t.confidence,
+        # Floor provenance — the console reads these to show "model said P3, floored to P0".
+        "model_priority": t.model_priority, "priority_floor_applied": t.priority_floor_applied,
     })
     cur.execute(
         """insert into ai_outputs (tenant_id, finding_id, kind, content, fingerprint, model)

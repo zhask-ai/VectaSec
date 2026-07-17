@@ -1,6 +1,7 @@
 import type { Route } from 'next';
 
-import { SEVERITIES, type Severity, type UiStatus } from '@/lib/types';
+import { SEVERITIES, type Assessment, type Severity, type UiStatus } from '@/lib/types';
+import { ASSESSMENTS } from './assessment';
 
 /* Filter vocabulary — shared by the server (data.ts builds the query from it) and the client
  * (filters.tsx builds hrefs from it). Deliberately NOT in the DAL: data.ts is `server-only`,
@@ -14,6 +15,9 @@ import { SEVERITIES, type Severity, type UiStatus } from '@/lib/types';
 export type FindingFilters = {
   severity: Severity[];
   status: UiStatus[];
+  /** Assessability axis. Empty = both. Lets an analyst isolate coverage gaps (not_assessable)
+   * from real findings, or hide them to work the real queue. */
+  assessment: Assessment[];
   /** First dotted segment of rule_id — "KAFKA", "KONG". See `systemOf`. */
   system: string | null;
   /** Free-text rule_id prefix. */
@@ -75,13 +79,20 @@ export function parseFilters(sp: Record<string, string | string[] | undefined>):
   return {
     severity: many(sp.severity).filter((s): s is Severity => (SEVERITIES as readonly string[]).includes(s)),
     status: many(sp.status).filter((s): s is UiStatus => (UI_STATUSES as readonly string[]).includes(s)),
+    assessment: many(sp.assessment).filter((s): s is Assessment => (ASSESSMENTS as readonly string[]).includes(s)),
     system: systemRaw ? sanitizeRule(systemRaw) || null : null,
     rule: ruleRaw ? sanitizeRule(ruleRaw) || null : null,
   };
 }
 
 export function hasActiveFilters(f: FindingFilters): boolean {
-  return f.severity.length > 0 || f.status.length > 0 || f.system !== null || f.rule !== null;
+  return (
+    f.severity.length > 0 ||
+    f.status.length > 0 ||
+    f.assessment.length > 0 ||
+    f.system !== null ||
+    f.rule !== null
+  );
 }
 
 /** Serialize filters back to a query string. Empty facets are omitted rather than written as
@@ -90,6 +101,7 @@ export function toSearchParams(f: FindingFilters): string {
   const p = new URLSearchParams();
   if (f.severity.length) p.set('severity', f.severity.join(','));
   if (f.status.length) p.set('status', f.status.join(','));
+  if (f.assessment.length) p.set('assessment', f.assessment.join(','));
   if (f.system) p.set('system', f.system);
   if (f.rule) p.set('rule', f.rule);
   const s = p.toString();

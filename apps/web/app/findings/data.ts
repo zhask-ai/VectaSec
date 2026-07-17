@@ -3,7 +3,8 @@ import 'server-only';
 import { cache } from 'react';
 
 import { createClient } from '@/lib/supabase/server';
-import { UI_STATUS_OF, type FindingStatus, type Severity, type UiStatus } from '@/lib/types';
+import { UI_STATUS_OF, type Assessment, type FindingStatus, type Severity, type UiStatus } from '@/lib/types';
+import { ASSESSMENTS } from './assessment';
 import { absolute, relative } from './format';
 import {
   buildFacets,
@@ -53,6 +54,26 @@ const DB_STATUSES_OF: Record<UiStatus, FindingStatus[]> = {
   muted: ['suppressed', 'accepted'],
 };
 
+/** The minimal slice of a PostgREST builder these queries chain. Declaring the methods to return
+ * the same shape is what keeps `.in`/`.like` visible after the first call — supabase-js hands back
+ * the same builder each time, so the `as T` at the end is sound. */
+type Filterable = {
+  in(column: string, values: readonly string[]): Filterable;
+  like(column: string, pattern: string): Filterable;
+};
+
+/** Apply every finding filter EXCEPT assessment. Shared by the list query and the two assessment
+ * head-counts, so the coverage-gap facet is counted with the other facets applied but not its own
+ * — the standard faceted semantics (see buildFacets). The list query layers assessment on top. */
+function sharedFindingFilters<T extends Filterable>(q: T, filters: FindingFilters): T {
+  let out: Filterable = q;
+  if (filters.severity.length) out = out.in('severity', filters.severity);
+  if (filters.status.length) out = out.in('status', filters.status.flatMap((s) => DB_STATUSES_OF[s]));
+  if (filters.system) out = out.like('rule_id', `${filters.system}.%`);
+  if (filters.rule) out = out.like('rule_id', `${filters.rule}%`);
+  return out as T;
+}
+
 /* The shape PostgREST returns for the list select below. Written out rather than inferred
  * because the project has no generated DB types, so supabase-js hands back `any` — and an
  * `any` that flows into a client component's props is how `raw` eventually leaks. */
@@ -62,11 +83,16 @@ type ListRowRaw = {
   title: string;
   severity: string;
   status: string;
+  assessment: string;
+  assessment_reason: string | null;
   last_seen: string;
   resources: { id: string; kind: string; name: string; namespace: string | null } | null;
   /** PostgREST returns an aggregate embed as an array: `[{ count: 3 }]`, or `[]` for none. */
   observations: { count: number }[] | null;
 };
+
+/** One value of the assessment facet, counted exactly (head query, not a truncatable row fetch). */
+export type AssessmentFacet = { key: Assessment; count: number };
 
 export type FindingsView =
   | { state: 'error'; message: string }
@@ -80,35 +106,50 @@ export type FindingsView =
       shown: number;
       truncated: boolean;
       facets: Facets;
+      /** The assessment axis is not in the findings_facets view (that groups by rule/severity/
+       * status only), so its counts are computed with exact head queries rather than through
+       * buildFacets. Kept separate for exactly that reason. */
+      assessmentFacet: AssessmentFacet[];
       /** Findings exist for this tenant, but not under these filters. Distinguishes
        * "you are clean" from "your filter is too narrow" — which must never look alike. */
       tenantHasFindings: boolean;
       connections: number;
       scannedAtLabel: string | null;
+      /** The caller's tenant id, resolved under RLS — the only thing the live-findings island
+       * needs, and never a secret (it is already the filter on every row the page renders). */
+      tenantId: string | null;
     };
 
 export async function getFindingsView(filters: FindingFilters): Promise<FindingsView> {
   const supabase = await createClient();
 
-  let q = supabase
+  const base = supabase
     .from('findings')
     // resources is embedded WITHOUT `raw`, and connections is not embedded at all. Both carry
     // payloads that must never reach a client component; the fix is to not select them.
     .select(
-      'id, rule_id, title, severity, status, last_seen, resources(id, kind, name, namespace), observations(count)',
+      'id, rule_id, title, severity, status, assessment, assessment_reason, last_seen, resources(id, kind, name, namespace), observations(count)',
       { count: 'exact' },
     )
     .order('last_seen', { ascending: false })
     .limit(LIST_LIMIT);
 
-  if (filters.severity.length) q = q.in('severity', filters.severity);
-  if (filters.status.length) {
-    q = q.in('status', filters.status.flatMap((s) => DB_STATUSES_OF[s]));
-  }
-  if (filters.system) q = q.like('rule_id', `${filters.system}.%`);
-  if (filters.rule) q = q.like('rule_id', `${filters.rule}%`);
+  let q = sharedFindingFilters(base, filters);
+  // Assessment is layered on ONLY here, not in the shared helper: the two head-counts below need
+  // the other filters without it, so the coverage-gap facet counts against the same base the
+  // severity/status facets do.
+  if (filters.assessment.length) q = q.in('assessment', filters.assessment);
 
-  const [connectionsRes, facetRes, listRes] = await Promise.all([
+  const assessmentCount = (a: Assessment) =>
+    sharedFindingFilters(
+      // head: true means no rows cross the wire — count only, and count: 'exact' is never
+      // truncated at Max Rows the way a row fetch is. This is how the coverage-gap facet stays
+      // exact past the 1000-row cap.
+      supabase.from('findings').select('id', { count: 'exact', head: true }),
+      filters,
+    ).eq('assessment', a);
+
+  const [connectionsRes, facetRes, listRes, tenantRes, assessedRes, notAssessableRes] = await Promise.all([
     supabase.from('connections').select('id, last_scanned_at'),
     // Facet source: pre-aggregated buckets, unfiltered — counts have to be computed against the
     // unfiltered set or every facet reads zero as soon as you use it.
@@ -123,6 +164,12 @@ export async function getFindingsView(filters: FindingFilters): Promise<Findings
     // the cap — which also retires the old O(findings)-over-the-wire ceiling noted here.
     supabase.from('findings_facets').select('severity, status, rule_id, n'),
     q,
+    // The tenant id for the live-findings island. RLS scopes `tenants` to the caller's
+    // memberships, so this cannot name a foreign tenant; limit(1) matches the console's
+    // one-tenant-per-view assumption (see LiveFindings).
+    supabase.from('tenants').select('id').limit(1),
+    assessmentCount('assessed'),
+    assessmentCount('not_assessable'),
   ]);
 
   if (connectionsRes.error) return { state: 'error', message: connectionsRes.error.message };
@@ -146,6 +193,14 @@ export async function getFindingsView(filters: FindingFilters): Promise<Findings
 
   const rows = ((listRes.data ?? []) as unknown as ListRowRaw[]).map(toFindingRow);
 
+  // These enhancements never fail the page: they run under the same RLS as the list, so if the
+  // list came back they almost certainly did too — but a hiccup on one should cost the assessment
+  // facet or the live pill, not the whole queue. Default rather than error.
+  const assessmentCounts: Record<Assessment, number> = {
+    assessed: assessedRes.count ?? 0,
+    not_assessable: notAssessableRes.count ?? 0,
+  };
+
   return {
     state: 'ok',
     groups: groupByRule(rows),
@@ -153,9 +208,11 @@ export async function getFindingsView(filters: FindingFilters): Promise<Findings
     shown: rows.length,
     truncated: (listRes.count ?? 0) > rows.length,
     facets: buildFacets(facetRows, filters),
+    assessmentFacet: ASSESSMENTS.map((key) => ({ key, count: assessmentCounts[key] })),
     tenantHasFindings: facetRows.length > 0,
     connections: connections.length,
     scannedAtLabel: scannedAt ? relative(scannedAt) : null,
+    tenantId: (tenantRes.data?.[0]?.id as string | undefined) ?? null,
   };
 }
 
@@ -179,6 +236,10 @@ function toFindingRow(r: ListRowRaw): FindingRow {
         }
       : null,
     evidenceCount: r.observations?.[0]?.count ?? 0,
+    // Any value other than the two known ones falls back to 'assessed' — a coverage gap must be
+    // an explicit, checked state, never something an unrecognised string slides into.
+    assessment: r.assessment === 'not_assessable' ? 'not_assessable' : 'assessed',
+    assessmentReason: r.assessment_reason,
     lastSeenLabel: relative(r.last_seen),
     lastSeenIso: absolute(r.last_seen),
   };
@@ -205,6 +266,13 @@ export type TriageView = {
    * generated and which are deterministic — mislabelling the fallback as AI is a lie about
    * provenance in the one place this product cannot afford one. */
   isAi: boolean;
+  /** The rule's severity floor overrode the model's own priority (e.g. the model said P3 but a
+   * critical rule floors it at P0). Read defensively — absent on triage written before the engine
+   * emitted it. When true, `modelPriority` is the number the model actually returned. */
+  priorityFloorApplied: boolean;
+  /** The model's own priority before any floor, e.g. "P3". Only meaningful when
+   * priorityFloorApplied is true; null when the engine did not record it. */
+  modelPriority: string | null;
   createdAtIso: string;
   createdAtLabel: string;
   /** Observation ids this output actually cited (ai_output_evidence), NOT every observation on
@@ -219,6 +287,10 @@ export type FindingDetail = {
   severity: Severity;
   status: FindingStatus;
   uiStatus: UiStatus;
+  /** 'not_assessable' = a coverage gap. The header shows NotAssessedBadge instead of a severity
+   * mark and surfaces assessmentReason, so it cannot be read as a real finding or a clean pass. */
+  assessment: Assessment;
+  assessmentReason: string | null;
   assignee: string | null;
   remediation: string | null;
   detail: string | null;
@@ -240,6 +312,8 @@ type DetailRowRaw = {
   title: string;
   severity: string;
   status: string;
+  assessment: string;
+  assessment_reason: string | null;
   assignee: string | null;
   remediation: string | null;
   detail: string | null;
@@ -269,7 +343,7 @@ export const getFinding = cache(async (id: string): Promise<FindingDetail | null
   const { data, error } = await supabase
     .from('findings')
     .select(
-      'id, rule_id, title, severity, status, assignee, remediation, detail, fingerprint, first_seen, last_seen, ' +
+      'id, rule_id, title, severity, status, assessment, assessment_reason, assignee, remediation, detail, fingerprint, first_seen, last_seen, ' +
         'resources(id, kind, name, namespace, ext_id, connections(type, name))',
     )
     .eq('id', id)
@@ -291,6 +365,8 @@ export const getFinding = cache(async (id: string): Promise<FindingDetail | null
     severity: row.severity as Severity,
     status,
     uiStatus: UI_STATUS_OF[status] ?? 'open',
+    assessment: row.assessment === 'not_assessable' ? 'not_assessable' : 'assessed',
+    assessmentReason: row.assessment_reason,
     assignee: row.assignee,
     remediation: row.remediation,
     detail: row.detail,
@@ -378,6 +454,12 @@ async function getTriage(findingId: string): Promise<TriageView | null> {
   const str = (k: string): string => (typeof parsed[k] === 'string' ? (parsed[k] as string) : '');
   const model = row.model ?? 'unknown';
 
+  // Read DEFENSIVELY: these keys are absent on triage rows written before the engine emitted them,
+  // so only a literal `true` counts as "floor applied", and model_priority is null unless it is
+  // actually a string. Never infer a floor from a missing field.
+  const priorityFloorApplied = parsed['priority_floor_applied'] === true;
+  const modelPriority = typeof parsed['model_priority'] === 'string' ? (parsed['model_priority'] as string) : null;
+
   return {
     summary: str('summary'),
     businessRisk: str('business_risk'),
@@ -386,6 +468,8 @@ async function getTriage(findingId: string): Promise<TriageView | null> {
     confidence: str('confidence') || 'unknown',
     model,
     isAi: model !== 'rule-based-fallback',
+    priorityFloorApplied,
+    modelPriority,
     createdAtIso: absolute(row.created_at),
     createdAtLabel: relative(row.created_at),
     citedObservationIds: (row.ai_output_evidence ?? []).map((e) => e.observation_id),

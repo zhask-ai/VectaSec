@@ -7,6 +7,7 @@
 """
 import argparse
 import json
+import logging
 import sys
 
 from .config import load_env, settings
@@ -157,6 +158,23 @@ def cmd_doctor(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_worker(args) -> int:
+    """Drain the pgmq scan queue: adopt each queued scan and run it (STATUS.md gaps 0, 2).
+
+    A long-running process, so it logs (to stderr) rather than printing to a console someone is
+    reading interactively. `--once` drains and exits (tests/CI); `--reap-only` just ages out
+    stuck 'running' scans and exits.
+    """
+    from .worker import run_worker
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    )
+    run_worker(once=args.once, reap_only=args.reap_only)
+    return 0
+
+
 def main() -> int:
     # Here and not at import: an operator running `vectasec` opts into the ambient `.env`; a
     # process that merely imports vectasec (the collector, for fingerprint()) does not. See
@@ -187,6 +205,12 @@ def main() -> int:
 
     d = sub.add_parser("doctor", help="check engine wiring")
     d.set_defaults(fn=cmd_doctor)
+
+    w = sub.add_parser("worker", help="drain the scan queue (pgmq vectasec_scans) and reap stuck scans")
+    w.add_argument("--once", action="store_true", help="drain the queue then exit (for tests/CI)")
+    w.add_argument("--reap-only", action="store_true",
+                   help="only age out stuck 'running' scans, then exit (touch no queue message)")
+    w.set_defaults(fn=cmd_worker)
 
     args = p.parse_args()
     return args.fn(args)

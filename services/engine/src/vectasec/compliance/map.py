@@ -964,6 +964,58 @@ def _covered(cur, tenant_id: str) -> set:
     return families
 
 
+def _current_attestations(cur, tenant_id: str, declared) -> set:
+    """(framework, control_id) pairs carrying a LIVE (unexpired) human attestation.
+
+    This is the only input that can produce a `pass`. An expired attestation is silently
+    ignored — a sign-off is a point-in-time statement, not a permanent one.
+    """
+    cur.execute(
+        """select framework, control_id from control_attestations
+           where tenant_id = %s and (expires_at is null or expires_at > now())""",
+        (tenant_id,),
+    )
+    pairs = {(fw, cid) for fw, cid in cur.fetchall()}
+    if declared is not None:
+        pairs = {(fw, cid) for (fw, cid) in pairs if fw in declared}
+    return pairs
+
+
+def attest(cur, tenant_id: str, framework: str, control_id: str, attested_by: str,
+           scope: str, note=None, evidence_ref=None, expires_at=None) -> dict:
+    """Record a human's sign-off that a control is met, then re-evaluate so the pass shows at once.
+
+    This is the mechanism the evaluate() docstring used to say did not exist. It does not weaken
+    the no-pass-from-silence contract: a live *assessed* failing finding still overrides the
+    attestation (evaluate(): fail beats attestation), so this can only move an otherwise
+    clean-or-unknown control to `pass`. `scope` is REQUIRED — an attestation that does not say
+    what was attested, over which systems and period, is not an attestation.
+
+    Runs on the caller's cursor and does not commit — the API layer owns the transaction so the
+    attestation row and the recomputed controls land together and an audit_log row joins them.
+    """
+    if not scope or not str(scope).strip():
+        raise ValueError("attestation requires a scope")
+    if framework not in CONTROL_CATALOGUE or control_id not in CONTROL_CATALOGUE[framework]:
+        raise ValueError(f"unknown control {framework}:{control_id}")
+    cur.execute(
+        """insert into control_attestations
+             (tenant_id, framework, control_id, attested_by, scope, note, evidence_ref, expires_at)
+           values (%s,%s,%s,%s,%s,%s,%s::jsonb,%s) returning id""",
+        (tenant_id, framework, control_id, attested_by, scope, note,
+         json.dumps(evidence_ref or {}), expires_at),
+    )
+    att_id = cur.fetchone()[0]
+    result = evaluate(cur, tenant_id)
+    return {"attestation_id": str(att_id), "framework": framework,
+            "control_id": control_id, "status": _status_of(result, framework, control_id)}
+
+
+def _status_of(evaluation: dict, framework: str, control_id: str) -> Optional[str]:
+    """Pull one control's freshly-computed status out of an evaluate() result for the API reply."""
+    return evaluation.get("statuses", {}).get(f"{framework}:{control_id}")
+
+
 def evaluate(cur, tenant_id: str, *, frameworks=None, scope_tags=()) -> dict:
     """Recompute the controls table for a tenant from current open findings.
 
@@ -986,20 +1038,22 @@ def evaluate(cur, tenant_id: str, *, frameworks=None, scope_tags=()) -> dict:
     control is met. A `pass` derived that way is a claim we cannot support and is the specific
     thing the research says gets a vendor thrown out of an audit.
 
-    This used to be an opt-in `allow_pass` flag. It was removed rather than defaulted off: the
-    `controls` table has no provenance column, so a scan-derived `pass` would have been
-    indistinguishable from an attested one, and the console (which tells the budget-holder that
-    every `pass` is human-attested) had no way to tell them apart. A guarantee that holds only
-    while nobody passes the flag is not a guarantee. A control with scan coverage and no failing
-    finding therefore stays `unknown` — the honest answer — until an attestation mechanism exists
-    to move it. No such mechanism exists today, so no `pass` can currently enter the table at all;
-    `covered_families` in the return value is what reports where we actually looked.
+    `pass` enters the table by exactly ONE path: a live human attestation (control_attestations,
+    written by attest()). A clean scan never writes `pass` on its own — the research this mapping
+    is built from (docs/research/compliance-mapping.md §0 Rule 1) forbids it: PCI 7.2.5 covers
+    every application and system account in the CDE, and we see only the brokers we scanned, so no
+    hit on those brokers is not evidence the control is met. The attestation is a person taking
+    responsibility for that gap, with a stated scope, and a live *assessed* failing finding still
+    overrides it (fail beats attestation) — so a `pass` here always means "no current evidence of
+    failure, and a human signed for the coverage." A control with scan coverage and no failing
+    finding but no attestation stays `unknown`, the honest answer; `covered_families` reports
+    where we actually looked.
     """
     declared = frozenset(frameworks) if frameworks is not None else None
     tenant_tags = frozenset(scope_tags)
 
     cur.execute(
-        """select f.id, f.rule_id, coalesce(r.labels, '{}'::jsonb)
+        """select f.id, f.rule_id, coalesce(r.labels, '{}'::jsonb), f.assessment
            from findings f
              left join resources r on r.id = f.resource_id
            where f.tenant_id = %s and f.status = any(%s)""",
@@ -1007,10 +1061,17 @@ def evaluate(cur, tenant_id: str, *, frameworks=None, scope_tags=()) -> dict:
     )
     open_findings = cur.fetchall()
 
-    # (framework, control_id) -> failing finding ids, in a stable order for a stable diff.
+    # A finding maps to a control as one of two things, never conflated:
+    #   • assessment='assessed'       => it FAILS the control (real evidence of a violation).
+    #   • assessment='not_assessable' => it could not be checked, so it can only make the control
+    #     UNKNOWN, never fail it. Failing a control on our own blind spot is the exact dishonesty
+    #     findings.assessment exists to prevent (STATUS.md gap 19).
+    # Both buckets are keyed (framework, control_id) with stable-sorted ids for a stable diff.
     failing: dict = {}
-    for finding_id, rule_id, labels in open_findings:
+    unknown: dict = {}
+    for finding_id, rule_id, labels, assessment in open_findings:
         tags = _scope_tags(labels, tenant_tags)
+        bucket = unknown if assessment == "not_assessable" else failing
         for ref in controls_for(rule_id):
             if declared is not None and ref.framework not in declared:
                 continue
@@ -1018,45 +1079,56 @@ def evaluate(cur, tenant_id: str, *, frameworks=None, scope_tags=()) -> dict:
             # do not reach this asset, so the ref says nothing about it.
             if any(g not in tags for g in ref.gate):
                 continue
-            failing.setdefault((ref.framework, ref.control_id), []).append(str(finding_id))
+            bucket.setdefault((ref.framework, ref.control_id), []).append(str(finding_id))
 
     covered = _covered(cur, tenant_id)
+    attested = _current_attestations(cur, tenant_id, declared)
 
     counts = {"fail": 0, "pass": 0, "unknown": 0, "not_applicable": 0}
+    statuses: dict[str, str] = {}   # "framework:control_id" -> status, for attest()'s reply
     rows = 0
     for framework, controls in CONTROL_CATALOGUE.items():
         for control_id, control in controls.items():
             key = (framework, control_id)
             ids = sorted(set(failing.get(key, [])))
+            unknown_ids = sorted(set(unknown.get(key, [])))
 
             if declared is not None and framework not in declared:
                 status = "not_applicable"   # out of scope for this tenant: not "we don't know"
                 ids = []
+                unknown_ids = []
             elif ids:
-                status = "fail"             # the only status a finding can prove
+                # An assessed violation. ALWAYS wins — even over a human attestation. You cannot
+                # sign away a control the scanner can currently prove is broken (decision 1).
+                status = "fail"
+            elif key in attested:
+                # The ONLY path to `pass`: a current, unexpired human attestation, on a control
+                # with no assessed failure. A clean scan alone can never reach here.
+                status = "pass"
             else:
-                # Two different silences, deliberately collapsed to the same answer: we scanned
-                # something that could speak to this control and it was clean, or we scanned
-                # nothing that could. Neither is evidence the control is met, so both are
-                # `unknown`. The first is reported as coverage (`covered_families`), never as a
-                # result. See the module header, Rule 1.
+                # Clean-but-unattested, or only not_assessable findings map here. Neither is
+                # evidence the control is met, so both are `unknown` — the honest answer. Where we
+                # actually looked is reported via `covered_families`, never as a result. Module
+                # header, Rule 1.
                 status = "unknown"
 
             cur.execute(
                 """insert into controls
                      (tenant_id, framework, control_id, title, requirement, status,
-                      failing_finding_ids, evaluated_at)
-                   values (%s,%s,%s,%s,%s,%s,%s::jsonb, now())
+                      failing_finding_ids, unknown_finding_ids, evaluated_at)
+                   values (%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb, now())
                    on conflict (tenant_id, framework, control_id) do update
                      set title               = excluded.title,
                          requirement         = excluded.requirement,
                          status              = excluded.status,
                          failing_finding_ids = excluded.failing_finding_ids,
+                         unknown_finding_ids = excluded.unknown_finding_ids,
                          evaluated_at        = now()""",
                 (tenant_id, framework, control_id, control.title, control.requirement,
-                 status, json.dumps(ids)),
+                 status, json.dumps(ids), json.dumps(unknown_ids)),
             )
             counts[status] += 1
+            statuses[f"{framework}:{control_id}"] = status
             rows += 1
 
     return {
@@ -1065,6 +1137,8 @@ def evaluate(cur, tenant_id: str, *, frameworks=None, scope_tags=()) -> dict:
         "covered_families": sorted(covered),
         "open_findings": len(open_findings),
         "mapped_findings": sum(len(v) for v in failing.values()),
+        "unassessable_findings": sum(len(v) for v in unknown.values()),
         **counts,
+        "statuses": statuses,
         "failing": {f"{fw}:{cid}": ids for (fw, cid), ids in sorted(failing.items())},
     }

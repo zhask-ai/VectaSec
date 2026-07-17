@@ -1,7 +1,7 @@
 """Kafka connector — read-only. Lists brokers/topics and reads broker config
 via the Admin API, normalising into resources."""
 from ..registry import connector
-from ..contracts import Resource, Collected
+from ..contracts import Resource, Edge, Collected
 
 
 def _normalise(entries: dict) -> dict:
@@ -139,9 +139,15 @@ def collect(config: dict) -> Collected:
         except Exception:
             pass  # a target that denies topic DescribeConfigs leaves topic rules indeterminate
 
+    # broker --hosts--> topic edges. A topic is linked to the broker(s) that actually LEAD its
+    # partitions, not to every broker: partition leadership is where a topic's traffic and its
+    # exposure live, so "what does this broker touch" and blast-radius stay accurate on a
+    # multi-broker cluster. ext_ids match the Resources above exactly, or scan.py's _persist_edges
+    # drops the edge. A partition with no live leader (leader == -1) is skipped rather than linked
+    # to a broker that isn't there.
+    edges: list[Edge] = []
+    known_brokers = {b.id for b in md.brokers.values()}
     for t in md.topics.values():
-        # Replication factor is per-partition; the minimum is what durability rules must reason
-        # about, since one under-replicated partition is enough to lose data.
         rfs = [len(p.replicas) for p in t.partitions.values()]
         resources.append(Resource(
             kind="topic",
@@ -153,5 +159,15 @@ def collect(config: dict) -> Collected:
                  "internal": (t.topic or "").startswith("__"),
                  "config": topic_cfg.get(t.topic, {})},
         ))
+        leaders = {p.leader for p in t.partitions.values()
+                   if p.leader in known_brokers and p.leader >= 0}
+        # Fall back to every broker only if leadership is unknown (metadata gave no usable leader)
+        # — a topic must not silently vanish from the graph because leader data was absent.
+        for bid in (leaders or known_brokers):
+            edges.append(Edge(
+                src_ext_id=f"broker-{bid}", dst_ext_id=f"topic-{t.topic}", kind="hosts",
+                labels={"leads_partitions": str(sum(1 for p in t.partitions.values()
+                                                    if p.leader == bid))},
+            ))
 
-    return Collected(resources=resources, edges=[])
+    return Collected(resources=resources, edges=edges)

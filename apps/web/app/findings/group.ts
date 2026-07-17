@@ -2,6 +2,7 @@ import {
   SEVERITIES,
   SEVERITY_RANK,
   UI_STATUS_OF,
+  type Assessment,
   type FindingStatus,
   type Severity,
   type UiStatus,
@@ -35,6 +36,9 @@ export type FindingRow = {
    * finding with no evidence is a rumour, and the AI layer refuses to triage it (api/main.py
    * returns 422). Surfacing the 0 is how that becomes explicable instead of mysterious. */
   evidenceCount: number;
+  /** 'not_assessable' = a coverage gap. Rendered with NotAssessedBadge, never a severity mark. */
+  assessment: Assessment;
+  assessmentReason: string | null;
   lastSeenLabel: string;
   lastSeenIso: string;
 };
@@ -55,6 +59,13 @@ export type RuleGroup = {
   mixedSeverity: boolean;
   count: number;
   evidenceCount: number;
+  /** How many occurrences in this group are coverage gaps (not_assessable). */
+  notAssessableCount: number;
+  /** Every occurrence is a coverage gap — the whole group is "we could not check", so the header
+   * shows NotAssessedBadge instead of a severity mark. A group's stored severity still drives its
+   * SORT position (a not-assessable gap on a nominally-critical rule deserves attention), but the
+   * visual must not read as a real critical. */
+  allNotAssessable: boolean;
   statusCounts: { status: UiStatus; count: number }[];
   lastSeenLabel: string;
   lastSeenIso: string;
@@ -111,6 +122,8 @@ export function groupByRule(rows: FindingRow[]): RuleGroup[] {
     // answers "when did we last see this rule fire", which is a question about time.
     const newest = findings[0];
 
+    const notAssessableCount = findings.reduce((n, f) => n + (f.assessment === 'not_assessable' ? 1 : 0), 0);
+
     groups.push({
       ruleId,
       title: ranked[0].title,
@@ -118,6 +131,8 @@ export function groupByRule(rows: FindingRow[]): RuleGroup[] {
       mixedSeverity: findings.some((f) => f.severity !== worst),
       count: findings.length,
       evidenceCount: findings.reduce((n, f) => n + f.evidenceCount, 0),
+      notAssessableCount,
+      allNotAssessable: notAssessableCount === findings.length,
       // Iterated in UI_STATUSES order so the pills read open -> muted regardless of which
       // status happened to be tallied first.
       statusCounts: UI_STATUSES.filter((s) => statusTally.has(s)).map((s) => ({

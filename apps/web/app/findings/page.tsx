@@ -1,5 +1,6 @@
 import Link from 'next/link';
 
+import { LiveFindings } from '@/components/LiveFindings';
 import { Card, CardBody, CardFooter, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { getFindingsView, LIST_LIMIT } from './data';
@@ -30,10 +31,18 @@ export default async function FindingsPage({ searchParams }: PageProps<'/finding
 
   return (
     <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 'var(--space-3)' }}>
-        <h1 style={{ margin: 0, fontSize: 'var(--text-xl)', lineHeight: 'var(--leading-xl)', fontWeight: 600 }}>
-          Findings
-        </h1>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--space-3)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)' }}>
+          <h1 style={{ margin: 0, fontSize: 'var(--text-xl)', lineHeight: 'var(--leading-xl)', fontWeight: 600 }}>
+            Findings
+          </h1>
+          {/* The live island. A small client component in an otherwise server-rendered queue: it
+              shows a "N new" pill only when a genuinely novel finding is inserted (findings dedupe
+              by fingerprint, so an INSERT is new), and refreshing is opt-in — it never re-sorts the
+              table under the analyst's cursor. Degrades to nothing when Realtime is not authorized;
+              the page is already correct without it. */}
+          {view.state === 'ok' && view.tenantId && <LiveFindings tenantId={view.tenantId} />}
+        </div>
         {filtered && (
           <Link href="/findings" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
             Clear filters
@@ -70,7 +79,7 @@ export default async function FindingsPage({ searchParams }: PageProps<'/finding
 
       {view.state === 'ok' && (
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(180px, 200px) minmax(0, 1fr)', gap: 'var(--space-4)', alignItems: 'start' }}>
-          <Filters filters={filters} facets={view.facets} total={view.total} />
+          <Filters filters={filters} facets={view.facets} assessmentFacet={view.assessmentFacet} total={view.total} />
 
           <Card>
             <CardHeader>

@@ -249,6 +249,11 @@ def _run_detectors(ctx: ScanContext) -> tuple:
                     "detail": h.detail,
                     "observation": h.observation,
                     "source_ref": {**h.source_ref, "rule_id": d.rule_id, "resource": r.ext_id},
+                    # The third outcome travels with the finding, so a rule that could not read its
+                    # evidence stays "not assessable" when the engine persists it, rather than
+                    # silently becoming a plain low. Defaults keep older engines forward-compatible.
+                    "assessable": getattr(h, "assessable", True),
+                    "assessment_reason": getattr(h, "assessment_reason", ""),
                 })
     return findings, errors
 

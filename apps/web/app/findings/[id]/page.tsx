@@ -4,6 +4,7 @@ import { notFound } from 'next/navigation';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { SeverityBadge } from '@/components/ui/severity';
 import { getClaims } from '@/lib/supabase/server';
+import { NotAssessedBadge } from '../assessment';
 import { getFinding, type EvidenceItem, type FindingDetail, type TriageView } from '../data';
 import { shortId } from '../format';
 import { systemHref, systemOf } from '../query';
@@ -85,13 +86,15 @@ export default async function FindingPage({ params }: PageProps<'/findings/[id]'
 
 function Header({ finding }: { finding: FindingDetail }) {
   const r = finding.resource;
+  const gap = finding.assessment === 'not_assessable';
 
   return (
     <Card>
       <CardBody>
         <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
-            <SeverityBadge severity={finding.severity} />
+            {/* A coverage gap wears the neutral mark, not a severity: it is not a vulnerability. */}
+            {gap ? <NotAssessedBadge /> : <SeverityBadge severity={finding.severity} />}
             <StatusPill status={finding.uiStatus} />
             <code style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>{finding.ruleId}</code>
             <Link
@@ -105,6 +108,33 @@ function Header({ finding }: { finding: FindingDetail }) {
           <h1 style={{ margin: 0, fontSize: 'var(--text-xl)', lineHeight: 'var(--leading-xl)', fontWeight: 600 }}>
             {finding.title}
           </h1>
+
+          {/* The coverage-gap callout. Stated once, plainly, and neutrally bordered (never a
+              severity colour): this is "we could not check", which is neither a vulnerability nor a
+              clean pass, and reading it as either would be the failure this state exists to prevent. */}
+          {gap && (
+            <div
+              style={{
+                display: 'grid',
+                gap: 'var(--space-1)',
+                padding: 'var(--space-3)',
+                border: '1px dashed var(--border-interactive)',
+                borderRadius: 'var(--radius-md)',
+                background: 'var(--bg)',
+              }}
+            >
+              <strong style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
+                This is a coverage gap, not a vulnerability.
+              </strong>
+              <span style={{ fontSize: 'var(--text-xs)', lineHeight: 'var(--leading-sm)', color: 'var(--text-secondary)', maxWidth: '80ch' }}>
+                The detector could not read what it needed to check this rule, so we cannot say whether
+                it passes or fails — only that it was not assessed.
+                {finding.assessmentReason?.trim()
+                  ? ` Reason: ${finding.assessmentReason}`
+                  : ' No reason was recorded.'}
+              </span>
+            </div>
+          )}
 
           {finding.detail && (
             <p style={{ margin: 0, fontSize: 'var(--text-sm)', lineHeight: 'var(--leading-sm)', color: 'var(--text-secondary)', maxWidth: '80ch' }}>
@@ -351,6 +381,11 @@ function Triage({ finding }: { finding: FindingDetail }) {
             </span>
           </div>
 
+          {/* Priority provenance, stated honestly. When a rule's severity floor overrode the
+              model's own priority, say so and name both numbers — a P0 the model did not choose is
+              still deterministic, and hiding that would let the model take credit for a rule's call. */}
+          <PriorityFloorNote triage={t} />
+
           <Prose>{t.summary}</Prose>
           <Field label="Business risk">{t.businessRisk}</Field>
           <Field label="Exploitability">{t.exploitability}</Field>
@@ -443,6 +478,23 @@ function PriorityChip({ priority }: { priority: string }) {
     >
       triage priority {priority}
     </span>
+  );
+}
+
+/** The honest account of a floored priority. Priority is a property of THIS occurrence; the rule's
+ * severity floor is deterministic, not the model's judgement, so when it lifts the priority the UI
+ * names both numbers rather than presenting the raised value as the model's own. Absent on older
+ * triage rows (read defensively upstream), so this renders nothing unless the floor was recorded. */
+function PriorityFloorNote({ triage }: { triage: TriageView }) {
+  if (!triage.priorityFloorApplied) return null;
+
+  return (
+    <p style={{ margin: 0, fontSize: 'var(--text-2xs)', lineHeight: 'var(--leading-2xs)', color: 'var(--text-secondary)' }}>
+      Priority <strong style={{ color: 'var(--text-primary)' }}>{triage.priority}</strong>
+      {triage.modelPriority
+        ? ` — raised from the model's ${triage.modelPriority} by the rule's severity floor.`
+        : " — raised above the model's own priority by the rule's severity floor."}
+    </p>
   );
 }
 

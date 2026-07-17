@@ -4,7 +4,9 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useState, useTransition } from 'react';
 
 import { SeverityBadge } from '@/components/ui/severity';
-import type { Severity, UiStatus } from '@/lib/types';
+import type { Assessment, Severity, UiStatus } from '@/lib/types';
+import { ASSESSMENT_LABEL, NotAssessedBadge } from './assessment';
+import type { AssessmentFacet } from './data';
 import type { Facets } from './group';
 import { StatusPill } from './status';
 import { findingsHref, toggle, type FindingFilters } from './query';
@@ -24,10 +26,12 @@ import { findingsHref, toggle, type FindingFilters } from './query';
 export function Filters({
   filters,
   facets,
+  assessmentFacet,
   total,
 }: {
   filters: FindingFilters;
   facets: Facets;
+  assessmentFacet: AssessmentFacet[];
   total: number;
 }) {
   const router = useRouter();
@@ -77,6 +81,29 @@ export function Filters({
             onChange={() => go({ ...filters, status: toggle(filters.status, key) as UiStatus[] })}
           >
             <StatusPill status={key} />
+          </FacetRow>
+        ))}
+      </Facet>
+
+      {/* Assessability. A `not_assessable` finding is a COVERAGE GAP, not a vulnerability — this
+          facet lets an analyst isolate the gaps (audit "what could we not check") or hide them to
+          work the real queue. Counts are exact head-counts (data.ts), not tallied from the capped
+          list, so they stay honest past the row cap. */}
+      <Facet label="Assessment">
+        {assessmentFacet.map(({ key, count }) => (
+          <FacetRow
+            key={key}
+            checked={filters.assessment.includes(key)}
+            count={count}
+            onChange={() => go({ ...filters, assessment: toggle(filters.assessment, key) as Assessment[] })}
+          >
+            {key === 'not_assessable' ? (
+              <NotAssessedBadge variant="inline" />
+            ) : (
+              <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)', fontWeight: 600, letterSpacing: '0.04em' }}>
+                {ASSESSMENT_LABEL[key].toUpperCase()}
+              </span>
+            )}
           </FacetRow>
         ))}
       </Facet>

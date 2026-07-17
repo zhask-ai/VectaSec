@@ -3,7 +3,7 @@ import type { Route } from 'next';
 
 import { createClient } from '@/lib/supabase/server';
 import type { Json, Severity } from '@/lib/types';
-import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
+import { Card, CardBody, CardFooter, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { SeverityBadge } from '@/components/ui/severity';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
@@ -15,7 +15,20 @@ import { byRisk, relative, absolute, worstSeverity } from './_lib';
  * Reads cookies via the Supabase server client, so this route is dynamic and never prerendered.
  * RLS scopes every read to the caller's tenant; there is deliberately no tenant_id filter in
  * any query here — a WHERE clause is a suggestion, a policy is a boundary.
+ *
+ * PAGINATION. This page used to `.select()` every resource and every open finding unbounded and
+ * tally them in JS. PostgREST caps an unbounded response at Max Rows (1000 on hosted Supabase), so
+ * past the cap the inventory and its counts were silently wrong. Now: a page of resources capped at
+ * LIST_LIMIT, the true totals via count:'exact' head queries (never truncated), and per-resource
+ * open-finding tallies fetched only for the resources on the page — bounded by what is shown, not
+ * by the whole tenant. A visibly-capped page ("showing N of M") is honest; a silently-wrong one is
+ * not. No SECURITY DEFINER RPC: that would run as postgres/BYPASSRLS and leak every tenant.
  */
+
+/** Row ceiling, same posture as the findings queue (data.ts): past this the answer is a filter,
+ * not a longer page — and the count beside it is the true total, so the UI says how much it is not
+ * showing rather than quietly truncating. */
+const LIST_LIMIT = 500;
 
 type ResourceRow = {
   id: string;
