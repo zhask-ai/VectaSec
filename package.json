@@ -1,0 +1,8 @@
+{
+  "name": "vectasec",
+  "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "web": "pnpm --filter @vectasec/web dev"
+  }
+}

@@ -1,0 +1,29 @@
+# secrets / env — never commit
+.env
+.env.local
+.env.*.local
+
+# node
+node_modules/
+.next/
+dist/
+build/
+*.tsbuildinfo
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.uv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# supabase local
+supabase/.branches/
+supabase/.temp/
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
