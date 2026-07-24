@@ -4,7 +4,6 @@ import Link from 'next/link';
 import { canEdit, getOwnMembership } from '@/lib/role';
 import { createClient } from '@/lib/supabase/server';
 import { SEVERITIES, SEVERITY_RANK, type ControlStatus, type Severity } from '@/lib/types';
-import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Meter } from '@/components/ui/meter';
@@ -702,18 +701,24 @@ function FrameworkCard({ group, editable }: { group: FrameworkGroup; editable: b
 
 /* The evidence-bundle formats VectaSec's reporting module produces. Kept as data so the panel
  * lists exactly what the engine can generate and nothing it cannot. */
-const EXPORT_FORMATS: { name: string; desc: string }[] = [
+const EXPORT_FORMATS: { name: string; desc: string; href: string; filename: string }[] = [
   {
     name: 'OSCAL 1.1',
     desc: 'Assessment results as NIST OSCAL 1.1 JSON — machine-readable, for a GRC platform or an auditor’s toolchain.',
+    href: '/api/reports/oscal',
+    filename: 'vectasec-oscal.json',
   },
   {
-    name: 'CSV',
-    desc: 'One row per control: id, status, coverage, attestation and cited findings — for a spreadsheet or a ticket import.',
+    name: 'Findings CSV',
+    desc: 'One row per finding: rule, severity, system, resource, status, evidence and remediation — for a spreadsheet or a ticket import.',
+    href: '/api/reports/csv',
+    filename: 'vectasec-findings.csv',
   },
   {
     name: 'Executive report',
-    desc: 'A narrative summary for leadership: posture per framework, coverage gaps, and what is attested versus failing.',
+    desc: 'A narrative Markdown summary for leadership: posture, severity breakdown, worst findings, and compliance coverage.',
+    href: '/api/reports/summary',
+    filename: 'vectasec-report.md',
   },
 ];
 
@@ -729,15 +734,15 @@ function ExportPanel() {
     <Card>
       <CardHeader>
         <CardTitle>Evidence export</CardTitle>
-        <CardMeta>reporting API · console download not yet wired</CardMeta>
+        <CardMeta>generated live from your tenant’s current results</CardMeta>
       </CardHeader>
       <CardBody>
         <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
           <p style={{ margin: 0, maxWidth: '80ch', fontSize: 'var(--text-sm)', lineHeight: 'var(--leading-sm)', color: 'var(--text-secondary)' }}>
-            VectaSec’s reporting module generates a full evidence bundle from the results above in
-            three formats. Generation runs in the engine’s reporting API today; a one-click download
-            from this console is not built yet, so the controls below are labelled placeholders for
-            what the reporting API already produces — not live buttons.
+            VectaSec’s reporting engine generates a full evidence bundle from the results above. Each
+            download is produced on demand from your tenant’s current findings, controls and posture —
+            deterministic, and honest about coverage (a control is never reported passing without a
+            human attestation).
           </p>
 
           <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 'var(--space-2)' }}>
@@ -762,19 +767,35 @@ function ExportPanel() {
                     {f.desc}
                   </span>
                 </div>
-                {/* Disabled on purpose: no console route serves this yet. A greyed control that
-                    cannot be clicked is the honest signal — never a button that pretends to work. */}
-                <Button variant="secondary" size="sm" disabled title="Not yet available in the console — generated via the reporting API">
-                  Coming to console
-                </Button>
+                {/* A real download: this href hits app/api/reports/[format], which authenticates the
+                    user server-side, calls the engine's reporting endpoint with the engine token, and
+                    streams the file back. Read-only export of data the user can already see. */}
+                <a
+                  href={f.href}
+                  download={f.filename}
+                  style={{
+                    flexShrink: 0,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: 'var(--space-2) var(--space-3)',
+                    fontSize: 'var(--text-sm)',
+                    fontWeight: 500,
+                    color: 'var(--text-primary)',
+                    background: 'var(--surface)',
+                    border: '1px solid var(--border-interactive)',
+                    borderRadius: 'var(--radius-md)',
+                    textDecoration: 'none',
+                  }}
+                >
+                  Download
+                </a>
               </li>
             ))}
           </ul>
         </div>
       </CardBody>
       <CardFooter>
-        Nothing here downloads yet. These bundles are produced by the reporting API; wiring them into
-        the console is on the roadmap.
+        Downloads are generated live by the reporting engine from your tenant’s current results.
       </CardFooter>
     </Card>
   );

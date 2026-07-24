@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Literal, Optional
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Header, Query
+from fastapi import Depends, FastAPI, HTTPException, Header, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -945,6 +945,87 @@ def attest_control(framework: str, control_id: str, req: AttestRequest,
                     "resulting_status": result.get("status")})
         conn.commit()
     return result
+
+
+# ── Reporting / evidence export ────────────────────────────────────────────
+# The generation core is report.py (pure, deterministic, no clock); these endpoints load the
+# tenant's findings + controls + posture and hand them off. Read-only: any tenant member can
+# export the data they can already see. generated_at is stamped here (the API layer owns the clock).
+def _load_report_data(cur, tenant_id: str):
+    from .. import report
+    cur.execute(
+        """select f.rule_id, f.severity, f.status, f.title, f.remediation, f.detail,
+                  f.first_seen, r.name, c.type
+             from findings f
+             left join resources r on r.id = f.resource_id
+             left join connections c on c.id = r.connection_id
+            where f.tenant_id = %s
+            order by f.severity, f.rule_id""",
+        (tenant_id,),
+    )
+    findings = [
+        {"rule_id": row[0], "severity": row[1], "status": row[2], "title": row[3],
+         "remediation": row[4] or "", "observation": row[5] or "", "detail": row[5] or "",
+         "first_seen": row[6].isoformat() if row[6] else "",
+         "resource": row[7] or "", "system": row[8] or "", "connector": row[8] or ""}
+        for row in cur.fetchall()
+    ]
+    cur.execute(
+        """select framework, control_id, title, requirement, status
+             from controls where tenant_id = %s order by framework, control_id""",
+        (tenant_id,),
+    )
+    controls = [{"framework": row[0], "control_id": row[1], "title": row[2],
+                 "requirement": row[3], "status": row[4]} for row in cur.fetchall()]
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for f in findings:
+        if f["status"] == "open" and f["severity"] in counts:
+            counts[f["severity"]] += 1
+    posture = report.posture_from_counts(counts)
+    posture["counts"] = counts
+    cur.execute("select name from tenants where id = %s", (tenant_id,))
+    trow = cur.fetchone()
+    tenant_name = trow[0] if trow else "VectaSec tenant"
+    return findings, controls, posture, tenant_name
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+@app.get("/reports/oscal")
+def report_oscal(p: Principal = Depends(principal)) -> dict:
+    """OSCAL 1.1 Assessment Results for the tenant (JSON)."""
+    from .. import report
+    with _db() as conn, conn.cursor() as cur:
+        findings, controls, posture, tenant_name = _load_report_data(cur, p.tenant_id)
+    return report.to_oscal_assessment_results(
+        findings, controls, posture, tenant_name=tenant_name, generated_at=_now_iso())
+
+
+@app.get("/reports/csv")
+def report_csv(p: Principal = Depends(principal)) -> Response:
+    """All findings as a CSV download."""
+    from .. import report
+    with _db() as conn, conn.cursor() as cur:
+        findings, _c, _po, _tn = _load_report_data(cur, p.tenant_id)
+    return Response(
+        content=report.to_findings_csv(findings), media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="vectasec-findings.csv"'})
+
+
+@app.get("/reports/summary")
+def report_summary(p: Principal = Depends(principal)) -> Response:
+    """Executive summary report (Markdown download)."""
+    from .. import report
+    with _db() as conn, conn.cursor() as cur:
+        findings, controls, posture, tenant_name = _load_report_data(cur, p.tenant_id)
+    md = report.to_executive_summary_markdown(
+        findings, controls, posture, tenant_name=tenant_name, generated_at=_now_iso())
+    return Response(
+        content=md, media_type="text/markdown",
+        headers={"Content-Disposition": 'attachment; filename="vectasec-report.md"'})
 
 
 # ── Graph ─────────────────────────────────────────────────────────────────

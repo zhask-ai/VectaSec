@@ -55,7 +55,8 @@ const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
   {
     label: 'Inventory',
     items: [
-      { href: '/connections', label: 'Systems', Icon: IconSystems },
+      { href: '/systems', label: 'Systems', Icon: IconSystems },
+      { href: '/connections', label: 'Connections', Icon: IconAssets },
       { href: '/identities', label: 'Identities', Icon: IconIdentities },
       { href: '/data', label: 'Data', Icon: IconData },
       { href: '/assets', label: 'Assets', Icon: IconAssets },
