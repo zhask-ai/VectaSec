@@ -205,6 +205,32 @@ def _is_suppressed(supps: list[dict], rule_id: str, resource) -> bool:
     return False
 
 
+def _enrich_collected(type_: str, collected: Collected) -> Collected:
+    """The derived, ADDITIVE layers over the raw collect: data classification (tags data-carrying
+    resources by inferred sensitivity) and the normalized NHI model (identity/credential/grant
+    resources + edges). Both read only what the connector already produced.
+
+    Defensive by contract, exactly like per-detector error isolation in _persist_scan: a bug in a
+    derived layer must NEVER void a scan. Each step is isolated; on failure it is skipped and the
+    base scan proceeds unenriched. Returns the (possibly enriched) Collected. Errors are collected
+    and surfaced in scan stats rather than raised."""
+    errors: list[str] = []
+    from .classify import classify_resources
+    from .identity import derive_identities
+    try:
+        collected = classify_resources(collected)
+    except Exception as e:
+        errors.append(f"classify: {type(e).__name__}: {e}")
+    try:
+        collected = derive_identities(type_, collected)
+    except Exception as e:
+        errors.append(f"identity: {type(e).__name__}: {e}")
+    if errors:
+        # Stashed on the object so _persist_scan can record it in stats without a signature change.
+        collected.enrich_errors = errors  # type: ignore[attr-defined]
+    return collected
+
+
 def _mark_scan_error(conn, scan_id: str, e: BaseException) -> None:
     """Record a scan as failed, on a transaction of its own.
 
@@ -279,6 +305,10 @@ def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
         except Exception as e:
             _mark_scan_error(conn, scan_id, e)
             raise
+
+        # Derive the additive layers (classification + NHI model) before persisting, so their
+        # resources/edges land in the same atomic write and the detectors see them. Never raises.
+        collected = _enrich_collected(type_, collected)
 
         try:
             stats = _persist_scan(conn, tenant_id, connection_id, scan_id, config, collected, t0)
@@ -528,6 +558,9 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
         }
         if errors:
             stats["detector_errors"] = errors
+        enrich_errors = getattr(collected, "enrich_errors", None)
+        if enrich_errors:
+            stats["enrich_errors"] = enrich_errors
 
         # Recompute compliance from the findings this scan just wrote, in the SAME transaction —
         # so the controls table can never lag the findings it is derived from. evaluate() reads

@@ -41,7 +41,7 @@ def config_from_args(args) -> dict:
     config: dict = {}
     for flag, key in (("bootstrap", "bootstrap"), ("url", "url"), ("token", "token"),
                       ("admin_token", "admin_token"), ("username", "username"),
-                      ("password", "password")):
+                      ("password", "password"), ("host", "host"), ("port", "port")):
         v = getattr(args, flag, None)
         if v:
             config[key] = v
@@ -346,6 +346,85 @@ def cmd_scans(args) -> int:
     return 0
 
 
+def cmd_identities(args) -> int:
+    """The non-human identity inventory — the same cross-system view the console's /identities
+    page shows, from the normalized identity/credential/grant resources."""
+    from .db import connect
+
+    tenant = args.tenant or settings.demo_tenant
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("select ext_id, name, labels from resources where tenant_id=%s and kind='identity' order by name", (tenant,))
+        identities = cur.fetchall()
+        cur.execute("select labels->>'owner', labels->>'credential_type', labels->>'hashing', labels->>'default' from resources where tenant_id=%s and kind='credential'", (tenant,))
+        creds = cur.fetchall()
+        cur.execute("select labels->>'identity', labels->>'action', labels->>'wildcard' from resources where tenant_id=%s and kind='grant'", (tenant,))
+        grants = cur.fetchall()
+
+    if not identities:
+        print("no non-human identities yet — scan a system with users/consumers/ACLs/OAuth")
+        return 0
+
+    creds_by, grants_by = {}, {}
+    for owner, ctype, hashing, isdef in creds:
+        creds_by.setdefault(owner, []).append((ctype, hashing, isdef))
+    for ident, action, wild in grants:
+        grants_by.setdefault(ident, []).append((action, wild == "true"))
+
+    wildcard_total = sum(1 for _, _, w in grants for _ in [0] if w == "true")
+    print(f"\n{len(identities)} non-human identit(y/ies) · {len(creds)} credentials · {len(grants)} grants "
+          f"· {SEV_COLOR['high']}{wildcard_total} wildcard{RESET}\n")
+    for ext_id, name, labels in identities:
+        system = (labels or {}).get("system", "?")
+        itype = (labels or {}).get("identity_type", "?")
+        mycreds = creds_by.get(ext_id, [])
+        mygrants = grants_by.get(ext_id, [])
+        cred_s = ", ".join(f"{c}{'/'+h if h and h!='unknown' else ''}{' DEFAULT' if d=='true' else ''}"
+                           for c, h, d in mycreds) or f"{DIM}none readable{RESET}"
+        wild = sum(1 for _, w in mygrants if w)
+        grant_s = f"{len(mygrants)} grant(s)" + (f" {SEV_COLOR['high']}({wild} wildcard){RESET}" if wild else "")
+        print(f"  {name:<28} {DIM}{system:<10}{RESET} {itype:<16} {grant_s:<28} creds: {cred_s}")
+    print()
+    return 0
+
+
+_SEV_WEIGHT = {"critical": 10.0, "high": 4.0, "medium": 1.5, "low": 0.5, "info": 0.0}
+
+
+def cmd_posture(args) -> int:
+    """The posture score — one number from open findings, plus the breakdown it came from.
+    Same formula as the console (lib/posture.ts): weighted = 10·crit+4·high+1.5·med+0.5·low,
+    score = round(100·(1 − weighted/(weighted+40)))."""
+    from .db import connect
+
+    tenant = args.tenant or settings.demo_tenant
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("select severity, count(*) from findings where tenant_id=%s and status='open' group by severity", (tenant,))
+        counts = {s: n for s, n in cur.fetchall()}
+        cur.execute("select count(*) from findings where tenant_id=%s and status='open' and assessment='not_assessable'", (tenant,))
+        not_assessable = cur.fetchone()[0]
+        cur.execute("select count(*) from resources where tenant_id=%s and kind='identity'", (tenant,))
+        n_ident = cur.fetchone()[0]
+        cur.execute("select count(*) from resources where tenant_id=%s and kind='grant' and labels->>'wildcard'='true'", (tenant,))
+        n_wild = cur.fetchone()[0]
+        cur.execute("select count(*) from resources where tenant_id=%s and labels->>'data_sensitivity'='high'", (tenant,))
+        n_sensitive = cur.fetchone()[0]
+
+    weighted = sum(_SEV_WEIGHT.get(s, 0) * n for s, n in counts.items())
+    score = 100 if weighted == 0 else max(1, round(100 * (1 - weighted / (weighted + 40))))
+    grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F"
+    total = sum(counts.values())
+
+    print(f"\n  posture score  {SEV_COLOR['critical'] if grade in 'DF' else SEV_COLOR['medium'] if grade=='C' else SEV_COLOR['low']}{score}  {grade}{RESET}"
+          f"   {DIM}from {total} open finding(s){RESET}\n")
+    for s in ("critical", "high", "medium", "low", "info"):
+        n = counts.get(s, 0)
+        print(f"    {_c(s)}{s:<8}{RESET} {n}")
+    print(f"\n  {DIM}coverage gaps (not assessable): {not_assessable}{RESET}")
+    print(f"  {DIM}non-human identities: {n_ident}  ·  wildcard grants: {n_wild}  ·  "
+          f"sensitive-data assets: {n_sensitive}{RESET}\n")
+    return 0
+
+
 def cmd_doctor(args) -> int:
     """Check the engine's wiring — the first thing to run when something is wrong."""
     ok = True
@@ -428,6 +507,8 @@ def main() -> int:
     def config_flags(sp) -> None:
         sp.add_argument("--bootstrap", help="kafka bootstrap servers")
         sp.add_argument("--url", help="base url (kong/rabbitmq/mcp)")
+        sp.add_argument("--host", help="host (redis)")
+        sp.add_argument("--port", help="port (redis)")
         sp.add_argument("--token", help="bearer token (mcp)")
         sp.add_argument("--admin-token", dest="admin_token", help="admin token (kong)")
         sp.add_argument("--username")
@@ -479,6 +560,14 @@ def main() -> int:
     sc.add_argument("--limit", type=int, default=20)
     sc.add_argument("--tenant")
     sc.set_defaults(fn=cmd_scans)
+
+    idc = sub.add_parser("identities", help="non-human identity inventory (NHI)")
+    idc.add_argument("--tenant")
+    idc.set_defaults(fn=cmd_identities)
+
+    po = sub.add_parser("posture", help="posture score + severity breakdown")
+    po.add_argument("--tenant")
+    po.set_defaults(fn=cmd_posture)
 
     r = sub.add_parser("rules", help="list the loaded rulepack")
     r.set_defaults(fn=cmd_rules)

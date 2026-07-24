@@ -7,6 +7,7 @@ dependencies = [
   "psycopg[binary]>=3.2",
   "confluent-kafka>=2.5",
   "httpx>=0.27",              # kong / rabbitmq / mcp connectors (read-only HTTP)
+  "redis>=5.0",               # redis connector (read-only INFO / CONFIG GET / ACL)
   "anthropic>=0.116",         # grounded AI triage (optional at runtime — rule fallback if no key)
   "fastapi>=0.115",
   "uvicorn[standard]>=0.32",

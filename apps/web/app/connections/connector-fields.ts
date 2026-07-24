@@ -93,6 +93,20 @@ export const CONNECTORS: ConnectorSpec[] = [
     ],
   },
   {
+    type: 'redis',
+    label: 'Redis',
+    blurb: 'Cache / streams / queue — auth, protected-mode, TLS, ACL users, RediShell CVE.',
+    rules: 6,
+    fields: [
+      { key: 'host', label: 'Host', required: true, placeholder: 'localhost',
+        help: 'Hostname/IP the engine or worker can reach. Read-only — no writes, no key scans.' },
+      { key: 'port', label: 'Port', placeholder: '6379' },
+      { key: 'password', label: 'Password', secret: true,
+        help: 'Only if the server sets requirepass or an ACL password.' },
+      { key: 'tls', label: 'Use TLS', placeholder: 'false', help: "'true' to connect over TLS." },
+    ],
+  },
+  {
     type: 'mcp',
     label: 'MCP server',
     blurb: 'Model Context Protocol servers and agent gateways — transport, auth, tool surface.',

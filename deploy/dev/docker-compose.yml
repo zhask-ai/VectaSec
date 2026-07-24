@@ -92,6 +92,24 @@ services:
       retries: 12
       start_period: 20s
 
+  # ── Redis, misconfigured the open way ─────────────────────────────────────
+  # No password, protected-mode off, binds all interfaces, no TLS — the classic
+  # "internet-exposed Redis" posture (REDIS.AUTH.NO_PASSWORD, REDIS.NETWORK.PROTECTED_MODE_OFF,
+  # REDIS.NETWORK.BIND_ALL, REDIS.TLS.DISABLED). The image version also drives the RediShell
+  # CVE check (REDIS.VERSION.RCE_CVE) — pinned old on purpose.
+  redis:
+    image: redis:7.2.4
+    container_name: vectasec-dev-redis
+    command: ["redis-server", "--protected-mode", "no", "--bind", "0.0.0.0"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
   # Seeds topics whose names make the demo finding land: an exposed `payments` bus is a
   # story a CISO reacts to; `topic-0` is not.
   topic-seed:

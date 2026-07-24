@@ -21,9 +21,9 @@ the prose — three of these seven rows have no code at all today. The per-phase
 
 | Capability | What it does | Status |
 |---|---|---|
-| **Discovery** | Inventories every broker, topic, gateway, route, mesh service, iPaaS recipe, credential, and MCP tool, and maps how they connect. | ⚠️ **Partial** — 12 resource kinds across Kafka/Kong/RabbitMQ/MCP. No mesh service, iPaaS recipe, or credential kind. Kong/RabbitMQ/MCP emit graph edges; **Kafka emits none**, so "maps how they connect" is empty on the one end-to-end target. |
-| **Posture** | Scores each asset against a security benchmark (Kafka ACLs, Kong auth, Istio mTLS, …) into findings with severity and remediation. | ✅ **Built** for Kafka, Kong, RabbitMQ, MCP — 73 detectors, severity + remediation. **No Istio.** |
-| **Identity** | Inventories non-human identities and OAuth grants; flags over-scoped, stale, or leaked credentials and their blast radius. | ❌ **Not built.** No code. This is the positioning wedge above and it does not exist. |
+| **Discovery** | Inventories every broker, topic, gateway, route, mesh service, iPaaS recipe, credential, and MCP tool, and maps how they connect. | ⚠️ **Partial** — resource kinds across Kafka/Kong/RabbitMQ/Redis/MCP, **now including derived `identity`/`credential`/`grant` kinds** and data-classified resources. No mesh service or iPaaS recipe kind yet. Kafka/Kong/RabbitMQ/Redis/MCP emit graph edges, including credential→identity and grant→resource. |
+| **Posture** | Scores each asset against a security benchmark (Kafka ACLs, Kong auth, Redis auth, Istio mTLS, …) into findings with severity and remediation. | ✅ **Built** for Kafka, Kong, RabbitMQ, Redis, MCP — 85 detectors, severity + remediation. Plus NHI + data-classification cross-cutting packs and a posture-score dashboard. **No Istio.** |
+| **Identity** | Inventories non-human identities and OAuth grants; flags over-scoped, stale, or leaked credentials and their blast radius. | ✅ **Built (v1).** Normalized NHI model (identity/credential/grant) derived across all 5 connectors, a cross-system `/identities` inventory, and OWASP-NHI-Top-10 detectors (wildcard grants, default/shared identities, weak-hash credentials). Credentials are metadata only. *Gap: no usage/staleness telemetry or third-party-OAuth blast radius yet.* |
 | **Supply chain** | SBOM + CVE scan of connectors/images/deps; static analysis of integration-as-code (DataWeave, gateway policies, workflow JSON, MCP manifests). | ❌ **Not built.** No SBOM, no CVE scan, no IaC static analysis. (Some RabbitMQ rules read a version string — a version check, not a CVE scan.) |
 | **Compliance** | Maps findings to PCI DSS 4.0.1, DORA, HIPAA, NIS2; generates audit evidence and the DORA Article 28 register. | ⚠️ **Mapping only.** The PCI/DORA/HIPAA/NIS2 mapping is written and sourced, but **nothing calls the evaluator**, so the `controls` table is always empty and the compliance page renders empty. No Article 28 register, no OSCAL export. |
 | **MCP security** | Discovers MCP servers/tools and agent gateways; scans for tool-poisoning and auth-spec violations; ties each tool to the middleware it wraps. | ⚠️ **Mostly built** — 19 rules: tool-poisoning, auth-spec, transport, session. Spec pinned to `2025-11-25`. "Ties each tool to the middleware it wraps" needs the graph and is **not** done. |
@@ -50,7 +50,10 @@ Phase 0 is substantially done; parts of Phase 1–3 were built out of order (the
 
 **Works end to end today.** Two proven paths to the same result. Console: sign in → **Connections → Connect a system** (form) → the first scan queues on `pgmq`, `vectasec worker` runs it, and findings with cited observations land live on the page. CLI: `docker compose up` the misconfigured dev targets → `vectasec scan` → `vectasec findings`. Both verified against the live Supabase project with Kafka and RabbitMQ targets.
 
-- 4 read-only connectors (`kafka`, `kong`, `rabbitmq`, `mcp`) and 73 detectors
+- 5 read-only connectors (`kafka`, `kong`, `rabbitmq`, `redis`, `mcp`) and 85 detectors
+- **Non-Human Identity (NHI) inventory** — a normalized identity/credential/grant model derived across every connector (Kafka ACL principals, Kong consumers, RabbitMQ users, Redis ACL users, MCP OAuth clients), a cross-system `/identities` view, and OWASP-NHI-Top-10 detectors. Credentials are metadata only — a secret's value is never read or stored.
+- **Data classification (DSPM)** — data-carrying resources are tagged by inferred sensitivity (PCI/PHI/PII/secrets) from naming, with the toxic-combination rule `DATA.EXPOSURE.SENSITIVE_PLAINTEXT` firing **critical** when regulated data rides a plaintext, unauthenticated broker
+- **Posture dashboard** — an Overview with a posture score (grounded in the raw counts), coverage-gap honesty, NHI + sensitive-data lenses, a "do this now" list, and a compliance strip; `vectasec posture` / `vectasec identities` for the CLI
 - Connect-and-scan from **either surface**: the console form (per-connector fields declared by the connector itself, served at `GET /connectors`) or `vectasec connections add` / `vectasec scan --connection <name>`; per-connection **Scan now / Test / Remove** in the UI; scan history at `/scans` and `vectasec scans`
 - A queue worker (`vectasec worker`) that drains `pgmq`, adopts queued scan rows, retries with poison-message capping, and reaps scans stuck `running`
 - A passing offline unit suite (`uv run pytest` in `services/engine` and `services/collector`) — detector, redaction, scan-logic and AI-citation-gate level, plus CI jobs for cross-tenant RLS and the integrity triggers; see gaps below
@@ -68,7 +71,7 @@ Phase 0 is substantially done; parts of Phase 1–3 were built out of order (the
 - **No supply chain capability at all** — no SBOM, no CVE scan, no integration-as-code static analysis (DataWeave, gateway policies, workflow JSON).
 - **No DORA Article 28 register and no OSCAL export.**
 - **No runtime sensor** — the optional Runtime row is unstarted.
-- **No Istio, iPaaS, or mesh connectors** — the 4 connectors are Kafka, Kong, RabbitMQ, MCP.
+- **No Istio, iPaaS, or mesh connectors** — the 5 connectors are Kafka, Kong, RabbitMQ, Redis, MCP. (Fully-scoped, cited check-lists for NATS, Istio/Linkerd/Consul, n8n/MuleSoft/Boomi and more are in [docs/research/middleware-security-platform-capabilities.md](docs/research/middleware-security-platform-capabilities.md).)
 - **The Kafka connector emits no graph edges**, so blast radius on the one end-to-end target is a single node.
 - No agentless cross-account role, no Slack/Jira, no SSO/RBAC, no SOC 2.
 - **The on-prem path is config-validated but never booted** — `deploy/onprem/` has Compose + a Helm chart that lint clean, but the stack has never been started and it ships with the self-asserted-header cross-tenant hole above. See [deploy/onprem/README.md](deploy/onprem/README.md) before deploying anything.
@@ -123,7 +126,7 @@ cd services/engine
 uv run vectasec doctor
 ```
 
-Expect 4 connectors, 73 detectors, a connected database, and `pgmq, pg_cron` present. If this is unhappy, nothing below will work.
+Expect 5 connectors, 85 detectors, a connected database, and `pgmq, pg_cron` present. If this is unhappy, nothing below will work.
 
 ### 5. Scan (CLI path)
 

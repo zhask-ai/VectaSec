@@ -30,7 +30,7 @@ cd services/engine && uv run vectasec scan --type kafka --bootstrap localhost:90
 uv run vectasec findings
 ```
 
-A deliberately misconfigured Kafka (and now RabbitMQ) → read-only collection → 73 deterministic detectors → findings and cited observations committed to Postgres in **one transaction**, deduped by fingerprint, listed back with their evidence counts. Re-running is idempotent. That path is not a demo mock.
+A deliberately misconfigured Kafka, RabbitMQ and Redis → read-only collection → 85 deterministic detectors (incl. cross-cutting NHI + data-classification packs) → findings and cited observations committed to Postgres in **one transaction**, deduped by fingerprint, listed back with their evidence counts. Re-running is idempotent. That path is not a demo mock.
 
 Nothing else in this document reaches that bar.
 
@@ -47,8 +47,12 @@ Nothing else in this document reaches that bar.
 | RLS hardening | migration 002 | `ENABLE` + `FORCE` on all 18 tenant tables; `authenticated` has SELECT-only policies and no write policy anywhere. `app_tenant_ids()` is SECURITY DEFINER with a pinned search_path; `tenant_members_select` is non-recursive by construction. |
 | Contracts + registry | `contracts.py`, `registry.py` | `@connector` / `@detector` auto-registration. Drop a file in `detect/`, done. No central list. |
 | Scan loop | `scan.py` | collect → detect → persist, one transaction, fingerprint dedup, stale-marking, per-detector error isolation, suppression application. |
-| Connectors (4) | `connect/{kafka,kong,rabbitmq,mcp}.py` | Read-only. Kafka is the reference. |
-| Detectors (73) | `detect/{kafka,kong,rabbitmq,mcp}.py` | KAFKA 20, MCP 19, RABBITMQ 18, KONG 16. `uv run vectasec rules`. |
+| Connectors (5) | `connect/{kafka,kong,rabbitmq,redis,mcp}.py` | Read-only. Kafka is the reference. Redis reads INFO/CONFIG/ACL; `requirepass` value is dropped, never stored. |
+| Detectors (85) | `detect/{kafka,kong,rabbitmq,redis,mcp,identity,data}.py` | KAFKA 20, MCP 19, RABBITMQ 18, KONG 16, REDIS 6, + cross-cutting NHI (4) and DATA (2). `uv run vectasec rules`. |
+| **NHI / identity model** | `identity.py`, `detect/identity.py`, `apps/web/app/identities/`, `vectasec identities` | Derivation layer normalizing `identity`/`credential`/`grant` resources + edges from every connector (Kafka ACL principals, Kong consumers+cred counts, RabbitMQ users+perms, Redis ACL users, MCP OAuth). Cross-system `/identities` inventory. OWASP-NHI-Top-10 detectors. Credentials = metadata only; no secret value ever stored. **Observed live** across Kafka/RabbitMQ/Redis 2026-07-17. |
+| **Data classification (DSPM)** | `classify.py`, `detect/data.py`, `components/ui/data-class.tsx` | Deterministic sensitivity tagging (PCI/PHI/PII/secrets) from naming, in `labels`, honest "named like" wording. `DATA.EXPOSURE.SENSITIVE_PLAINTEXT` is the toxic-combination rule: a PCI topic on a plaintext+no-authorizer broker fires **critical** (proven on the dev Kafka). |
+| **Posture score + dashboard** | `lib/posture.ts`, `apps/web/app/page.tsx`, `vectasec posture` | Documented severity-weighted score shown beside its raw counts; Overview = score + breakdown + coverage honesty + NHI/data lenses + do-this-now + compliance strip. Console and CLI share the formula. |
+| Redis dev target | `deploy/dev/docker-compose.yml` (redis 7.2.4) | No password, protected-mode off, bind-all, no TLS, RediShell-vulnerable version — fires all 6 Redis rules + NHI. |
 | Grounded AI triage | `ai.py` | Structured-output citations, range-checked, deterministic fallback, fingerprint cache, refusal handling. Works with no API key. |
 | Engine API (actions) | `api/main.py` | health, scans, finding status/assign/triage, suppressions, compliance read, blast-radius, collector control plane, **connection lifecycle** (`GET /connectors` catalogue from the registry, `POST /connections` with declared-field validation, `POST /connections/{id}/test` via the real collect, `POST /connections/{id}/scan` from stored config — collector-mode rows skip pgmq so the cloud worker never gets a job it cannot reach, `DELETE /connections/{id}` with counts in the audit row). Audit row per mutation, in-transaction; config **keys** only in audit detail, never values. |
 | Queue worker | `worker.py`, `vectasec worker` | Drains `pgmq.vectasec_scans`, adopts the queued scans row (no orphans), poison-message cap via `read_ct`, and the stuck-`running` reaper. Observed executing console-queued scans live. |

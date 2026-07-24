@@ -215,7 +215,7 @@ Read-only. Always. Never write to a customer system. Two patterns from `connect/
 - **Record the outcome, not just the result.** ACL collection stores `{"outcome": "ok"|"security_disabled"|"error", "bindings": [...], "error": ...}`. An empty list does not prove "no authorizer" — an authorizer with zero ACLs returns `[]` too, and a permissions failure must never be read as "there are no ACLs". Detectors read `outcome` and can say *indeterminate*.
 - **Distinguish "not read" from "read, empty".** `None` vs `{}`. `is_sensitive`/`is_default` are preserved because the broker redacts PASSWORD-typed values to `None`; without them a detector cannot tell "explicitly configured but unreadable" from "not set" and would report the wrong one.
 
-Current coverage: **4 connectors, 73 detectors** — KAFKA 20, MCP 19, RABBITMQ 18, KONG 16. `uv run vectasec rules` prints the live rulepack.
+Current coverage: **5 connectors, 85 detectors** — KAFKA 20, MCP 19, RABBITMQ 18, KONG 16, REDIS 6, plus cross-cutting NHI (4) and DATA (2) packs that run on the normalized identity/credential/grant and data-classified resources. `uv run vectasec rules` prints the live rulepack.
 
 ---
 
@@ -320,7 +320,7 @@ Both are real code with real intent that nothing calls. Know about them before y
 
 ```bash
 cd services/engine
-uv run vectasec doctor                                      # 4 connectors, 73 detectors, DB, pgmq+pg_cron
+uv run vectasec doctor                                      # 5 connectors, 85 detectors, DB, pgmq+pg_cron
 docker compose -f deploy/dev/docker-compose.yml up -d        # the misconfigured Kafka
 uv run vectasec scan --type kafka --bootstrap localhost:9092
 uv run vectasec findings                                     # cited findings

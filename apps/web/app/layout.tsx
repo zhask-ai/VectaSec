@@ -21,6 +21,7 @@ export const metadata: Metadata = {
 const NAV: { href: Route; label: string }[] = [
   { href: '/', label: 'Overview' },
   { href: '/findings', label: 'Findings' },
+  { href: '/identities', label: 'Identities' },
   { href: '/assets', label: 'Assets' },
   { href: '/compliance', label: 'Compliance' },
   { href: '/connections', label: 'Connections' },

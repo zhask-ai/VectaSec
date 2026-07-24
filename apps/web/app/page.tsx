@@ -1,74 +1,25 @@
+import Link from 'next/link';
+import type { Route } from 'next';
+
 import { createClient } from '@/lib/supabase/server';
 import { SEVERITIES, SEVERITY_RANK, type Severity, type SeverityCounts } from '@/lib/types';
+import { postureScore, gradeColor } from '@/lib/posture';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { SeverityBadge } from '@/components/ui/severity';
+import { AutoRefresh } from '@/components/AutoRefresh';
 
-/* Overview — minimal, and deliberately so: it exists to prove the Supabase → RSC → RLS path
- * works end to end. The real landing view (posture score, ranked "do this now" queue grouped
- * by rule, coverage, delta since last scan, compliance strip) belongs to another agent.
+/* Overview — the landing dashboard. Answers "how are we doing, and what do I do now": a posture
+ * score grounded in the raw severity counts beside it, coverage honesty (what we could NOT
+ * assess), the two differentiating lenses (non-human identity + sensitive data), the worst open
+ * findings as a do-this-now list, and a compliance strip for the budget-holder.
  *
- * Reads cookies, so this route is dynamic and is never prerendered at build time.
+ * Every number here is either an aggregate-view read or a `count:'exact', head:true` query, never
+ * an unbounded select reduced in JS — a security console must not under-report past Max Rows.
+ * Reads cookies (dynamic route); RLS scopes every read to the caller's tenant.
  */
 
-type Overview =
-  | { state: 'ok'; counts: SeverityCounts; total: number; scannedAt: string | null; connections: number }
-  | { state: 'no-connections' }
-  | { state: 'never-scanned'; connections: number }
-  | { state: 'error'; message: string };
-
-async function getOverview(): Promise<Overview> {
-  const supabase = await createClient();
-
-  // RLS scopes both reads to the caller's tenant; there is no tenant filter in the query
-  // because there must not be one — a WHERE clause is a suggestion, a policy is a boundary.
-  // (`findings_facets` is a security_invoker view, so the same policy applies to it.)
-  //
-  // Counts come from the aggregate view, not from `select('severity')` over raw findings. An
-  // unbounded PostgREST select is truncated at Max Rows (1000 on hosted Supabase), and this
-  // page derived BOTH the total and every per-severity count from that one array — so past the
-  // cap they stayed consistent with each other and were silently, uncontradictably low. A
-  // security console under-reporting "8 critical open" is the worst instance of that bug in the
-  // product: nothing on screen tells you the number is short. The view groups by
-  // (rule, severity, status), which is tens of rows however many findings exist.
-  const [connectionsRes, findingsRes] = await Promise.all([
-    supabase.from('connections').select('id, last_scanned_at'),
-    supabase.from('findings_facets').select('severity, n').eq('status', 'open'),
-  ]);
-
-  if (connectionsRes.error) return { state: 'error', message: connectionsRes.error.message };
-  if (findingsRes.error) return { state: 'error', message: findingsRes.error.message };
-
-  const connections = connectionsRes.data ?? [];
-  if (connections.length === 0) return { state: 'no-connections' };
-
-  const scannedAt = connections
-    .map((c) => c.last_scanned_at)
-    .filter((d): d is string => Boolean(d))
-    .sort()
-    .at(-1) ?? null;
-
-  if (!scannedAt) return { state: 'never-scanned', connections: connections.length };
-
-  const buckets = (findingsRes.data ?? []) as { severity: string; n: number }[];
-  const counts = Object.fromEntries(SEVERITIES.map((s) => [s, 0])) as SeverityCounts;
-  let total = 0;
-  for (const row of buckets) {
-    const sev = row.severity as Severity;
-    // total counts every open finding, including one whose severity the UI does not know —
-    // an unrecognised severity must not quietly vanish from the headline number.
-    total += row.n;
-    if (sev in counts) counts[sev] += row.n;
-  }
-
-  return {
-    state: 'ok',
-    counts,
-    total,
-    scannedAt,
-    connections: connections.length,
-  };
-}
+export const metadata = { title: 'VectaSec' };
 
 function relative(iso: string): string {
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
@@ -78,116 +29,198 @@ function relative(iso: string): string {
   return `${Math.floor(mins / 1440)}d ago`;
 }
 
+type TopRisk = { severity: Severity; rule_id: string; title: string; resources: { kind: string; name: string } | null };
+
 export default async function OverviewPage() {
-  const overview = await getOverview();
+  const supabase = await createClient();
+
+  const connectionsRes = await supabase.from('connections').select('id, last_scanned_at, status');
+  if (connectionsRes.error) {
+    return <Shell><Card><CardBody><EmptyState tone="error" title="Could not load overview" description={connectionsRes.error.message} /></CardBody></Card></Shell>;
+  }
+  const connections = connectionsRes.data ?? [];
+  if (connections.length === 0) {
+    return <Shell><Card><CardBody><EmptyState tone="setup" title="Connect your first system"
+      description="VectaSec scans the integration layer — Kafka, RabbitMQ, Kong, Redis, MCP. Nothing is connected yet." />
+      <p style={{ textAlign: 'center', margin: 0 }}><Link href="/connections" style={{ color: 'var(--text-primary)' }}>Go to Connections →</Link></p>
+    </CardBody></Card></Shell>;
+  }
+  const scannedAt = connections.map((c) => c.last_scanned_at).filter((d): d is string => Boolean(d)).sort().at(-1) ?? null;
+  const scanning = connections.some((c) => c.status === 'queued' || c.status === 'running');
+
+  if (!scannedAt) {
+    return <Shell active={scanning}><Card><CardBody><EmptyState tone="pending" title="Connected. First scan pending."
+      description="Collection has not run yet. Findings appear here once the first scan completes."
+      meta={`${connections.length} connection${connections.length === 1 ? '' : 's'} configured`} /></CardBody></Card></Shell>;
+  }
+
+  // Everything below is aggregate reads or exact head-counts — cap-safe by construction.
+  const [facetsRes, notAssessableRes, identitiesRes, wildcardRes, sensitiveRes, topRes, controlsRes] = await Promise.all([
+    supabase.from('findings_facets').select('severity, n').eq('status', 'open'),
+    supabase.from('findings').select('id', { count: 'exact', head: true }).eq('status', 'open').eq('assessment', 'not_assessable'),
+    supabase.from('resources').select('id', { count: 'exact', head: true }).eq('kind', 'identity'),
+    supabase.from('resources').select('id', { count: 'exact', head: true }).eq('kind', 'grant').eq('labels->>wildcard', 'true'),
+    supabase.from('resources').select('id', { count: 'exact', head: true }).eq('labels->>data_sensitivity', 'high'),
+    supabase.from('findings').select('severity, rule_id, title, resources(kind, name)').eq('status', 'open').limit(400),
+    supabase.from('controls').select('framework, status'),
+  ]);
+
+  const counts = Object.fromEntries(SEVERITIES.map((s) => [s, 0])) as SeverityCounts;
+  let total = 0;
+  for (const row of (facetsRes.data ?? []) as { severity: string; n: number }[]) {
+    total += row.n;
+    if ((row.severity as Severity) in counts) counts[row.severity as Severity] += row.n;
+  }
+  const posture = postureScore(counts);
+  const notAssessable = notAssessableRes.count ?? 0;
+
+  const top = ((topRes.data ?? []) as unknown as TopRisk[])
+    .filter((f) => f.severity !== 'info')
+    .sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])
+    .slice(0, 6);
+
+  const controls = (controlsRes.data ?? []) as { framework: string; status: string }[];
+  const compBy = new Map<string, { pass: number; fail: number; unknown: number; total: number }>();
+  for (const c of controls) {
+    const e = compBy.get(c.framework) ?? { pass: 0, fail: 0, unknown: 0, total: 0 };
+    e.total += 1;
+    if (c.status === 'pass') e.pass += 1;
+    else if (c.status === 'fail') e.fail += 1;
+    else e.unknown += 1;
+    compBy.set(c.framework, e);
+  }
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 960 }}>
-      <h1
-        style={{
-          margin: 0,
-          fontSize: 'var(--text-xl)',
-          lineHeight: 'var(--leading-xl)',
-          fontWeight: 600,
-        }}
-      >
-        Overview
-      </h1>
+    <Shell active={scanning} meta={`${connections.length} connection${connections.length === 1 ? '' : 's'} · scanned ${relative(scannedAt)}`}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 280px) 1fr', gap: 'var(--space-4)', alignItems: 'stretch' }}>
+        {/* Posture hero */}
+        <Card>
+          <CardBody>
+            <div style={{ fontSize: 'var(--text-2xs)', textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--text-secondary)', fontWeight: 600 }}>
+              Posture score
+            </div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)', marginTop: 'var(--space-1)' }}>
+              <span data-numeric style={{ fontSize: '3rem', fontWeight: 800, lineHeight: 1, color: gradeColor(posture.grade) }}>{posture.score}</span>
+              <span style={{ fontSize: 'var(--text-lg)', fontWeight: 700, color: gradeColor(posture.grade) }}>{posture.grade}</span>
+            </div>
+            <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)', marginTop: 'var(--space-2)', lineHeight: 'var(--leading-2xs)' }}>
+              From {total} open finding{total === 1 ? '' : 's'}, weighted by severity. Fix criticals first to move it most.
+            </div>
+          </CardBody>
+        </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Open findings by severity</CardTitle>
-          {overview.state === 'ok' && overview.scannedAt && (
-            // Stale-while-revalidate labelling beats a full-page spinner, and an unlabelled
-            // number is an untrustworthy number.
-            <CardMeta>
-              {overview.connections} connection{overview.connections === 1 ? '' : 's'} · scanned{' '}
-              {relative(overview.scannedAt)}
-            </CardMeta>
-          )}
-        </CardHeader>
-
-        <CardBody>
-          {overview.state === 'error' && (
-            <EmptyState
-              tone="error"
-              title="Could not load findings"
-              description={overview.message}
-            />
-          )}
-
-          {overview.state === 'no-connections' && (
-            <EmptyState
-              tone="setup"
-              title="Connect your first system"
-              description="VectaSec scans the integration layer — Kafka, Kong, RabbitMQ, MCP. Nothing is connected yet."
-            />
-          )}
-
-          {overview.state === 'never-scanned' && (
-            <EmptyState
-              tone="pending"
-              title="Connected. First scan pending."
-              description="Collection has not run yet. Findings appear here once the first scan completes."
-              meta={`${overview.connections} connection${overview.connections === 1 ? '' : 's'} configured`}
-            />
-          )}
-
-          {/* "You are secure" and "your filter is too narrow" must never look alike, so the
-              zero state carries its provenance: what was scanned, and when. */}
-          {overview.state === 'ok' && overview.total === 0 && (
-            <EmptyState
-              tone="clean"
-              title="No open findings"
-              description="Every rule passed on the last scan."
-              meta={`${overview.connections} connection${
-                overview.connections === 1 ? '' : 's'
-              } scanned ${relative(overview.scannedAt!)}`}
-            />
-          )}
-
-          {overview.state === 'ok' && overview.total > 0 && (
-            <ul
-              style={{
-                listStyle: 'none',
-                margin: 0,
-                padding: 0,
-                display: 'grid',
-                gap: 'var(--space-2)',
-              }}
-            >
-              {/* Sorted by severity descending — order is a redundant channel that survives
-                  greyscale when hue does not. */}
-              {[...SEVERITIES]
-                .sort((a, b) => SEVERITY_RANK[a] - SEVERITY_RANK[b])
-                .map((sev) => (
-                  <li
-                    key={sev}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 'var(--space-3)',
-                      height: 'var(--row-compact)',
-                    }}
-                  >
+        {/* Severity breakdown */}
+        <Card>
+          <CardHeader><CardTitle>Open findings</CardTitle><CardMeta><Link href="/findings" style={{ color: 'var(--text-secondary)' }}>view queue →</Link></CardMeta></CardHeader>
+          <CardBody>
+            {total === 0 ? (
+              <EmptyState tone="clean" title="No open findings" description="Every rule passed on the last scan." />
+            ) : (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(90px, 1fr))', gap: 'var(--space-3)' }}>
+                {[...SEVERITIES].sort((a, b) => SEVERITY_RANK[a] - SEVERITY_RANK[b]).map((sev) => (
+                  <Link key={sev} href={`/findings?severity=${sev}` as Route} style={{ textDecoration: 'none', display: 'grid', gap: 4, justifyItems: 'start' }}>
                     <SeverityBadge severity={sev} />
-                    <span
-                      data-numeric
-                      style={{
-                        fontSize: 'var(--text-base)',
-                        fontWeight: 600,
-                        color: overview.counts[sev] === 0 ? 'var(--text-muted)' : 'var(--text-primary)',
-                      }}
-                    >
-                      {overview.counts[sev]}
-                    </span>
-                  </li>
+                    <span data-numeric style={{ fontSize: 'var(--text-xl)', fontWeight: 700, color: counts[sev] === 0 ? 'var(--text-muted)' : 'var(--text-primary)' }}>{counts[sev]}</span>
+                  </Link>
                 ))}
+              </div>
+            )}
+            {notAssessable > 0 && (
+              <p style={{ margin: 'var(--space-3) 0 0', fontSize: 'var(--text-2xs)', color: 'var(--sev-medium-fg)' }}>
+                {notAssessable} coverage gap{notAssessable === 1 ? '' : 's'} — checks that could not be assessed (not the same as a pass).
+              </p>
+            )}
+          </CardBody>
+        </Card>
+      </div>
+
+      {/* The two differentiating lenses */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 'var(--space-3)' }}>
+        <LensCard href="/identities" title="Non-human identities" value={identitiesRes.count ?? 0}
+          alert={wildcardRes.count ?? 0} alertLabel="with wildcard grants"
+          blurb="Service accounts, consumers, broker users and OAuth clients across every system." />
+        <LensCard href="/assets" title="Sensitive data assets" value={sensitiveRes.count ?? 0}
+          alert={0} alertLabel="" blurb="Resources named like PCI / PHI / secrets (inferred from naming), where regulated data likely flows." />
+      </div>
+
+      {/* Do this now */}
+      {top.length > 0 && (
+        <Card>
+          <CardHeader><CardTitle>Do this now</CardTitle><CardMeta>worst open findings</CardMeta></CardHeader>
+          <CardBody pad={false}>
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+              {top.map((f, i) => (
+                <li key={i} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-2) var(--space-4)', borderBottom: '1px solid var(--border)' }}>
+                  <SeverityBadge severity={f.severity} variant="inline" />
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>{f.title}</span>
+                    <span style={{ display: 'block', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                      {f.rule_id}{f.resources ? ` · ${f.resources.kind}/${f.resources.name}` : ''}
+                    </span>
+                  </span>
+                </li>
+              ))}
             </ul>
-          )}
-        </CardBody>
-      </Card>
+          </CardBody>
+        </Card>
+      )}
+
+      {/* Compliance strip */}
+      {compBy.size > 0 && (
+        <Card>
+          <CardHeader><CardTitle>Compliance</CardTitle><CardMeta><Link href="/compliance" style={{ color: 'var(--text-secondary)' }}>details →</Link></CardMeta></CardHeader>
+          <CardBody>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
+              {[...compBy.entries()].map(([fw, e]) => (
+                <div key={fw} style={{ display: 'grid', gap: 2 }}>
+                  <span style={{ fontSize: 'var(--text-xs)', fontWeight: 600, color: 'var(--text-primary)' }}>{fw}</span>
+                  <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+                    {e.fail > 0 && <span style={{ color: 'var(--sev-critical-fg)' }}>{e.fail} failing</span>}
+                    {e.fail > 0 && (e.unknown > 0 || e.pass > 0) && ' · '}
+                    {e.unknown > 0 && <span style={{ color: 'var(--sev-medium-fg)' }}>{e.unknown} unknown</span>}
+                    {e.unknown > 0 && e.pass > 0 && ' · '}
+                    {e.pass > 0 && <span style={{ color: 'var(--sev-low-fg)' }}>{e.pass} attested</span>}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </CardBody>
+        </Card>
+      )}
+    </Shell>
+  );
+}
+
+function LensCard({ href, title, value, alert, alertLabel, blurb }: {
+  href: Route; title: string; value: number; alert: number; alertLabel: string; blurb: string;
+}) {
+  return (
+    <Card>
+      <CardBody>
+        <Link href={href} style={{ textDecoration: 'none', display: 'block' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)' }}>{title}</span>
+            <span data-numeric style={{ fontSize: 'var(--text-xl)', fontWeight: 700, color: 'var(--text-primary)' }}>{value}</span>
+          </div>
+        </Link>
+        {alert > 0 && (
+          <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--sev-high-fg)', fontWeight: 600, marginTop: 2 }}>{alert} {alertLabel}</div>
+        )}
+        <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)', marginTop: 'var(--space-1)', lineHeight: 'var(--leading-2xs)' }}>{blurb}</div>
+      </CardBody>
+    </Card>
+  );
+}
+
+function Shell({ children, meta, active = false }: { children: React.ReactNode; meta?: string; active?: boolean }) {
+  return (
+    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1100 }}>
+      <AutoRefresh active={active} />
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 'var(--space-3)' }}>
+        <h1 style={{ margin: 0, fontSize: 'var(--text-xl)', lineHeight: 'var(--leading-xl)', fontWeight: 600 }}>Overview</h1>
+        {meta && <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>{meta}</span>}
+      </div>
+      {children}
     </div>
   );
 }
