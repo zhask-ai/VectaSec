@@ -39,8 +39,10 @@ const contrast = (a, b) => {
   return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
 };
 
-/* Extract the dark block (`:root {`) and the light block (`:root[data-theme='light'] {`).
- * Both define the same token names, so they must be scoped apart before parsing. */
+/* Extract the light block (the default `:root {`) and the dark block
+ * (`:root[data-theme='dark'] {`). Both define the same token names, so they must be scoped apart
+ * before parsing. Light is the console default, so it is the bare `:root {`; the @media
+ * prefers-color-scheme copy of dark is deliberately NOT parsed (it duplicates the named block). */
 function tokensIn(css, startMarker) {
   const start = css.indexOf(startMarker);
   if (start === -1) throw new Error(`could not find block: ${startMarker}`);
@@ -64,8 +66,8 @@ function tokensIn(css, startMarker) {
 
 const css = readFileSync(CSS, 'utf8');
 const themes = {
-  dark: tokensIn(css, ':root {'),
-  light: tokensIn(css, ":root[data-theme='light'] {"),
+  light: tokensIn(css, ':root {'),
+  dark: tokensIn(css, ":root[data-theme='dark'] {"),
 };
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'];

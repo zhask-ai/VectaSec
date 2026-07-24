@@ -1,169 +1,216 @@
 /* VectaSec console design tokens.
  *
- * Dark-first: security consoles are read in dark rooms across long shifts.
- * Every colour pair here is verified by `pnpm contrast` (scripts/contrast-check.mjs),
- * which parses THIS FILE — so these hexes are the single source of truth, not a copy of
- * the research tables. Two real failures were found by computing rather than eyeballing
- * (see --text-muted note below, and light muted at 4.46:1), which is why the check is wired
- * into CI instead of trusted to review.
+ * A security-posture console in the Linear / Vercel / Datadog register: dense, precise, calm,
+ * high-contrast. Light is the DEFAULT (a posture product is read in daylight ops rooms as often
+ * as dark ones); dark is a first-class second, reached by `prefers-color-scheme` OR an explicit
+ * `[data-theme]` that WINS BOTH WAYS (the toggle in the top bar stamps it on <html>).
  *
- * Provenance: docs/research/console-ux.md §7. Ratios are WCAG 2.2:
- *   text 4.5:1 (SC 1.4.3) · non-text/UI 3:1 (SC 1.4.11) · never colour alone (SC 1.4.1, Level A).
+ * The palette is the validated warm-neutral set from the dataviz method — NOT invented here.
+ * Surfaces are warm off-whites / true near-blacks; elevation is a HAIRLINE BORDER plus a very
+ * subtle shadow, never a heavy drop shadow. Every colour pair below is verified by
+ * `pnpm contrast` (scripts/contrast-check.mjs), which PARSES THIS FILE — so these hexes are the
+ * single source of truth, and a value that drifts under the WCAG floor fails CI, not review.
+ *
+ * SEVERITY is the one reserved status axis: it is NEVER themed away, ALWAYS paired with an
+ * icon + label (colour is never the sole signal — SC 1.4.1, Level A), and split into three
+ * roles because one hex cannot serve all three:
+ *   ·-fg    = text / icons on a surface        (WCAG text, 4.5:1)
+ *   ·-solid = fills / bars / marks / graph nodes (WCAG non-text, 3:1)
+ *   ·-bg    = the soft tint behind ·-fg in a chip
+ * The canonical hue (critical #d03b3b, high #ec835a, medium #fab219, low #2a78d6, info #898781)
+ * is the `solid`; `fg` is the same hue tuned to clear 4.5:1 on the working surfaces (on a warm
+ * off-white a bright orange/amber CANNOT be read as text, so it darkens — the icon+label still
+ * carry the level, which is the whole point of never trusting hue alone).
+ *
+ * Ratios are WCAG 2.2: text 4.5:1 (SC 1.4.3) · non-text/UI 3:1 (SC 1.4.11).
  */
 
-/* ── Dark (default) ─────────────────────────────────────────────────────── */
+/* ── Light (default) ────────────────────────────────────────────────────── */
 :root {
-  color-scheme: dark;
-
-  /* Surfaces — cool near-black with a blue cast; reads "technical", avoids muddy neutral grey.
-   * Elevation in dark is a LIGHTER SURFACE, not a shadow: shadows are invisible on #0B0E14. */
-  --bg: #0b0e14;
-  --surface: #12161f;
-  --surface-raised: #1a1f2b;
-
-  /* Borders. --border and --border-strong are 1.38:1 / 1.95:1 and FAIL SC 1.4.11's 3:1.
-   * That is fine — they are decorative separators (table dividers, card edges), not controls.
-   * Anything that is the SOLE visual indicator of a control (input outline, unchecked
-   * checkbox, secondary-button border) MUST use --border-interactive. Most-missed a11y bug
-   * in dark design systems; enforce it in review. */
-  --border: #262c3a;
-  --border-strong: #3a4356;
-  --border-interactive: #616d85;
-
-  --text-primary: #e6eaf2;
-  --text-secondary: #a3aec2;
-  /* ⚠ 4.37:1 on --surface-raised — BELOW 4.5. Never use muted text inside popovers or
-   * hover rows; use --text-secondary there. Kept named so the trap stays visible. */
-  --text-muted: #78849a;
-
-  /* Severity — split into fg / solid / badge because one hex per severity cannot satisfy
-   * both text (4.5:1) and fill (3:1) roles. `fg` = text/icons. `solid` = fills, bars, graph
-   * nodes (non-text). `badge-bg` = soft tint behind `fg`. */
-  --sev-critical-fg: #ff8a8a;
-  --sev-high-fg: #ffa766;
-  --sev-medium-fg: #f2cc60;
-  --sev-low-fg: #6fb6ff;
-  --sev-info-fg: #a3aec2;
-
-  --sev-critical-solid: #e5484d;
-  --sev-high-solid: #f76b15;
-  --sev-medium-solid: #ffc53d;
-  --sev-low-solid: #3b9eff;
-  --sev-info-solid: #78849a;
-
-  --sev-critical-bg: #2e1116;
-  --sev-high-bg: #2b1808;
-  --sev-medium-bg: #2a2208;
-  --sev-low-bg: #0e1f33;
-  --sev-info-bg: #1c212b;
-
-  /* The one brand-blue fill: primary buttons. `fg` is the text ON it, so the pair is checked
-   * as text (4.5:1), not as a fill. Defined here because it was previously only ever written
-   * as `var(--accent, #4C8DFF)` in a .tsx — a var() fallback for a token that does not exist
-   * is a hardcoded colour wearing a token's clothes: it never re-themes, and `pnpm contrast`
-   * (which parses this file) cannot see it. */
-  --accent: #4c8dff;
-  --accent-fg: #0b0e14;
-
-  --focus-ring: #6fb6ff;
-  --shadow-popover: 0 8px 24px rgb(0 0 0 / 0.5);
-}
-
-/* ── Light (first-class second) ─────────────────────────────────────────── */
-/* Elevation in light is border + shadow, not a lighter surface — the inverse of dark. */
-:root[data-theme='light'] {
   color-scheme: light;
 
-  --bg: #f6f8fb;
-  --surface: #ffffff;
+  /* Surfaces — warm off-whites. bg is the page, surface the card, raised the popover/hover.
+   * They sit within ~5% L of each other on purpose: elevation is the hairline + shadow, not a
+   * lightness jump. */
+  --bg: #f9f9f7;
+  --surface: #fcfcfb;
   --surface-raised: #ffffff;
 
-  --border: #e2e6ed;
-  --border-strong: #c6cdd8;
-  --border-interactive: #767f8f;
+  /* Borders. --border / --border-strong are hairline composites (SC 1.4.11 does NOT apply — they
+   * are decorative separators). Any control whose ONLY visual indicator is its outline (input,
+   * unchecked box, secondary-button edge) MUST use --border-interactive, the token that clears
+   * 3:1. Most-missed a11y bug in a neutral system; the source audit enforces it. */
+  --border: rgba(11, 11, 11, 0.1);
+  --border-strong: rgba(11, 11, 11, 0.16);
+  --border-interactive: #77766f;
+  /* Recessive plot gridline — below text, above nothing. */
+  --grid: #e1e0d9;
 
-  --text-primary: #0f1420;
-  --text-secondary: #475069;
-  /* The obvious grey #69738B computes 4.46:1 on --bg — a hair under. Darkened to pass.
-   * A 0.04 miss is invisible to the eye and fatal to an audit. */
-  --text-muted: #626c83;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  /* Real text (timestamps, provenance meta), so it owes 4.5:1. The canonical muted #898781 is
+   * 3.4:1 on the off-white and would fail as text — it lives on as --sev-info-solid and the grid
+   * hue; muted TEXT darkens to clear the floor. */
+  --text-muted: #6b6a64;
 
   --sev-critical-fg: #c3252a;
   --sev-high-fg: #a24a00;
-  /* A dark olive, not a yellow: yellow cannot reach 4.5:1 on white. Expected and correct —
-   * the icon and label carry severity, the hue only supports it. */
+  /* A dark amber, not a yellow: #fab219 cannot reach 4.5:1 as text on the off-white. Expected. */
   --sev-medium-fg: #7a5a00;
   --sev-low-fg: #0b5bb5;
-  --sev-info-fg: #4a5568;
+  --sev-info-fg: #57564f;
 
-  --sev-critical-solid: #c3252a;
-  --sev-high-solid: #a24a00;
-  --sev-medium-solid: #7a5a00;
-  --sev-low-solid: #0b5bb5;
-  --sev-info-solid: #4a5568;
+  --sev-critical-solid: #d03b3b;
+  --sev-high-solid: #bf5a1e;
+  --sev-medium-solid: #9a7400;
+  --sev-low-solid: #2a78d6;
+  --sev-info-solid: #898781;
 
   --sev-critical-bg: #fdecec;
-  --sev-high-bg: #fdf0e3;
+  --sev-high-bg: #fdefe3;
   --sev-medium-bg: #fbf3d9;
   --sev-low-bg: #e7f1fd;
-  --sev-info-bg: #eff1f5;
+  --sev-info-bg: #efeeec;
 
-  /* Inverted against dark: on white the fill has to go dark and the label light, or the pair
-   * cannot reach 4.5:1. Same token names, so no component has to know which theme it is in. */
+  /* The one brand-blue fill: primary buttons + the focus ring. On white the fill goes dark and
+   * the label light, or the pair cannot reach 4.5:1. Same token names in both themes so no
+   * component has to know which theme it is in. */
   --accent: #0b5bb5;
   --accent-fg: #ffffff;
 
   --focus-ring: #0b5bb5;
-  --shadow-popover: 0 8px 24px rgb(15 20 32 / 0.12);
+
+  /* Elevation is a hairline + a whisper of shadow, never a heavy drop. */
+  --shadow-sm: 0 1px 2px rgb(11 11 11 / 0.04);
+  --shadow-popover: 0 6px 20px rgb(11 11 11 / 0.1), 0 1px 3px rgb(11 11 11 / 0.06);
+
+  /* Categorical — CHARTS ONLY, fixed order, NEVER cycled, never used for status. */
+  --cat-1: #2a78d6;
+  --cat-2: #1baf7a;
+  --cat-3: #eda100;
+  --cat-4: #008300;
+  --cat-5: #4a3aa7;
+  --cat-6: #e34948;
+  --cat-7: #e87ba4;
+  --cat-8: #eb6834;
 }
 
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme='dark']) {
-    color-scheme: light;
+/* ── Dark (explicit — wins over prefers-color-scheme) ───────────────────── */
+:root[data-theme='dark'] {
+  color-scheme: dark;
 
-    --bg: #f6f8fb;
-    --surface: #ffffff;
-    --surface-raised: #ffffff;
+  --bg: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-raised: #232322;
 
-    --border: #e2e6ed;
-    --border-strong: #c6cdd8;
-    --border-interactive: #767f8f;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --border-interactive: #7a7970;
+  --grid: #2c2c2a;
 
-    --text-primary: #0f1420;
-    --text-secondary: #475069;
-    --text-muted: #626c83;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
 
-    --sev-critical-fg: #c3252a;
-    --sev-high-fg: #a24a00;
-    --sev-medium-fg: #7a5a00;
-    --sev-low-fg: #0b5bb5;
-    --sev-info-fg: #4a5568;
+  /* Near-black surfaces flip severity: fg is a LIGHT tint of the hue, solid is the vivid mark. */
+  --sev-critical-fg: #ff8a8a;
+  --sev-high-fg: #ffa766;
+  --sev-medium-fg: #f2cc60;
+  --sev-low-fg: #6fb6ff;
+  --sev-info-fg: #a3a29a;
 
-    --sev-critical-solid: #c3252a;
-    --sev-high-solid: #a24a00;
-    --sev-medium-solid: #7a5a00;
-    --sev-low-solid: #0b5bb5;
-    --sev-info-solid: #4a5568;
+  --sev-critical-solid: #e5484d;
+  --sev-high-solid: #ec835a;
+  --sev-medium-solid: #fab219;
+  --sev-low-solid: #3b9eff;
+  --sev-info-solid: #898781;
 
-    --sev-critical-bg: #fdecec;
-    --sev-high-bg: #fdf0e3;
-    --sev-medium-bg: #fbf3d9;
-    --sev-low-bg: #e7f1fd;
-    --sev-info-bg: #eff1f5;
+  --sev-critical-bg: #2a1416;
+  --sev-high-bg: #2a1a0e;
+  --sev-medium-bg: #2a2410;
+  --sev-low-bg: #0e2033;
+  --sev-info-bg: #1e1e1c;
 
-    --accent: #0b5bb5;
-    --accent-fg: #ffffff;
+  --accent: #4c8dff;
+  --accent-fg: #0d0d0d;
 
-    --focus-ring: #0b5bb5;
-    --shadow-popover: 0 8px 24px rgb(15 20 32 / 0.12);
+  --focus-ring: #6fb6ff;
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-popover: 0 8px 28px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.4);
+
+  --cat-1: #3987e5;
+  --cat-2: #199e70;
+  --cat-3: #c98500;
+  --cat-4: #008300;
+  --cat-5: #9085e9;
+  --cat-6: #e66767;
+  --cat-7: #d55181;
+  --cat-8: #d95926;
+}
+
+/* Dark by system preference, unless the user explicitly chose light. Mirrors the block above;
+ * `pnpm contrast` reads the named [data-theme='dark'] block, not this @media copy, so the two
+ * must stay in sync — this is the copy. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --bg: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-raised: #232322;
+
+    --border: rgba(255, 255, 255, 0.1);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --border-interactive: #7a7970;
+    --grid: #2c2c2a;
+
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+
+    --sev-critical-fg: #ff8a8a;
+    --sev-high-fg: #ffa766;
+    --sev-medium-fg: #f2cc60;
+    --sev-low-fg: #6fb6ff;
+    --sev-info-fg: #a3a29a;
+
+    --sev-critical-solid: #e5484d;
+    --sev-high-solid: #ec835a;
+    --sev-medium-solid: #fab219;
+    --sev-low-solid: #3b9eff;
+    --sev-info-solid: #898781;
+
+    --sev-critical-bg: #2a1416;
+    --sev-high-bg: #2a1a0e;
+    --sev-medium-bg: #2a2410;
+    --sev-low-bg: #0e2033;
+    --sev-info-bg: #1e1e1c;
+
+    --accent: #4c8dff;
+    --accent-fg: #0d0d0d;
+
+    --focus-ring: #6fb6ff;
+
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+    --shadow-popover: 0 8px 28px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.4);
+
+    --cat-1: #3987e5;
+    --cat-2: #199e70;
+    --cat-3: #c98500;
+    --cat-4: #008300;
+    --cat-5: #9085e9;
+    --cat-6: #e66767;
+    --cat-7: #d55181;
+    --cat-8: #d95926;
   }
 }
 
 /* ── Non-colour tokens (theme-invariant) ────────────────────────────────── */
 :root {
-  /* Type scale. Every size is below the 24px "large text" threshold, so ALL of it must
-   * clear 4.5:1. 11px is a hard floor and only for de-emphasised meta — never for a value
-   * someone must act on. Shrink padding to gain density, never type. */
+  /* Type scale — 11 → 40. Everything below 24px must clear 4.5:1, so the whole workhorse range
+   * does. 11px is a hard floor and only for de-emphasised meta. Gain density by shrinking
+   * PADDING, never type. */
   --text-2xs: 0.6875rem;  /* 11px — table meta, timestamps */
   --text-xs: 0.75rem;     /* 12px — table body, the workhorse */
   --text-sm: 0.8125rem;   /* 13px — body, labels */
@@ -171,7 +218,8 @@
   --text-lg: 1rem;        /* 16px — panel titles */
   --text-xl: 1.25rem;     /* 20px — page titles */
   --text-2xl: 1.5rem;     /* 24px — metrics */
-  --text-3xl: 2rem;       /* 32px — landing headline number */
+  --text-3xl: 1.75rem;    /* 28px — KPI hero numbers */
+  --text-4xl: 2.5rem;     /* 40px — landing headline number */
 
   --leading-2xs: 1rem;
   --leading-xs: 1rem;
@@ -180,14 +228,16 @@
   --leading-lg: 1.5rem;
   --leading-xl: 1.75rem;
   --leading-2xl: 2rem;
-  --leading-3xl: 2.5rem;
+  --leading-3xl: 2.25rem;
+  --leading-4xl: 2.75rem;
 
-  /* Evidence in a proportional font does not read as evidence. Mono is mandatory for
-   * config, IDs, fingerprints, and observation claims. */
-  --font-ui: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Self-contained: the system sans stack, no webfont fetch. Mono is mandatory for evidence —
+   * config, IDs, fingerprints, observation claims — because evidence in a proportional font does
+   * not read as evidence. */
+  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 
-  /* 4px base — dense UI needs the 4/8/12 rungs; scales starting at 8 force cramping or bloat. */
+  /* 4px base — dense UI needs the 4/8/12 rungs. */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -197,21 +247,30 @@
   --space-7: 48px;
   --space-8: 64px;
 
-  /* Deliberately tighter than general-SaaS 40/48/56: a findings queue is a log viewer,
-   * analysts want 200 rows on screen. Skeleton rows MUST match these exactly or the page
-   * jumps (CLS). */
+  /* Row heights — a findings queue is a log viewer; analysts want 200 rows on screen. Skeleton
+   * rows MUST match these exactly or the page jumps (CLS). */
   --row-compact: 32px;
   --row-default: 40px;
   --row-relaxed: 48px;
 
-  /* Small radii. Rounded corners read "consumer"; security tooling reads sharper. */
+  /* Small radii — rounded corners read "consumer"; security tooling reads sharper. */
   --radius-sm: 3px;
   --radius-md: 5px;
   --radius-lg: 8px;
+  --radius-xl: 12px;
   --radius-full: 9999px;
 
-  --sidebar-width: 216px;
-  --topbar-height: 48px;
+  /* Motion — restrained. Fast for hovers/toggles, standard for panels/overlays. */
+  --motion-fast: 120ms;
+  --motion-standard: 200ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+
+  --sidebar-width: 236px;
+  --sidebar-width-collapsed: 60px;
+  --topbar-height: 52px;
+  --z-sticky: 10;
+  --z-overlay: 100;
 }
 
 /* ── Base ───────────────────────────────────────────────────────────────── */
@@ -233,10 +292,10 @@ body {
   font-size: var(--text-base);
   line-height: var(--leading-base);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-/* Numbers must be comparable at a glance: $1,111.11 should not optically shrink next to
- * $999.99. Applies to counts, ports, CVSS, timestamps, fingerprints. */
+/* Numbers must be comparable at a glance: 1,111 must not optically shrink beside 999. */
 table,
 [data-numeric] {
   font-variant-numeric: tabular-nums;
@@ -260,6 +319,30 @@ a {
   border-radius: var(--radius-sm);
 }
 
+/* A calm text selection using the accent, both themes. */
+::selection {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+/* Thin, recessive scrollbars — a dense console should not shout its overflow. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -280,4 +363,504 @@ a {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* ── Shared keyframes ───────────────────────────────────────────────────── */
+/* Defined once, globally, so any island (StatusPill's in-flight pulse, the drawer, the scrim)
+ * can reference them. prefers-reduced-motion neutralises all of them via the rule above. */
+@keyframes vs-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes vs-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes vs-slide-in {
+  from { transform: translateX(12px); opacity: 0.5; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* ── Button hover/active (see components/ui/button.tsx) ──────────────────── */
+.vs-button:not(:disabled):hover[data-variant='primary'] { filter: brightness(1.06); }
+.vs-button:not(:disabled):hover[data-variant='secondary'] { background: var(--surface-raised); border-color: var(--text-secondary); }
+.vs-button:not(:disabled):hover[data-variant='ghost'] { background: var(--surface-raised); color: var(--text-primary); }
+.vs-button:not(:disabled):hover[data-variant='danger'] { filter: brightness(1.03); border-color: var(--sev-critical-fg); }
+.vs-button:not(:disabled):active { transform: translateY(0.5px); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * App shell — the persistent chrome (components/shell/ShellChrome.tsx).
+ *
+ * A 2×2 grid: brand + top bar across the top, sidebar + main below. The shell is exactly one
+ * viewport tall (height:100dvh) and the sidebar / main scroll INDEPENDENTLY inside it, so the
+ * top bar and nav never scroll away from an analyst working a long queue. Responsive in three
+ * steps: full rail (desktop) → icon rail (tablet) → off-canvas drawer (mobile). The body never
+ * scrolls horizontally — --main clamps its own overflow-x.
+ * ═════════════════════════════════════════════════════════════════════════ */
+.vs-shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  grid-template-rows: var(--topbar-height) minmax(0, 1fr);
+  grid-template-areas:
+    'brand topbar'
+    'sidebar main';
+  height: 100dvh;
+}
+
+.vs-skip-link {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  z-index: calc(var(--z-overlay) + 10);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  text-decoration: none;
+  transform: translateY(-250%);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.vs-skip-link:focus {
+  transform: translateY(0);
+}
+
+/* Brand */
+.vs-brand {
+  grid-area: brand;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+.vs-brand-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  text-decoration: none;
+  color: var(--text-primary);
+}
+.vs-brand-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  flex-shrink: 0;
+}
+.vs-brand-word {
+  font-size: var(--text-base);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+.vs-brand-mobile {
+  display: none;
+}
+
+/* Top bar */
+.vs-topbar {
+  grid-area: topbar;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.vs-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  flex: 1;
+}
+.vs-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+.vs-tenant {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vs-topbar-search {
+  min-width: 0;
+}
+.vs-menu-btn {
+  display: none;
+}
+
+/* Icon button — shared chrome control (theme toggle, hamburger). */
+.vs-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast);
+}
+.vs-iconbtn:hover {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+
+/* Global search */
+.vs-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-2);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  min-width: 200px;
+  max-width: 320px;
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+.vs-search:focus-within {
+  border-color: var(--border-interactive);
+}
+.vs-search-icon {
+  display: inline-flex;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.vs-search-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  outline: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-xs);
+}
+.vs-search-input::placeholder {
+  color: var(--text-muted);
+}
+.vs-search-kbd {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+  flex-shrink: 0;
+}
+
+/* Posture chip */
+.vs-posture-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  text-decoration: none;
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+.vs-posture-chip:hover {
+  border-color: var(--border-strong);
+}
+.vs-posture-label {
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.vs-posture-score {
+  font-size: var(--text-base);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.vs-posture-grade {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border: 1px solid;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* User menu */
+.vs-usermenu-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-1);
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.vs-usermenu-trigger:hover {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+.vs-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  color: var(--accent);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.vs-usermenu-email {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vs-menuitem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.vs-menuitem:hover {
+  background: var(--surface);
+}
+
+/* Sidebar + nav */
+.vs-sidebar {
+  grid-area: sidebar;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+.vs-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 100%;
+  padding: var(--space-3) var(--space-2);
+}
+.vs-nav-group {
+  display: grid;
+  gap: 2px;
+}
+.vs-nav-group-label {
+  padding: 0 var(--space-3);
+  margin: var(--space-4) 0 var(--space-1);
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.vs-nav-group:first-child .vs-nav-group-label {
+  margin-top: 0;
+}
+.vs-nav-group-pinned {
+  margin-top: auto;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.vs-nav-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.vs-navitem {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--row-default);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-decoration: none;
+  transition: background var(--motion-fast) var(--ease-standard), color var(--motion-fast);
+}
+.vs-navitem:hover {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+}
+.vs-navitem[data-active] {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.vs-navitem[data-active]::before {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+}
+.vs-navitem-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: inherit;
+  opacity: 0.85;
+}
+.vs-navitem[data-active] .vs-navitem-icon {
+  color: var(--accent);
+  opacity: 1;
+}
+
+/* Mobile scrim */
+.vs-scrim {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(11, 11, 11, 0.32);
+  z-index: calc(var(--z-overlay) - 1);
+  animation: vs-fade-in var(--motion-fast) var(--ease-out);
+}
+
+/* Main */
+.vs-main {
+  grid-area: main;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-5);
+}
+.vs-main:focus {
+  outline: none;
+}
+
+/* ── Tablet: collapse the rail to icons ─────────────────────────────────── */
+@media (min-width: 768px) and (max-width: 1024px) {
+  .vs-shell {
+    grid-template-columns: var(--sidebar-width-collapsed) minmax(0, 1fr);
+  }
+  .vs-brand {
+    justify-content: center;
+    padding: 0;
+  }
+  .vs-brand-word {
+    display: none;
+  }
+  .vs-nav {
+    padding: var(--space-3) var(--space-1);
+  }
+  .vs-nav-group-label {
+    display: none;
+  }
+  .vs-navitem {
+    justify-content: center;
+    padding: 0;
+  }
+  .vs-navitem[data-active]::before {
+    display: none;
+  }
+  /* Keep the label in the accessibility tree (icon-only rail must still have a name) — hide it
+   * visually, do NOT display:none it. */
+  .vs-nav-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+
+/* ── Mobile: off-canvas drawer ──────────────────────────────────────────── */
+@media (max-width: 767px) {
+  .vs-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: var(--topbar-height) minmax(0, 1fr);
+    grid-template-areas: 'topbar' 'main';
+  }
+  .vs-brand {
+    display: none;
+  }
+  /* Top bar sits above the drawer so its hamburger/close stays clickable. */
+  .vs-topbar {
+    position: relative;
+    z-index: calc(var(--z-overlay) + 2);
+  }
+  .vs-menu-btn {
+    display: inline-flex;
+  }
+  .vs-brand-mobile {
+    display: inline-flex;
+  }
+  .vs-sidebar {
+    position: fixed;
+    top: var(--topbar-height);
+    left: 0;
+    height: calc(100dvh - var(--topbar-height));
+    width: min(82vw, 300px);
+    transform: translateX(-100%);
+    transition: transform var(--motion-standard) var(--ease-out);
+    z-index: var(--z-overlay);
+    border-right: 1px solid var(--border-strong);
+  }
+  .vs-sidebar[data-open] {
+    transform: translateX(0);
+    box-shadow: var(--shadow-popover);
+  }
+  .vs-scrim {
+    display: block;
+    top: var(--topbar-height);
+  }
+  .vs-topbar-search {
+    display: none;
+  }
+  .vs-usermenu-email {
+    display: none;
+  }
+  .vs-posture-label {
+    display: none;
+  }
+  .vs-tenant {
+    max-width: 120px;
+  }
 }

@@ -1,137 +1,40 @@
-import type { Metadata, Route } from 'next';
-import Link from 'next/link';
-import { ScanStrip } from '@/components/ScanStrip';
-import { getOwnMembership, isAdmin } from '@/lib/role';
+import type { Metadata } from 'next';
+import Script from 'next/script';
 import './globals.css';
+
+/* The ROOT layout — deliberately minimal. It owns <html>/<body>, the global stylesheet, and one
+ * job beyond that: apply the saved theme BEFORE first paint.
+ *
+ * It does NOT render the app shell. The sidebar + top bar live in app/(app)/layout.tsx, which
+ * wraps only the authed routes inside the (app) route group. /login sits OUTSIDE that group, so it
+ * gets this bare frame and keeps its own centred layout — a sign-in screen with a full console
+ * chrome around an empty session would be both wrong and a small information leak.
+ *
+ * THE THEME SCRIPT runs before hydration (next/script `beforeInteractive`), reading `vs-theme`
+ * from localStorage and stamping data-theme on <html>. Without it, a user who chose dark would see
+ * a white flash on every load (the server has no way to know their choice — it is client state).
+ * beforeInteractive is the blessed way to run this pre-paint without React's "script inside a
+ * component" warning; a raw <script> in the tree logs that on every render. It only ever SETS an
+ * explicit choice — absence of the attribute correctly falls through to prefers-color-scheme — and
+ * it touches an <html> attribute React does not manage, so it causes no hydration mismatch.
+ * suppressHydrationWarning guards the attribute the script may add.
+ */
 
 export const metadata: Metadata = {
   title: 'VectaSec',
   description: 'Integration-layer security posture',
 };
 
-/* The console shell. Nav order is deliberate: Overview answers "what do I do now", Findings is
- * the workhorse, everything after is reference. Compliance sits high because it is the
- * budget-holder's view, not the analyst's. Scans sits with the operational tail: it is where
- * you look when you asked for work, not where you live.
- *
- * Other agents own the pages behind these routes; this file owns only the frame.
- *
- * `typedRoutes` is ON (next.config.ts) so a typo'd or dead href is a build error. Every route
- * below exists now, so there are no `as Route` casts left — the compiler guards the nav, as
- * the original note here promised it would. */
-const NAV: { href: Route; label: string }[] = [
-  { href: '/', label: 'Overview' },
-  { href: '/findings', label: 'Findings' },
-  { href: '/identities', label: 'Identities' },
-  { href: '/assets', label: 'Assets' },
-  { href: '/compliance', label: 'Compliance' },
-  { href: '/connections', label: 'Connections' },
-  { href: '/scans', label: 'Scans' },
-];
+const THEME_INIT = `(function(){try{var t=localStorage.getItem('vs-theme');if(t==='light'||t==='dark'){document.documentElement.dataset.theme=t;}}catch(e){}})();`;
 
-export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  // Settings (members, integrations) is tenant administration, so the link renders for admins
-  // only. Hiding it is coherence, not security: /settings pages re-check the role server-side,
-  // and every Settings Server Action re-verifies with getVerifiedUser + a fresh role read.
-  // On /login (no session) this resolves null and the nav simply has no Settings entry.
-  const membership = await getOwnMembership();
-  const nav: { href: Route; label: string }[] = isAdmin(membership?.role)
-    ? [...NAV, { href: '/settings', label: 'Settings' }]
-    : NAV;
-
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body>
-        {/* First stop on a keyboard tab: an analyst working a queue should never tab through
-            five nav links to reach the table. */}
-        <a
-          href="#main"
-          className="vs-visually-hidden"
-          style={{ position: 'absolute', top: 'var(--space-2)', left: 'var(--space-2)' }}
-        >
-          Skip to content
-        </a>
-
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'var(--sidebar-width) 1fr',
-            gridTemplateRows: 'var(--topbar-height) 1fr',
-            gridTemplateAreas: '"brand topbar" "sidebar main"',
-            minHeight: '100dvh',
-          }}
-        >
-          <div
-            style={{
-              gridArea: 'brand',
-              display: 'flex',
-              alignItems: 'center',
-              padding: '0 var(--space-4)',
-              borderBottom: '1px solid var(--border)',
-              borderRight: '1px solid var(--border)',
-              background: 'var(--surface)',
-              fontWeight: 600,
-              letterSpacing: '-0.01em',
-            }}
-          >
-            VectaSec
-          </div>
-
-          <header
-            style={{
-              gridArea: 'topbar',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'flex-end',
-              gap: 'var(--space-3)',
-              padding: '0 var(--space-4)',
-              borderBottom: '1px solid var(--border)',
-              background: 'var(--surface)',
-              fontSize: 'var(--text-xs)',
-              color: 'var(--text-secondary)',
-            }}
-          >
-            {/* Scan progress is ambient — a strip here, never a modal. A scan must never block
-                the console. */}
-            <ScanStrip />
-          </header>
-
-          <nav
-            aria-label="Main"
-            style={{
-              gridArea: 'sidebar',
-              borderRight: '1px solid var(--border)',
-              background: 'var(--surface)',
-              padding: 'var(--space-3) var(--space-2)',
-            }}
-          >
-            <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: '2px' }}>
-              {nav.map((item) => (
-                <li key={item.href}>
-                  <Link
-                    href={item.href}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      height: 'var(--row-compact)',
-                      padding: '0 var(--space-3)',
-                      borderRadius: 'var(--radius-md)',
-                      color: 'var(--text-secondary)',
-                      fontSize: 'var(--text-sm)',
-                      textDecoration: 'none',
-                    }}
-                  >
-                    {item.label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </nav>
-
-          <main id="main" style={{ gridArea: 'main', padding: 'var(--space-5)', minWidth: 0 }}>
-            {children}
-          </main>
-        </div>
+        <Script id="vs-theme-init" strategy="beforeInteractive">
+          {THEME_INIT}
+        </Script>
+        {children}
       </body>
     </html>
   );

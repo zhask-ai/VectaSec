@@ -1,8 +1,12 @@
 import type { ReactNode, CSSProperties } from 'react';
 
 /* Card. A container, not a layout engine — it does not manage grids or its own width.
- * Elevation is a lighter surface in dark and a shadow in light; --surface-raised and
- * --shadow-popover already encode that inversion, so `raised` works in both themes. */
+ *
+ * Elevation is a HAIRLINE plus a whisper of shadow, never a heavy drop. `raised` (popovers,
+ * selected rows) lifts to --surface-raised and the stronger --shadow-popover; the inversion
+ * between light (border+shadow) and dark (lighter surface) is already encoded in the tokens, so
+ * one prop works in both themes. Radius --radius-lg keeps cards a touch softer than the sharp
+ * controls without reading "consumer". */
 
 export function Card({
   children,
@@ -18,8 +22,8 @@ export function Card({
       style={{
         background: raised ? 'var(--surface-raised)' : 'var(--surface)',
         border: '1px solid var(--border)',
-        borderRadius: 'var(--radius-md)',
-        boxShadow: raised ? 'var(--shadow-popover)' : 'none',
+        borderRadius: 'var(--radius-lg)',
+        boxShadow: raised ? 'var(--shadow-popover)' : 'var(--shadow-sm)',
         ...style,
       }}
     >

@@ -1,0 +1,690 @@
+import Link from 'next/link';
+import type { Route } from 'next';
+
+import { canEdit, getOwnMembership } from '@/lib/role';
+import { createClient } from '@/lib/supabase/server';
+import { SEVERITIES, SEVERITY_RANK, type Severity } from '@/lib/types';
+import { AutoRefresh } from '@/components/AutoRefresh';
+import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
+import { EmptyState } from '@/components/ui/empty-state';
+import { PageHeader } from '@/components/ui/page-header';
+import { SeverityBadge } from '@/components/ui/severity';
+import { StatTile } from '@/components/ui/stat';
+import { StatusPill, type StatusTone } from '@/components/ui/status-pill';
+import { Toolbar } from '@/components/ui/toolbar';
+import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
+import { AddConnection } from './add-connection';
+import { CadenceSelect } from './cadence-select';
+import { RowActions } from './row-actions';
+
+/* Connected systems — the coverage view AND the connect-and-scan surface. "What are we NOT
+ * seeing" is the question this page exists to answer, so a broken connection has to be
+ * louder than a healthy one; connecting something new and scanning it happens here too,
+ * through the engine API (actions.ts) — the browser itself still cannot write a row.
+ *
+ * `connections.config` is deliberately never selected: it carries credential references, and a
+ * column that is never fetched cannot be leaked by a later refactor that passes a row to a
+ * client component. RLS scopes every read; no query filters by tenant_id on purpose.
+ *
+ * COUNTS. The per-connection resource and open-finding tallies used to come from two tenant-wide
+ * unbounded fetches (every resource, every open finding) reduced in JS. PostgREST caps an
+ * unbounded response at Max Rows (1000 hosted), so past the cap every connection's numbers were
+ * silently low — the most dangerous kind of wrong on a page whose whole job is coverage honesty.
+ * Connections are FEW (a human connects each one), so the fix is per-connection queries: exact
+ * head-counts for resources, and a per-connection scoped read for open findings with an exact
+ * count. No count crosses the wire unbounded, and no SECURITY DEFINER RPC/view (which would run as
+ * postgres/BYPASSRLS and leak every tenant).
+ *
+ * The design system (PageHeader/StatTile/Toolbar/StatusPill/SeverityBadge) frames it; every
+ * mutation still flows through the same Server Actions (AddConnection / RowActions / CadenceSelect),
+ * role-gated by `editable` in the UI and re-checked server-side.
+ */
+
+/** Bound on the per-connection open-finding sample. The per-severity mini-summary is built from
+ * this sample (exact while a connection has ≤ LIST_LIMIT open findings, which is the norm); the
+ * open COUNT beside it is count:'exact' and is never truncated, so the total is always right. */
+const LIST_LIMIT = 500;
+
+type ConnectionRow = {
+  id: string;
+  type: string;
+  name: string;
+  mode: string;
+  status: string;
+  last_scanned_at: string | null;
+  created_at: string;
+  scan_interval_minutes: number | null;
+  collector_id: string | null;
+  collectors: { id: string; name: string; status: string; last_heartbeat: string | null } | null;
+};
+
+type ScanRow = { id: string; status: string; started_at: string; finished_at: string | null };
+
+/** The connector types the add-form can create today (connector-fields.ts). The full catalogue of
+ * what VectaSec can assess — 37 connectors — lives on /systems. */
+const CONNECTOR_TYPES = ['kafka', 'kong', 'rabbitmq', 'redis', 'mcp'];
+
+export const metadata = { title: 'Connections · VectaSec' };
+
+function relative(iso: string): string {
+  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.floor(mins / 60)}h ago`;
+  return `${Math.floor(mins / 1440)}d ago`;
+}
+
+function absolute(iso: string): string {
+  return new Date(iso).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
+}
+
+/** "every 30m / every 6h / every 2d" — the recurring-scan cadence, human units. */
+function cadence(minutes: number): string {
+  if (minutes % 1440 === 0) return `every ${minutes / 1440}d`;
+  if (minutes % 60 === 0) return `every ${minutes / 60}h`;
+  return `every ${minutes}m`;
+}
+
+/** Connection status → operational tone. `status` is free text in the schema, so unknown values
+ * must still render (mapping to a fixed union would turn an unrecognised state into a blank cell,
+ * and a blank cell reads as "fine"). */
+function statusTone(status: string): StatusTone {
+  if (status === 'error' || status === 'offline') return 'bad';
+  if (status === 'degraded' || status === 'pending' || status === 'queued' || status === 'running') return 'warn';
+  if (status === 'active' || status === 'done') return 'ok';
+  return 'neutral';
+}
+
+type DisplayRow = ConnectionRow & {
+  scan: ScanRow | null;
+  counts: { total: number; stale: number };
+  open: number;
+  worst: Severity | null;
+  sevCounts: Partial<Record<Severity, number>>;
+  sampleSize: number;
+};
+
+/** A connection needing an operator's eyes: its last scan failed, it has never been scanned, or its
+ * status is anything other than healthy. Drives the "Needs attention" filter and tile. */
+function needsAttention(r: DisplayRow): boolean {
+  return (
+    r.scan?.status === 'error' ||
+    !r.last_scanned_at ||
+    r.status === 'error' ||
+    r.status === 'offline' ||
+    r.status === 'degraded' ||
+    r.status === 'pending'
+  );
+}
+
+export default async function ConnectionsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
+  const sp = await searchParams;
+  const statusFilter = typeof sp.status === 'string' ? sp.status : undefined;
+
+  const supabase = await createClient();
+
+  // Role gates the mutation UI only — every read below is RLS-scoped regardless. Viewers see
+  // the same coverage truth; they just get no buttons (and the Server Actions re-check the
+  // role anyway, because a hidden button is not an authorization boundary).
+  const membership = await getOwnMembership();
+  const editable = canEdit(membership?.role);
+
+  const connectionsRes = await supabase
+    .from('connections')
+    .select(
+      'id, type, name, mode, status, last_scanned_at, created_at, scan_interval_minutes, collector_id, collectors(id, name, status, last_heartbeat)',
+    )
+    .order('name');
+
+  if (connectionsRes.error) {
+    return (
+      <Shell>
+        <Card>
+          <CardBody>
+            <EmptyState tone="error" title="Could not load connections" description={connectionsRes.error.message} />
+          </CardBody>
+        </Card>
+      </Shell>
+    );
+  }
+
+  const connections = (connectionsRes.data ?? []) as unknown as ConnectionRow[];
+
+  if (connections.length === 0) {
+    return (
+      <Shell>
+        <SetupState editable={editable} />
+      </Shell>
+    );
+  }
+
+  // Everything per-connection in one pass. N is the number of systems a human connected, so it
+  // stays small — small enough that N bounded queries beat two tenant-wide unbounded fetches that
+  // capped at Max Rows. Each read below is either an exact head-count or scoped to ONE connection.
+  //
+  // The latest-scan read stays per-connection for the reason it always was: PostgREST has no
+  // "latest per group", and a single ordered+limited fetch would starve a rarely-scanned
+  // connection of its row behind a noisy one's history — a false "never scanned" is worse than an
+  // extra round trip.
+  const perConnection = await Promise.all(
+    connections.map(async (c) => {
+      const [scanRes, resTotalRes, resStaleRes, openRes] = await Promise.all([
+        supabase
+          .from('scans')
+          .select('id, status, started_at, finished_at')
+          .eq('connection_id', c.id)
+          .order('started_at', { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        supabase.from('resources').select('id', { count: 'exact', head: true }).eq('connection_id', c.id),
+        supabase
+          .from('resources')
+          .select('id', { count: 'exact', head: true })
+          .eq('connection_id', c.id)
+          .eq('stale', true),
+        // Open findings for THIS connection. findings carry no connection_id — they hang off a
+        // resource — so the inner join reaches connection_id and drops findings whose resource was
+        // deleted (an orphan cannot be attributed to a connection). count:'exact' gives the true
+        // open count even though the row sample is capped at LIST_LIMIT; the sample feeds the
+        // severity mini-summary.
+        supabase
+          .from('findings')
+          .select('severity, resources!inner(connection_id)', { count: 'exact' })
+          .eq('status', 'open')
+          .eq('resources.connection_id', c.id)
+          .limit(LIST_LIMIT),
+      ]);
+      return { c, scanRes, resTotalRes, resStaleRes, openRes };
+    }),
+  );
+
+  // A failed read is not zero coverage — surface it rather than rendering plausible-but-wrong
+  // zeros on the one page whose job is to say what is NOT being seen.
+  const failed = perConnection.find((p) => p.resTotalRes.error ?? p.resStaleRes.error ?? p.openRes.error);
+  if (failed) {
+    const message = (failed.resTotalRes.error ?? failed.resStaleRes.error ?? failed.openRes.error)!.message;
+    return (
+      <Shell>
+        <Card>
+          <CardBody>
+            <EmptyState tone="error" title="Could not load connection health" description={message} />
+          </CardBody>
+        </Card>
+      </Shell>
+    );
+  }
+
+  const rows: DisplayRow[] = perConnection.map(({ c, scanRes, resTotalRes, resStaleRes, openRes }) => {
+    const scan = (scanRes.data as ScanRow | null) ?? null;
+    const sevs = ((openRes.data ?? []) as unknown as { severity: Severity }[]).map((f) => f.severity);
+    let worst: Severity | null = null;
+    const sevCounts: Partial<Record<Severity, number>> = {};
+    for (const s of sevs) {
+      sevCounts[s] = (sevCounts[s] ?? 0) + 1;
+      if (worst === null || SEVERITY_RANK[s] < SEVERITY_RANK[worst]) worst = s;
+    }
+    return {
+      ...c,
+      scan,
+      counts: { total: resTotalRes.count ?? 0, stale: resStaleRes.count ?? 0 },
+      open: openRes.count ?? 0,
+      worst,
+      sevCounts,
+      sampleSize: sevs.length,
+    };
+  });
+
+  const broken = rows.filter((r) => r.scan?.status === 'error').length;
+  const unscanned = rows.filter((r) => !r.last_scanned_at).length;
+  const scanning = rows.filter((r) => r.scan?.status === 'queued' || r.scan?.status === 'running').length;
+  const attention = rows.filter(needsAttention).length;
+  const openTotal = rows.reduce((s, r) => s + r.open, 0);
+
+  const visible =
+    statusFilter === 'attention'
+      ? rows.filter(needsAttention)
+      : statusFilter === 'healthy'
+        ? rows.filter((r) => !needsAttention(r))
+        : rows;
+
+  const filters: { key: string; label: string; href: Route; count: number }[] = [
+    { key: 'all', label: 'All', href: '/connections' as Route, count: rows.length },
+    { key: 'attention', label: 'Needs attention', href: '/connections?status=attention' as Route, count: attention },
+    { key: 'healthy', label: 'Healthy', href: '/connections?status=healthy' as Route, count: rows.length - attention },
+  ];
+  const activeFilter = statusFilter === 'attention' || statusFilter === 'healthy' ? statusFilter : 'all';
+
+  return (
+    <Shell>
+      {/* Poll only while something is actually in flight; static again the render after. */}
+      <AutoRefresh active={scanning > 0} />
+
+      {/* Collection health is stated before the inventory, because every count below is only as
+          true as the scan that produced it. A failing connection reporting "0 open findings" is
+          the most dangerous cell on this page. */}
+      {broken > 0 && (
+        <Card style={{ borderColor: 'var(--sev-high-fg)' }}>
+          <CardBody>
+            <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
+              <strong>
+                {broken} connection{broken === 1 ? '' : 's'} failed{' '}
+                {broken === 1 ? 'its' : 'their'} most recent scan.
+              </strong>{' '}
+              Finding counts for {broken === 1 ? 'it' : 'them'} are from the last scan that
+              succeeded and may be out of date. A connection that cannot collect reports no
+              findings — which is not the same as having none.
+            </p>
+          </CardBody>
+        </Card>
+      )}
+
+      {/* Estate summary. Computed from the whole estate, not the current filter. */}
+      <Card>
+        <CardBody>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 'var(--space-4)' }}>
+            <StatTile label="Connections" value={rows.length} sub={`${CONNECTOR_TYPES.length} connector types available`} />
+            <StatTile
+              label="Needs attention"
+              value={attention}
+              tone={attention > 0 ? 'warn' : 'neutral'}
+              sub={broken > 0 ? `${broken} failed last scan` : unscanned > 0 ? `${unscanned} never scanned` : 'all healthy'}
+            />
+            <StatTile
+              label="Open findings"
+              value={openTotal}
+              tone={openTotal > 0 ? 'bad' : 'neutral'}
+              sub="attributed to a connection"
+            />
+            <StatTile
+              label="Scanning"
+              value={scanning}
+              tone={scanning > 0 ? 'warn' : 'neutral'}
+              sub={scanning > 0 ? 'live — refreshing' : 'nothing in flight'}
+            />
+          </div>
+        </CardBody>
+      </Card>
+
+      {/* Filter bar — one row above the table, state in the URL so a view is shareable. */}
+      <Toolbar
+        end={
+          <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
+            showing {visible.length} of {rows.length}
+          </span>
+        }
+      >
+        <span
+          style={{
+            fontSize: 'var(--text-2xs)',
+            fontWeight: 600,
+            letterSpacing: '0.04em',
+            textTransform: 'uppercase',
+            color: 'var(--text-secondary)',
+          }}
+        >
+          Status
+        </span>
+        {filters.map((f) => {
+          const active = f.key === activeFilter;
+          return (
+            <Link
+              key={f.key}
+              href={f.href}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 'var(--space-1)',
+                height: 'var(--row-compact)',
+                padding: '0 var(--space-2)',
+                border: `1px solid ${active ? 'var(--border-interactive)' : 'var(--border)'}`,
+                borderRadius: 'var(--radius-md)',
+                background: active ? 'var(--surface-raised)' : 'transparent',
+                color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
+                fontSize: 'var(--text-2xs)',
+                fontWeight: active ? 600 : 500,
+                textDecoration: 'none',
+              }}
+              aria-current={active ? 'true' : undefined}
+            >
+              {f.label}
+              <span data-numeric style={{ color: 'var(--text-muted)' }}>
+                {f.count}
+              </span>
+            </Link>
+          );
+        })}
+      </Toolbar>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Connected systems</CardTitle>
+          <CardMeta>
+            {rows.length} connection{rows.length === 1 ? '' : 's'}
+            {unscanned > 0 && ` · ${unscanned} never scanned`}
+            {scanning > 0 && ` · ${scanning} scanning`}
+            {activeFilter !== 'all' && ` · filtered to ${activeFilter}`}
+          </CardMeta>
+        </CardHeader>
+        <CardBody pad={false}>
+          {visible.length === 0 ? (
+            <EmptyState
+              tone="filtered"
+              title="No connections match this filter"
+              description={
+                activeFilter === 'attention'
+                  ? 'Nothing needs attention — every connection has scanned cleanly.'
+                  : 'Every connection currently needs attention.'
+              }
+              action={
+                <Link href={'/connections' as Route} style={clearFilterStyle}>
+                  Clear filter
+                </Link>
+              }
+            />
+          ) : (
+            <Table density="default" caption="Connected systems and their collection status">
+              <THead>
+                <TR>
+                  <TH width="18%">Name</TH>
+                  <TH width="8%">Type</TH>
+                  <TH width="12%">Status</TH>
+                  <TH width="13%">Last scan</TH>
+                  <TH width="9%" numeric>
+                    Resources
+                  </TH>
+                  <TH width="17%">Open findings</TH>
+                  <TH width="23%">Actions</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {visible.map((r) => (
+                  <TR key={r.id}>
+                    <TD>
+                      <span style={{ fontFamily: 'var(--font-mono)' }}>{r.name}</span>
+                      {/* Mode matters when it is NOT the default path: a collector connection
+                          names its collector; cloud is implied by saying nothing. */}
+                      {r.collectors && (
+                        <span
+                          style={{
+                            display: 'block',
+                            fontSize: 'var(--text-2xs)',
+                            color: 'var(--text-secondary)',
+                          }}
+                        >
+                          via {r.collectors.name} ({r.collectors.status})
+                        </span>
+                      )}
+                      {r.mode === 'collector' && !r.collectors && (
+                        <span
+                          style={{ display: 'block', fontSize: 'var(--text-2xs)', color: 'var(--sev-medium-fg)' }}
+                        >
+                          collector mode · no collector enrolled
+                        </span>
+                      )}
+                    </TD>
+                    <TD mono>{r.type}</TD>
+                    <TD>
+                      <ConnStatus
+                        status={r.scan?.status === 'error' ? 'error' : r.status}
+                        detail={r.scan?.status === 'error' ? 'last scan failed' : undefined}
+                        pulse={r.scan?.status === 'queued' || r.scan?.status === 'running'}
+                      />
+                    </TD>
+                    <TD>
+                      {r.last_scanned_at ? (
+                        <span title={absolute(r.last_scanned_at)}>{relative(r.last_scanned_at)}</span>
+                      ) : (
+                        // Never-scanned is not "0 findings", and the two must not read alike.
+                        <span style={{ color: 'var(--sev-medium-fg)', fontWeight: 600 }}>never</span>
+                      )}
+                      {r.scan && r.scan.status !== 'done' && (
+                        <span
+                          style={{
+                            display: 'block',
+                            fontSize: 'var(--text-2xs)',
+                            color: 'var(--text-secondary)',
+                          }}
+                        >
+                          scan {r.scan.status} · {relative(r.scan.started_at)}
+                        </span>
+                      )}
+                      {/* Recurring cadence (connections.scan_interval_minutes, consumed by the
+                          DB scheduler queue_due_scans()). Absence means point-in-time only —
+                          say nothing rather than invent a default. */}
+                      {r.scan_interval_minutes != null && (
+                        <span
+                          style={{
+                            display: 'block',
+                            fontSize: 'var(--text-2xs)',
+                            color: 'var(--text-secondary)',
+                          }}
+                          title="Rescanned automatically on this cadence"
+                        >
+                          rescans {cadence(r.scan_interval_minutes)}
+                        </span>
+                      )}
+                      {/* Editors change the cadence right where it is displayed; viewers see
+                          the display alone. */}
+                      {editable && <CadenceSelect connectionId={r.id} current={r.scan_interval_minutes} />}
+                    </TD>
+                    <TD numeric>
+                      {r.counts.total === 0 ? (
+                        <span style={{ color: 'var(--text-muted)' }}>0</span>
+                      ) : (
+                        <Link href={`/assets?connection=${r.id}`} style={{ color: 'var(--text-primary)' }}>
+                          {r.counts.total}
+                          {r.counts.stale > 0 && (
+                            <span style={{ color: 'var(--sev-medium-fg)' }}> ({r.counts.stale} stale)</span>
+                          )}
+                        </Link>
+                      )}
+                    </TD>
+                    <TD>
+                      <FindingSummary row={r} />
+                    </TD>
+                    <TD>
+                      {editable ? (
+                        <RowActions
+                          connectionId={r.id}
+                          name={r.name}
+                          scanActive={r.scan?.status === 'queued' || r.scan?.status === 'running'}
+                        />
+                      ) : (
+                        // Absent, not disabled: a row of dead buttons begs to be clicked and
+                        // answered with a refusal. Say why there is nothing here instead.
+                        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>view only</span>
+                      )}
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          )}
+        </CardBody>
+      </Card>
+
+      {editable && <ConnectHelp />}
+    </Shell>
+  );
+}
+
+/** Route frame: the single <h1> via PageHeader, then the page body grid. Every branch (error,
+ * empty, populated) renders through here so the header never disappears under a failure. */
+function Shell({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+      <PageHeader
+        title="Connections"
+        description="The systems VectaSec is collecting from, and how healthy that collection is. A broken connection is louder than a clean one — it is the coverage gap."
+        meta={
+          <>
+            read-only · <Link href={'/systems' as Route} style={{ color: 'var(--text-secondary)' }}>see full coverage</Link>
+          </>
+        }
+      />
+      {children}
+    </div>
+  );
+}
+
+/** The per-connection severity mini-summary. Exact open total (count:'exact') on top; the
+ * severity mix beneath, from the bounded sample — noted honestly when the sample is truncated. */
+function FindingSummary({ row }: { row: DisplayRow }) {
+  if (!row.worst) {
+    return row.last_scanned_at ? (
+      <span style={{ color: 'var(--text-muted)' }}>none</span>
+    ) : (
+      <span style={{ color: 'var(--text-muted)' }}>not scanned</span>
+    );
+  }
+  const truncated = row.open > row.sampleSize;
+  return (
+    <div style={{ display: 'grid', gap: 2 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-1) var(--space-2)', alignItems: 'center' }}>
+        {SEVERITIES.filter((s) => (row.sevCounts[s] ?? 0) > 0).map((s) => (
+          <SeverityBadge key={s} variant="inline" severity={s} count={row.sevCounts[s]} />
+        ))}
+      </div>
+      <span data-numeric style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
+        {row.open} open{truncated ? ` · top ${LIST_LIMIT} sampled` : ''}
+      </span>
+    </div>
+  );
+}
+
+/** Connection status via the shared StatusPill (shape + word + tone), with the scan-failure
+ * detail on a second line so a stale count is never read as fresh. */
+function ConnStatus({ status, detail, pulse }: { status: string; detail?: string; pulse?: boolean }) {
+  return (
+    <span style={{ display: 'inline-flex', flexDirection: 'column', gap: 2, alignItems: 'flex-start' }}>
+      <StatusPill tone={statusTone(status)} label={status} pulse={pulse} />
+      {detail && <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>{detail}</span>}
+    </span>
+  );
+}
+
+function SetupState({ editable }: { editable: boolean }) {
+  if (!editable) {
+    return (
+      <Card>
+        <CardBody>
+          <EmptyState
+            tone="setup"
+            title="No systems connected"
+            description="VectaSec scans the integration layer — the brokers, gateways and MCP servers between your services. Connecting one needs an editor or admin role; ask an admin to connect a system or to change your role."
+            meta={`connectors available: ${CONNECTOR_TYPES.join(', ')}`}
+          />
+        </CardBody>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardBody>
+        <EmptyState
+          tone="setup"
+          title="No systems connected"
+          description="VectaSec scans the integration layer — the brokers, gateways and MCP servers between your services. Connect one to start; the first scan runs immediately."
+          meta={`connectors available: ${CONNECTOR_TYPES.join(', ')}`}
+        />
+        <div style={{ maxWidth: 640, margin: '0 auto', display: 'grid', gap: 'var(--space-4)' }}>
+          <AddConnection />
+          <details>
+            <summary style={{ cursor: 'pointer', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+              Prefer the CLI?
+            </summary>
+            <div style={{ marginTop: 'var(--space-2)' }}>
+              <ConnectSnippet />
+            </div>
+          </details>
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
+function ConnectHelp() {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Connect another system</CardTitle>
+        <CardMeta>read-only · scans run from the worker, never the browser</CardMeta>
+      </CardHeader>
+      <CardBody>
+        <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
+          <AddConnection />
+          <details>
+            <summary style={{ cursor: 'pointer', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+              Prefer the CLI?
+            </summary>
+            <div style={{ marginTop: 'var(--space-2)' }}>
+              <ConnectSnippet />
+            </div>
+          </details>
+        </div>
+      </CardBody>
+    </Card>
+  );
+}
+
+/** The CLI path — same result as the form, from wherever the target is reachable. The form
+ * submits through the engine API with a verified actor (actions.ts); this snippet exists for
+ * operators whose broker is only reachable from a bastion the browser isn't on. */
+function ConnectSnippet() {
+  return (
+    <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+      <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
+        Run the engine CLI where the system is reachable. It reads; it never writes to the target.
+      </p>
+      <pre
+        style={{
+          margin: 0,
+          padding: 'var(--space-3)',
+          background: 'var(--bg)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-md)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 'var(--text-2xs)',
+          lineHeight: 'var(--leading-sm)',
+          color: 'var(--text-primary)',
+          overflowX: 'auto',
+        }}
+      >
+        <span style={{ color: 'var(--text-muted)' }}># save a connection, then scan it by name</span>
+        {'\n'}vectasec connections add --type kafka --name prod-kafka --bootstrap broker-1:9092
+        {'\n'}vectasec scan --connection prod-kafka
+        {'\n\n'}
+        <span style={{ color: 'var(--text-muted)' }}># or ad-hoc (saves the connection as a side effect)</span>
+        {'\n'}vectasec scan --type rabbitmq --url http://localhost:15672 --username svc --password ***
+        {'\n'}vectasec scan --type kong --url http://localhost:8001
+        {'\n'}vectasec scan --type mcp --url https://mcp.example.com
+      </pre>
+      <p style={{ margin: 0, fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec connections</code> lists the estate;{' '}
+        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec scans</code> shows history;{' '}
+        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec doctor</code> checks wiring. Scans
+        queued here need <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec worker</code>{' '}
+        running to execute.
+      </p>
+    </div>
+  );
+}
+
+const clearFilterStyle: React.CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  height: 'var(--row-compact)',
+  padding: '0 var(--space-3)',
+  border: '1px solid var(--border-interactive)',
+  borderRadius: 'var(--radius-md)',
+  background: 'var(--surface-raised)',
+  color: 'var(--text-primary)',
+  fontSize: 'var(--text-xs)',
+  fontWeight: 500,
+  textDecoration: 'none',
+};

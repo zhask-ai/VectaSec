@@ -42,6 +42,12 @@ _LINKERD_KEYS = ("linkerd_servers", "linkerd_server_authorizations")
 _GWAPI_KEYS = ("gateway_classes", "gateways", "http_routes")
 _CORE_KEYS = ("namespaces", "services", "service_accounts", "sa_token_secrets", "ingresses",
               "cluster_role_bindings", "role_bindings", "cluster_roles", "roles")
+# Runtime admission/egress posture axis — the same read-only K8s connection also witnesses
+# NetworkPolicy (default-deny / allow-all), the admission-webhook gate (presence + failurePolicy)
+# and, best-effort, a CNI-level egress policy engine (Cilium CRDs). PodSecurity enforce level
+# rides on the existing k8s_namespace labels rather than a distinct kind.
+_ADMISSION_KEYS = ("network_policies", "validating_webhooks", "mutating_webhooks",
+                   "cilium_network_policies", "cilium_clusterwide_network_policies")
 
 _SA_TOKEN_TYPE = "kubernetes.io/service-account-token"
 
@@ -90,6 +96,48 @@ def _wildcard_rules(rules: list) -> bool:
                for r in (rules or []))
 
 
+def _netpol_direction(rules, applies: bool, peer_key: str) -> str:
+    """One direction of a NetworkPolicy, in policy terms:
+      none      — this policyType does not apply to the selected pods
+      deny_all  — the direction applies but carries NO allow rules ([] or absent) → default-deny
+      allow_all — a rule with no peer (`from`/`to`) and no `ports` matches every source/dest
+      restricted— rules exist and each names concrete peers/ports
+    (an empty `{}` rule, or `{from: []}`, is the canonical allow-everything rule)."""
+    if not applies:
+        return "none"
+    if not rules:                                     # None or [] → no allow rules
+        return "deny_all"
+    if any(not (r or {}).get(peer_key) and not (r or {}).get("ports") for r in rules):
+        return "allow_all"
+    return "restricted"
+
+
+def _netpol_semantics(spec: dict) -> dict:
+    """Reduce a NetworkPolicy spec to the booleans the detectors read. podSelector `{}` (or
+    missing) selects every pod in the namespace; policyTypes is inferred the way the API server
+    infers it when omitted (Ingress always applies; Egress only when an egress section exists)."""
+    ps = spec.get("podSelector") or {}
+    selects_all = not (ps.get("matchLabels") or ps.get("matchExpressions"))
+    ingress, egress = spec.get("ingress"), spec.get("egress")
+    declared = spec.get("policyTypes")
+    if declared is not None:
+        types = set(declared)
+    else:
+        types = {"Ingress"} | ({"Egress"} if egress is not None else set())
+    ing = _netpol_direction(ingress, "Ingress" in types, "from")
+    egr = _netpol_direction(egress, "Egress" in types, "to")
+    return {
+        "selects_all_pods": bool(selects_all),
+        "policy_types": sorted(types),
+        "ingress_effect": ing,
+        "egress_effect": egr,
+        "default_deny_ingress": bool(selects_all and ing == "deny_all"),
+        "default_deny_egress": bool(selects_all and egr == "deny_all"),
+        "allow_all_ingress": bool(selects_all and ing == "allow_all"),
+        "allow_all_egress": bool(selects_all and egr == "allow_all"),
+    }
+
+
 def _anonymous_subject(subjects: list) -> bool:
     for s in subjects or []:
         if s.get("kind") == "User" and s.get("name") == "system:anonymous":
@@ -116,7 +164,8 @@ def _build_resources(snapshot: dict, root_namespace: str = "istio-system") -> Co
     edges: list[Edge] = []
 
     outcomes = {k: _section(snapshot, k)[0]
-                for k in (*_CORE_KEYS, *_ISTIO_KEYS, *_LINKERD_KEYS, *_GWAPI_KEYS)}
+                for k in (*_CORE_KEYS, *_ISTIO_KEYS, *_LINKERD_KEYS, *_GWAPI_KEYS,
+                          *_ADMISSION_KEYS)}
 
     def present(keys) -> bool:
         # forbidden still proves the API group EXISTS (403, not 404) — the stack is present,
@@ -135,6 +184,10 @@ def _build_resources(snapshot: dict, root_namespace: str = "istio-system") -> Co
             "istio_present": present(_ISTIO_KEYS),
             "linkerd_present": present(_LINKERD_KEYS),
             "gateway_api_present": present(_GWAPI_KEYS),
+            # runtime admission/egress posture axis
+            "admission_present": present(("validating_webhooks", "mutating_webhooks")),
+            "egress_crd_present": present(("cilium_network_policies",
+                                           "cilium_clusterwide_network_policies")),
             "istio_root_namespace": root_namespace,
         },
     ))
@@ -149,12 +202,17 @@ def _build_resources(snapshot: dict, root_namespace: str = "istio-system") -> Co
         ann = (item.get("metadata") or {}).get("annotations") or {}
         istio_injection = labels.get("istio-injection") == "enabled" or "istio.io/rev" in labels
         linkerd_injection = ann.get("linkerd.io/inject") == "enabled"
+        # PodSecurity admission enforce level rides on the namespace label (no distinct kind).
+        pss_enforce = labels.get("pod-security.kubernetes.io/enforce")
         resources.append(Resource(
             kind="k8s_namespace", name=name, ext_id=f"k8s-ns-{name}",
             labels={"istio_injection": "true" if istio_injection else "false",
-                    "linkerd_injection": "true" if linkerd_injection else "false"},
+                    "linkerd_injection": "true" if linkerd_injection else "false",
+                    "pss_enforce": pss_enforce or "unset"},
             raw={"name": name, "labels": labels,
-                 "istio_injection": istio_injection, "linkerd_injection": linkerd_injection},
+                 "istio_injection": istio_injection, "linkerd_injection": linkerd_injection,
+                 "pss_enforce": pss_enforce,
+                 "pss_enforce_version": labels.get("pod-security.kubernetes.io/enforce-version")},
         ))
 
     # ── Services — only the exposed types; a ClusterIP service is not an exposure surface ──
@@ -227,6 +285,46 @@ def _build_resources(snapshot: dict, root_namespace: str = "istio-system") -> Co
             raw={"name": name, "namespace": ns,
                  "ingress_class": spec.get("ingressClassName"), "tls": tls, "rules": rules},
         ))
+
+    # ── NetworkPolicies — reduced to default-deny / allow-all semantics (the egress axis) ──
+    _, np_items = _section(snapshot, "network_policies")
+    for item in np_items:
+        name, ns = _meta(item)
+        if not name:
+            continue
+        sem = _netpol_semantics(item.get("spec") or {})
+        resources.append(Resource(
+            kind="k8s_networkpolicy", name=f"{ns}/{name}", ext_id=f"k8s-netpol-{ns}-{name}",
+            namespace=ns,
+            labels={"selects_all_pods": "true" if sem["selects_all_pods"] else "false"},
+            raw={"name": name, "namespace": ns, **sem},
+        ))
+
+    # ── Admission webhooks — presence + failurePolicy (the bypassable-gate signal). The v1
+    #    default for an unset failurePolicy is Fail, so only an explicit Ignore reads as fail-open.
+    def _webhooks(key: str, wtype: str, prefix: str):
+        _, items = _section(snapshot, key)
+        for item in items:
+            name, _ = _meta(item)
+            if not name:
+                continue
+            hooks = [{"name": w.get("name"),
+                      "failure_policy": w.get("failurePolicy") or "Fail",
+                      "side_effects": w.get("sideEffects"),
+                      "timeout_seconds": w.get("timeoutSeconds"),
+                      "match_policy": w.get("matchPolicy"),
+                      "rules_count": len(w.get("rules") or [])}
+                     for w in (item.get("webhooks") or [])]
+            resources.append(Resource(
+                kind="k8s_admission_webhook", name=name, ext_id=f"{prefix}-{name}",
+                labels={"webhook_type": wtype,
+                        "fail_open": "true" if any(h["failure_policy"] == "Ignore"
+                                                   for h in hooks) else "false"},
+                raw={"name": name, "webhook_type": wtype, "webhooks": hooks},
+            ))
+
+    _webhooks("validating_webhooks", "validating", "k8s-vwh")
+    _webhooks("mutating_webhooks", "mutating", "k8s-mwh")
 
     # ── RBAC: resolve each binding's role rules INLINE so detectors read evidence, not names ──
     _, cr_items = _section(snapshot, "cluster_roles")
@@ -436,6 +534,7 @@ def collect(config: dict) -> Collected:
     core = k8s_client.CoreV1Api(api_client)
     net = k8s_client.NetworkingV1Api(api_client)
     rbac = k8s_client.RbacAuthorizationV1Api(api_client)
+    admission = k8s_client.AdmissionregistrationV1Api(api_client)
     custom = k8s_client.CustomObjectsApi(api_client)
 
     def _call(fn, reduce=None, **kw) -> dict:
@@ -480,6 +579,14 @@ def collect(config: dict) -> Collected:
         "sa_token_secrets": _call(core.list_secret_for_all_namespaces, reduce=_secret_meta,
                                   field_selector=f"type={_SA_TOKEN_TYPE}"),
         "ingresses": _call(net.list_ingress_for_all_namespaces),
+        # runtime admission/egress posture axis (read-only)
+        "network_policies": _call(net.list_network_policy_for_all_namespaces),
+        "validating_webhooks": _call(admission.list_validating_webhook_configuration),
+        "mutating_webhooks": _call(admission.list_mutating_webhook_configuration),
+        # best-effort: a CNI-level egress policy engine (Cilium). Absent (404) on most clusters.
+        "cilium_network_policies": _crd("cilium.io", ("v2",), "ciliumnetworkpolicies"),
+        "cilium_clusterwide_network_policies": _crd("cilium.io", ("v2",),
+                                                    "ciliumclusterwidenetworkpolicies"),
         "cluster_roles": _call(rbac.list_cluster_role),
         "cluster_role_bindings": _call(rbac.list_cluster_role_binding),
         "roles": _call(rbac.list_role_for_all_namespaces),
