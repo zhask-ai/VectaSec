@@ -1552,3 +1552,208 @@ def zk_legacy_plaintext_client(resource, ctx):
         ),
         source_ref={"config_key": "zookeeper.ssl.client.enable", "zookeeper_connect": zk},
     )]
+
+
+# ═══ Footgun rules ═════════════════════════════════════════════════════════
+# High-signal misconfigurations distinct from the transport/ACL packs above: super-user breadth,
+# delegation-token transport, and the ZooKeeper→KRaft migration ACL-enforcement gap. All read the
+# same per-broker describe_configs snapshot; none fires on the golden fixture (super.users absent,
+# delegation.token.master.key at default, migration disabled).
+def _interceptable_client_listeners(cfg: dict) -> list:
+    """Non-controller listeners whose resolved protocol carries traffic in clear
+    (PLAINTEXT / SASL_PLAINTEXT) → (name, host, proto). These are where a bearer credential on
+    the wire can be captured."""
+    controller = _controller(cfg)
+    out = []
+    for name, host, _port in _listeners(cfg):
+        if _lname(name) in controller:
+            continue
+        proto = _resolve(cfg, name)
+        if proto in ("PLAINTEXT", "SASL_PLAINTEXT"):
+            out.append((name, host, proto))
+    return out
+
+
+@detector(kinds=["broker"], rule_id="KAFKA.AUTHZ.SUPER_USERS_BREADTH", severity="low",
+          title="super.users grants un-revocable, ACL-bypassing cluster-admin to broad or "
+                "wildcard principals")
+def authz_super_users_breadth(resource, ctx):
+    cfg = resource.raw.get("config") or {}
+    bid = resource.raw.get("id")
+    # super.users is semicolon-delimited precisely because TLS distinguished names contain commas;
+    # it is absent from a stock describe_configs response, so guard the read.
+    e = _entry(cfg, "super.users")
+    raw = _val(cfg, "super.users")
+    supers = [s.strip() for s in (raw or "").split(";") if s.strip()]
+    if not supers:
+        return []   # absent/empty on a real broker -> nothing to report, never a KeyError
+
+    wildcard = "User:*" in supers
+    anon = "User:ANONYMOUS" in supers
+    anon_listeners = _anonymous_listeners(ctx) if anon else []
+    if wildcard or anon:
+        sev = "critical"
+    elif len(supers) > 5:
+        sev = "medium"
+    else:
+        sev = "low"
+    return [Hit(
+        observation=(
+            f"Broker {bid}: super.users lists {len(supers)} principal(s) "
+            f"(source={_source(e)}): {', '.join(supers)}. A super user is matched BEFORE any ACL "
+            f"and is immune to DENY bindings, so each of these principals holds full read, write "
+            f"and admin over every resource and cannot be constrained by authorization."
+            + (" super.users contains User:* — the wildcard principal — so EVERY authenticated "
+               "principal is an un-revocable cluster admin." if wildcard else "")
+            + (f" super.users contains User:ANONYMOUS, so any client reaching a listener that "
+               f"mints the ANONYMOUS principal is a cluster admin. Listeners that do so: "
+               f"{'; '.join(f'broker {i}: {n} ({p})' for i, n, p in anon_listeners)}."
+               if anon and anon_listeners else
+               " super.users contains User:ANONYMOUS, though no collected listener currently "
+               "mints an ANONYMOUS principal." if anon else "")
+        ),
+        remediation=(
+            "Keep super.users to the minimum set of operator/broker principals. Grant application "
+            "principals their rights through ACLs instead, so access is auditable and revocable "
+            "with a DENY. Never place User:* or User:ANONYMOUS in super.users. The key is static "
+            "(not settable via incrementalAlterConfigs), so edits need a rolling restart."
+        ),
+        detail=(
+            "Base severity is low: a small, intentional super.users list is normal broker "
+            "operation and this is blast-radius inventory, not a defect on its own. Escalated to "
+            "medium above five principals (super-user sprawl), and to critical for User:* or "
+            "User:ANONYMOUS, which turn authorization off for whole classes of principal. "
+            "super.users is absent from a stock describe_configs response, so on brokers that do "
+            "not expose it this rule is silent rather than guessing."
+        ),
+        severity=sev,
+        source_ref={"config_key": "super.users", "count": len(supers), "wildcard": wildcard,
+                    "anonymous": anon},
+    )]
+
+
+@detector(kinds=["broker"], rule_id="KAFKA.DELEGATION_TOKEN.INSECURE_TRANSPORT", severity="high",
+          title="Delegation tokens enabled with a plaintext client listener — the token HMAC is "
+                "interceptable on the wire")
+def delegation_token_insecure_transport(resource, ctx):
+    cfg = resource.raw.get("config") or {}
+    bid = resource.raw.get("id")
+
+    # Delegation-token support is turned on by configuring a master key. The key is PASSWORD-typed
+    # and redacted to null, but is_default=false proves it was explicitly set — presence, not the
+    # value, is what enables the feature. `delegation.token.secret.key` is the deprecated alias.
+    master = _entry(cfg, "delegation.token.master.key") or _entry(cfg, "delegation.token.secret.key")
+    if master is None or master.get("is_default"):
+        return []   # feature not enabled (default) or key absent (managed platform) -> not applicable
+
+    interceptable = _interceptable_client_listeners(cfg)
+    if not interceptable:
+        return []   # tokens enabled but every client listener is TLS -> no transport exposure
+
+    non_loopback = [(n, h, p) for n, h, p in interceptable if h not in _LOOPBACK]
+    listed = non_loopback or interceptable
+    lifetime = _val(cfg, "delegation.token.max.lifetime.ms")
+    return [Hit(
+        observation=(
+            f"Broker {bid}: delegation tokens are enabled (delegation.token.master.key is "
+            f"explicitly configured, is_default=false, source={_source(master)}), and these "
+            f"non-controller listeners resolve to a cleartext protocol: "
+            f"{'; '.join(f'{n}://{h} ({p})' for n, h, p in listed)}. A delegation token is a "
+            f"bearer HMAC credential exchanged over SCRAM; on a PLAINTEXT or SASL_PLAINTEXT "
+            f"listener the token identifier and HMAC cross the network unencrypted and can be "
+            f"captured and replayed until expiry (delegation.token.max.lifetime.ms={lifetime!r})."
+        ),
+        remediation=(
+            "Delegation tokens require TLS end to end (KIP-48): map every client listener that "
+            "accepts token auth to SASL_SSL, and set the inter-broker listener to SSL/SASL_SSL so "
+            "token distribution is encrypted. If delegation tokens are not actually used, remove "
+            "delegation.token.master.key. Rotate the master key and revoke outstanding tokens "
+            "(kafka-delegation-tokens.sh --expire) if a plaintext exposure occurred. Cap "
+            "delegation.token.max.lifetime.ms to the shortest workable window."
+        ),
+        detail=(
+            "The scan reads that a master key is set (feature enabled) and that a cleartext "
+            "listener exists; it cannot observe whether any client currently authenticates with a "
+            "token on that listener, so on a token-free deployment the exposure is latent. "
+            "Suppress per-listener if a mesh/sidecar/LB terminates TLS outside the broker."
+        ),
+        severity="medium" if not non_loopback else "high",
+        source_ref={"config_key": "delegation.token.master.key",
+                    "listeners": [n for n, _h, _p in listed]},
+    )]
+
+
+@detector(kinds=["broker"], rule_id="KAFKA.ZK.KRAFT_MIGRATION_ACL_GAP", severity="high",
+          title="ZooKeeper→KRaft migration in progress with an ACL-enforcement gap")
+def zk_kraft_migration_acl_gap(resource, ctx):
+    cfg = resource.raw.get("config") or {}
+    bid = resource.raw.get("id")
+
+    if not _is_true(_entry(cfg, "zookeeper.metadata.migration.enable")):
+        return []   # not migrating -> the legacy-ZK rules or the KRaft rules own this node
+
+    authz_e, authz_state = _authorizer(cfg)
+    if authz_state == "absent":
+        return []   # non-Apache/proxied broker -> inconclusive, never a finding
+
+    if authz_state == "unset":
+        anon = _anonymous_listeners(ctx)
+        return [Hit(
+            observation=(
+                f"Broker {bid}: zookeeper.metadata.migration.enable=true (a ZooKeeper→KRaft "
+                f"migration is in progress) but authorizer.class.name is the empty string "
+                f"(is_default={authz_e.get('is_default')}, source={_source(authz_e)}). During "
+                f"migration the authorizer must be configured and enforced on this node; with no "
+                f"authorizer set, ACLs are not enforced here and every authenticated principal has "
+                f"full cluster access."
+                + (f" Listeners minting User:ANONYMOUS: "
+                   f"{'; '.join(f'broker {i}: {n} ({p})' for i, n, p in anon)}." if anon else "")
+            ),
+            remediation=(
+                "Configure the StandardAuthorizer on the KRaft controllers AND every broker before "
+                "and throughout the migration, and keep the same super.users on both. Provision "
+                "ACLs before enabling the authorizer. Clusters migrating on Apache Kafka "
+                "3.5.0–3.6.1 are additionally exposed to CVE-2024-27309 (ACLs created during the "
+                "migration window may not be enforced until a restart; fixed in 3.6.2) — confirm "
+                "the version out of band and upgrade. Complete the migration to KRaft and remove "
+                "zookeeper.metadata.migration.enable / the ZooKeeper config."
+            ),
+            detail=(
+                "The Admin API exposes no broker version string, so the CVE-2024-27309 exposure is "
+                "advisory, not observed. The finding itself — migration enabled with no authorizer "
+                "on this node — is read directly from config."
+            ),
+            severity="critical" if anon else "high",
+            source_ref={"config_key": "zookeeper.metadata.migration.enable",
+                        "authorizer": "authorizer.class.name"},
+        )]
+
+    # authorizer set on this node: the migration's ACL correctness ALSO depends on the KRaft
+    # controllers enforcing the same authorizer, and a broker-bootstrapped Admin client cannot read
+    # controller config. State what was read; mark the controller side a coverage gap.
+    return [Hit(
+        observation=(
+            f"Broker {bid}: zookeeper.metadata.migration.enable=true with authorizer.class.name="
+            f"{_val(cfg, 'authorizer.class.name')!r} set on this node. A ZooKeeper→KRaft migration "
+            f"enforces ACLs correctly only if the SAME authorizer and super.users are configured "
+            f"on the KRaft controllers as well, and the controller nodes' configuration is not "
+            f"reachable from a broker-bootstrapped Admin client, so controller-side ACL "
+            f"enforcement during this migration could not be verified."
+        ),
+        remediation=(
+            "Verify with an Admin client configured with bootstrap.controllers that every KRaft "
+            "controller has the StandardAuthorizer and the same super.users as the brokers, and "
+            "that CVE-2024-27309 (Apache Kafka 3.5.0–3.6.1) does not apply. Complete the migration "
+            "and remove zookeeper.metadata.migration.enable once the cluster is fully on KRaft."
+        ),
+        detail=(
+            "Not a failure: this node has an authorizer set. It is a coverage gap because the "
+            "controller quorum — the other half of a correct migration — is out of reach of a "
+            "broker-bootstrapped scan."
+        ),
+        assessable=False,
+        assessment_reason=("migration in progress with an authorizer set on this broker, but KRaft "
+                           "controller-side ACL enforcement is not readable via the broker Admin API"),
+        source_ref={"config_key": "zookeeper.metadata.migration.enable",
+                    "authorizer": "authorizer.class.name"},
+    )]

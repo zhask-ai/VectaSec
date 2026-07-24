@@ -1,0 +1,37 @@
+{
+  "data": {
+    "__schema": {
+      "queryType": {"name": "Query"},
+      "mutationType": {"name": "Mutation"},
+      "subscriptionType": {"name": "Subscription"},
+      "types": [
+        {"kind": "OBJECT", "name": "Query", "fields": [
+          {"name": "me"},
+          {"name": "user"},
+          {"name": "users"},
+          {"name": "products"}
+        ]},
+        {"kind": "OBJECT", "name": "Mutation", "fields": [
+          {"name": "login"},
+          {"name": "createUser"},
+          {"name": "deleteUser"}
+        ]},
+        {"kind": "OBJECT", "name": "Subscription", "fields": [
+          {"name": "userUpdated"}
+        ]},
+        {"kind": "OBJECT", "name": "User", "fields": [
+          {"name": "id"},
+          {"name": "email"},
+          {"name": "role"}
+        ]},
+        {"kind": "OBJECT", "name": "Product", "fields": [
+          {"name": "id"},
+          {"name": "name"},
+          {"name": "price"}
+        ]},
+        {"kind": "SCALAR", "name": "String", "fields": null},
+        {"kind": "SCALAR", "name": "Int", "fields": null}
+      ]
+    }
+  }
+}

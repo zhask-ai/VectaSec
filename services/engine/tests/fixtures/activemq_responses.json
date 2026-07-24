@@ -1,0 +1,24 @@
+{
+  "classic_jolokia_vuln": {
+    "BrokerVersion": "5.17.5",
+    "TransportConnectors": {"openwire": "tcp://0.0.0.0:61616", "amqp": "tcp://0.0.0.0:5672"}
+  },
+  "classic_jolokia_safe": {
+    "BrokerVersion": "5.18.3",
+    "TransportConnectors": {"openwire": "ssl://0.0.0.0:61617"}
+  },
+  "activemq_xml_insecure": "<beans xmlns=\"http://www.springframework.org/schema/beans\"><broker xmlns=\"http://activemq.apache.org/schema/core\" brokerName=\"localhost\"><transportConnectors><transportConnector name=\"openwire\" uri=\"tcp://0.0.0.0:61616\"/></transportConnectors></broker></beans>",
+  "activemq_xml_secure": "<beans xmlns=\"http://www.springframework.org/schema/beans\"><broker xmlns=\"http://activemq.apache.org/schema/core\" brokerName=\"localhost\"><plugins><simpleAuthenticationPlugin anonymousAccessAllowed=\"false\"><users><authenticationUser username=\"admin\" password=\"S3cret-Str0ng!\" groups=\"admins\"/><authenticationUser username=\"app\" password=\"app-Str0ng-pw\" groups=\"app\"/></users></simpleAuthenticationPlugin><authorizationPlugin><map><authorizationMap><authorizationEntries><authorizationEntry queue=\"&gt;\" read=\"admins\" write=\"admins\" admin=\"admins\"/></authorizationEntries></authorizationMap></map></authorizationPlugin></plugins></broker></beans>",
+  "activemq_xml_anonymous": "<beans xmlns=\"http://www.springframework.org/schema/beans\"><broker xmlns=\"http://activemq.apache.org/schema/core\" brokerName=\"localhost\"><plugins><simpleAuthenticationPlugin anonymousAccessAllowed=\"true\"><users><authenticationUser username=\"admin\" password=\"admin\" groups=\"admins\"/></users></simpleAuthenticationPlugin></plugins></broker></beans>",
+  "jetty_realm_default": "# jetty-realm.properties\nadmin: admin, admin\nuser: user, user",
+  "jetty_realm_changed": "admin: MD5:5f4dcc3b5aa765d61d8327deb882cf99, admin\nuser: userpw, user",
+  "artemis_jolokia": {"Version": "2.30.0"},
+  "broker_xml_insecure": "<configuration xmlns=\"urn:activemq\"><core xmlns=\"urn:activemq:core\"><security-enabled>false</security-enabled><acceptors><acceptor name=\"artemis\">tcp://0.0.0.0:61616?protocols=CORE,AMQP,OPENWIRE</acceptor></acceptors></core></configuration>",
+  "broker_xml_secure": "<configuration xmlns=\"urn:activemq\"><core xmlns=\"urn:activemq:core\"><security-enabled>true</security-enabled><acceptors><acceptor name=\"netty-ssl\">tcp://0.0.0.0:61617?sslEnabled=true;keyStorePath=broker.ks</acceptor></acceptors><security-settings><security-setting match=\"#\"><permission type=\"send\" roles=\"app\"/><permission type=\"consume\" roles=\"app\"/><permission type=\"manage\" roles=\"amq\"/></security-setting></security-settings></core></configuration>",
+  "login_config_guest_admin": "activemq {\n  org.apache.activemq.artemis.spi.core.security.jaas.PropertiesLoginModule sufficient\n      org.apache.activemq.jaas.properties.user=\"artemis-users.properties\"\n      org.apache.activemq.jaas.properties.role=\"artemis-roles.properties\";\n  org.apache.activemq.artemis.spi.core.security.jaas.GuestLoginModule sufficient\n      org.apache.activemq.jaas.guest.user=\"guest\"\n      org.apache.activemq.jaas.guest.role=\"amq\";\n};",
+  "login_config_guest_low": "activemq {\n  org.apache.activemq.artemis.spi.core.security.jaas.GuestLoginModule sufficient\n      org.apache.activemq.jaas.guest.user=\"guest\"\n      org.apache.activemq.jaas.guest.role=\"guests\";\n};",
+  "login_config_noguest": "activemq {\n  org.apache.activemq.artemis.spi.core.security.jaas.PropertiesLoginModule required\n      org.apache.activemq.jaas.properties.user=\"artemis-users.properties\"\n      org.apache.activemq.jaas.properties.role=\"artemis-roles.properties\";\n};",
+  "artemis_users_default": "# artemis-users.properties\nadmin = admin\napp = ENC(1024:AB12CD34)",
+  "artemis_users_masked": "admin = ENC(1024:AB12CD34)\napp = ENC(1024:EF56GH78)",
+  "artemis_roles": "amq = admin\napp = app"
+}

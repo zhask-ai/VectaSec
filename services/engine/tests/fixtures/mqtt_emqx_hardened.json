@@ -1,0 +1,29 @@
+{
+  "nodes": {"outcome": "ok", "data": [
+    {"node": "emqx@10.0.0.5", "version": "5.8.0", "edition": "Enterprise", "role": "core"}
+  ]},
+  "authentication": {"outcome": "ok", "data": [
+    {"id": "password_based:built_in_database", "backend": "built_in_database", "mechanism": "password_based", "enable": true}
+  ]},
+  "authorization_sources": {"outcome": "ok", "data": [
+    {"type": "built_in_database", "enable": true}
+  ]},
+  "authorization_settings": {"outcome": "ok", "data": {"no_match": "deny", "deny_action": "disconnect", "cache": {"enable": true}}},
+  "listeners": {"outcome": "ok", "data": [
+    {"id": "ssl:default", "type": "ssl", "bind": "0.0.0.0:8883", "enable": true,
+     "ssl_options": {"certfile": "/opt/emqx/etc/certs/cert.pem", "keyfile": "/opt/emqx/etc/certs/key.pem", "verify": "verify_peer"}}
+  ]},
+  "dashboard_users": {"outcome": "ok", "data": [
+    {"username": "ops-admin", "role": "administrator", "description": "rotated admin"}
+  ]},
+  "dashboard": {"outcome": "ok", "data": {"listeners": {"http": {"bind": "127.0.0.1:18083", "enable": true}}}},
+  "authn_users": {"outcome": "ok", "data": [
+    {"user_id": "device-01", "is_superuser": false},
+    {"user_id": "device-02", "is_superuser": false}
+  ]},
+  "authz_rules": {"outcome": "ok", "data": [
+    {"username": "device-01", "action": "publish", "topic": "sensors/device-01", "permission": "allow"},
+    {"username": "device-02", "action": "subscribe", "topic": "commands/#", "permission": "allow"}
+  ]},
+  "api_probe": {"unauthenticated_reachable": false}
+}

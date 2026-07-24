@@ -1,0 +1,52 @@
+{
+  "insecure": {
+    "qmgr": {
+      "queueManagerName": "QM1",
+      "connectionAuthentication": "",
+      "channelAuthenticationRecords": "disabled",
+      "sslKeyRepository": ""
+    },
+    "authinfo": null,
+    "authinfo_readable": false,
+    "channels": [
+      {"channelName": "APP.SVRCONN", "channelType": "svrconn", "sslCipherSpecification": "", "messageChannelAgentUserIdentifier": ""},
+      {"channelName": "ADMIN.SVRCONN", "channelType": "svrconn", "sslCipherSpecification": "", "messageChannelAgentUserIdentifier": "mqm"},
+      {"channelName": "SYSTEM.DEF.SVRCONN", "channelType": "svrconn", "sslCipherSpecification": "", "messageChannelAgentUserIdentifier": ""},
+      {"channelName": "TO.QM2", "channelType": "sender", "sslCipherSpecification": "", "messageChannelAgentUserIdentifier": ""}
+    ],
+    "queues": [
+      {"queueName": "APP.ORDERS", "queueType": "local"}
+    ],
+    "authrecs": [
+      {"profileName": "APP.ORDERS", "objectType": "queue", "entityName": "mqm", "entityType": "group", "authorityAdd": ["all"]},
+      {"profileName": "APP.ORDERS", "objectType": "queue", "entityName": "appuser", "entityType": "principal", "authorityAdd": ["put", "get"]}
+    ]
+  },
+  "hardened": {
+    "qmgr": {
+      "queueManagerName": "QMSAFE",
+      "connectionAuthentication": "SYSTEM.DEFAULT.AUTHINFO.IDPWOS",
+      "channelAuthenticationRecords": "enabled",
+      "sslKeyRepository": "/var/mqm/qmgrs/QMSAFE/ssl/key"
+    },
+    "authinfo": {"authenticationMethod": "IDPWOS", "checkClient": "required", "checkLocal": "optional", "adoptContext": "yes"},
+    "authinfo_readable": true,
+    "channels": [
+      {"channelName": "APP.SVRCONN", "channelType": "svrconn", "sslCipherSpecification": "ANY_TLS12_OR_HIGHER", "messageChannelAgentUserIdentifier": "appuser", "sslClientAuthentication": "required"}
+    ],
+    "queues": [
+      {"queueName": "APP.PAYMENTS", "queueType": "local"}
+    ],
+    "authrecs": [
+      {"profileName": "APP.PAYMENTS", "objectType": "queue", "entityName": "appuser", "entityType": "principal", "authorityAdd": ["put", "get"]}
+    ]
+  },
+  "chckclnt_optional": {
+    "qmgr": {"queueManagerName": "QM3", "connectionAuthentication": "MY.AUTHINFO", "channelAuthenticationRecords": "enabled"},
+    "authinfo": {"authenticationMethod": "IDPWOS", "checkClient": "optional", "checkLocal": "none"},
+    "authinfo_readable": true
+  },
+  "tls_optional_cauth_channel": {
+    "channelName": "TLS.SVRCONN", "channelType": "svrconn", "sslCipherSpecification": "ANY_TLS12_OR_HIGHER", "messageChannelAgentUserIdentifier": "appuser", "sslClientAuthentication": "optional"
+  }
+}

@@ -1,0 +1,220 @@
+{
+  "_comment": "Golden probe snapshots shaped like what connect/mft.py assembles from an MFT admin-console/banner GET and (mode c) an operator admin_export. Fed through the connector's pure parse layer (build_resources / parse_server / parse_endpoint / parse_transfer_account) in test_detect_mft.py so httpx and a live appliance stay out of the suite.",
+
+  "moveit_vulnerable_exposed": {
+    "base_url": "https://moveit.example.com",
+    "host": "moveit.example.com",
+    "scheme": "https",
+    "port": 443,
+    "reachable": true,
+    "authenticated_scan": true,
+    "http_status": 200,
+    "server_header": "Microsoft-IIS/10.0",
+    "banner": "Microsoft-IIS/10.0 MOVEit Transfer 15.0.0",
+    "title": "MOVEit Transfer - Sign On",
+    "body_snippet": "<form>MOVEit Transfer</form>",
+    "admin_paths": [
+      {"path": "/human.aspx", "status": 200, "auth_required": false},
+      {"path": "/machine.aspx", "status": 401, "auth_required": true}
+    ],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.3", "expired": false},
+    "admin_api": {
+      "readable": true,
+      "source": "operator_export",
+      "default_admin_present": true,
+      "endpoints": [
+        {"type": "as2", "name": "partner-acme-as2", "port": 4080,
+         "message_signing": false, "message_encryption": false, "mdn_signed": false,
+         "tls_required": true},
+        {"type": "as2", "name": "partner-globex-as2", "port": 4080,
+         "message_signing": true, "message_encryption": true, "mdn_signed": true,
+         "tls_required": true},
+        {"type": "as2", "name": "partner-initech-as2", "port": 4080},
+        {"type": "sftp", "name": "sftp-listener", "port": 22,
+         "password_auth_allowed": true, "public_key_auth": true,
+         "host_key_algorithm": "ssh-rsa", "host_key_bits": 1024},
+        {"type": "sftp", "name": "sftp-strong", "port": 2222,
+         "password_auth_allowed": false, "public_key_auth": true,
+         "host_key_algorithm": "ssh-ed25519", "host_key_bits": 256},
+        {"type": "sftp", "name": "sftp-unknown", "port": 22}
+      ],
+      "transfer_accounts": [
+        {"username": "anonymous", "anonymous": true, "auth_type": "none", "enabled": true},
+        {"username": "acme_edi", "partner_id": "ACME", "auth_type": "password",
+         "credential_type": "password", "stored_credential_present": true,
+         "credential_plaintext_capable": true, "enabled": true,
+         "endpoint": "partner-acme-as2"},
+        {"username": "globex_sftp", "partner_id": "GLOBEX", "auth_type": "key",
+         "credential_type": "ssh_key", "stored_credential_present": true,
+         "credential_plaintext_capable": false, "enabled": true,
+         "endpoint": "sftp-listener"},
+        {"username": "svc-batch", "auth_type": "password", "credential_type": "password",
+         "stored_credential_present": false, "enabled": true}
+      ]
+    }
+  },
+
+  "moveit_patched": {
+    "base_url": "https://mft2.example.com",
+    "host": "mft2.example.com",
+    "scheme": "https",
+    "port": 443,
+    "reachable": true,
+    "authenticated_scan": false,
+    "http_status": 200,
+    "server_header": "Microsoft-IIS/10.0",
+    "banner": "Microsoft-IIS/10.0 MOVEit Transfer 15.0.1",
+    "title": "MOVEit Transfer - Sign On",
+    "body_snippet": "<form type=\"password\">Sign On</form>",
+    "admin_paths": [
+      {"path": "/human.aspx", "status": 200, "auth_required": true},
+      {"path": "/machine.aspx", "status": 401, "auth_required": true}
+    ],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.3", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "moveit_no_version": {
+    "base_url": "https://moveit3.example.com",
+    "host": "moveit3.example.com",
+    "scheme": "https", "port": 443, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "server_header": "Microsoft-IIS/10.0",
+    "banner": "Microsoft-IIS/10.0 MOVEit Transfer",
+    "title": "MOVEit Transfer", "body_snippet": "MOVEit",
+    "admin_paths": [{"path": "/human.aspx", "status": 401, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.3", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "moveit_unknown_series": {
+    "base_url": "https://moveit4.example.com",
+    "host": "moveit4.example.com",
+    "scheme": "https", "port": 443, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "server_header": "Microsoft-IIS/10.0",
+    "banner": "MOVEit Transfer 12.1.0",
+    "title": "MOVEit Transfer", "body_snippet": "MOVEit",
+    "admin_paths": [{"path": "/human.aspx", "status": 401, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.3", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "goanywhere_vulnerable": {
+    "base_url": "https://goanywhere.example.com",
+    "host": "goanywhere.example.com",
+    "scheme": "https", "port": 8000, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "server_header": "",
+    "banner": "GoAnywhere MFT 7.1.1",
+    "title": "GoAnywhere", "body_snippet": "GoAnywhere Administrator",
+    "admin_paths": [
+      {"path": "/goanywhere/auth/Login.xhtml", "status": 200, "auth_required": true}
+    ],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.2", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "goanywhere_0204_only": {
+    "base_url": "https://ga2.example.com",
+    "host": "ga2.example.com",
+    "scheme": "https", "port": 8000, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "banner": "GoAnywhere MFT 7.3.0",
+    "title": "GoAnywhere", "body_snippet": "GoAnywhere",
+    "admin_paths": [{"path": "/goanywhere/", "status": 200, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.2", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "goanywhere_pre_601": {
+    "base_url": "https://ga3.example.com",
+    "host": "ga3.example.com",
+    "scheme": "https", "port": 8000, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "banner": "GoAnywhere MFT 6.0.0",
+    "title": "GoAnywhere", "body_snippet": "GoAnywhere",
+    "admin_paths": [{"path": "/goanywhere/", "status": 200, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.2", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "goanywhere_patched": {
+    "base_url": "https://ga4.example.com",
+    "host": "ga4.example.com",
+    "scheme": "https", "port": 8000, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "banner": "GoAnywhere MFT 7.4.1",
+    "title": "GoAnywhere", "body_snippet": "GoAnywhere",
+    "admin_paths": [{"path": "/goanywhere/", "status": 200, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.3", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "cleo_vulnerable": {
+    "base_url": "https://cleo.example.com",
+    "host": "cleo.example.com",
+    "scheme": "https", "port": 5080, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "banner": "Cleo Harmony 5.8.0.20",
+    "title": "Cleo Harmony", "body_snippet": "Harmony",
+    "admin_paths": [{"path": "/Harmony", "status": 200, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.2", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "cleo_partial_patch": {
+    "base_url": "https://cleo2.example.com",
+    "host": "cleo2.example.com",
+    "scheme": "https", "port": 5080, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "banner": "Cleo VLTrader 5.8.0.21",
+    "title": "Cleo VLTrader", "body_snippet": "VLTrader",
+    "admin_paths": [{"path": "/VLTrader", "status": 200, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.2", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "cleo_patched": {
+    "base_url": "https://cleo3.example.com",
+    "host": "cleo3.example.com",
+    "scheme": "https", "port": 5080, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "banner": "Cleo Harmony 5.8.0.24",
+    "title": "Cleo Harmony", "body_snippet": "Harmony",
+    "admin_paths": [{"path": "/Harmony", "status": 200, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.3", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "sterling": {
+    "base_url": "https://sterling.example.com",
+    "host": "sterling.example.com",
+    "scheme": "https", "port": 443, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "banner": "IBM Sterling File Gateway 6.1.2.0",
+    "title": "myFileGateway", "body_snippet": "Sterling File Gateway",
+    "admin_paths": [{"path": "/myfilegateway", "status": 302, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.2", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "axway": {
+    "base_url": "https://axway.example.com",
+    "host": "axway.example.com",
+    "scheme": "https", "port": 443, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "banner": "Axway SecureTransport 5.5",
+    "title": "SecureTransport", "body_snippet": "Axway SecureTransport",
+    "admin_paths": [{"path": "/home", "status": 200, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.2", "expired": false},
+    "admin_api": {"readable": false, "reason": "no admin token or admin_export supplied"}
+  },
+
+  "unreachable": {
+    "base_url": "https://dead.example.com",
+    "host": "dead.example.com",
+    "scheme": "https", "port": 443, "reachable": false,
+    "error": "ConnectError: [Errno 61] Connection refused",
+    "product_hint": "", "authenticated_scan": false
+  },
+
+  "unfingerprinted": {
+    "base_url": "https://lb.example.com",
+    "host": "lb.example.com",
+    "scheme": "https", "port": 443, "reachable": true, "authenticated_scan": false,
+    "http_status": 200, "server_header": "nginx",
+    "banner": "nginx", "title": "Welcome", "body_snippet": "It works",
+    "admin_paths": [{"path": "/", "status": 200, "auth_required": true}],
+    "tls": {"enabled": true, "cert_status": "valid", "negotiated": "TLSv1.3", "expired": false}
+  }
+}

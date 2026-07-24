@@ -54,15 +54,44 @@ comment on column connections.creds_ref is
 -- ── Backfill: move existing plaintext secrets into Vault ──────────────────
 do $$
 declare
+  -- Generated from the live registry (ConnectorField(secret=True) per connector) and kept in
+  -- sync by tests/test_creds.py::test_migration_secret_map_matches_registry_declarations, which
+  -- fails if this literal drifts from what the connectors declare. 34 secret-bearing connectors.
   secret_map constant jsonb := '{
-    "kong":     ["admin_token"],
+    "activemq": ["password"],
+    "airflow": ["password", "token"],
+    "aws": ["secret_access_key", "session_token"],
+    "azure": ["client_secret"],
+    "boomi": ["token"],
+    "confluent": ["api_secret"],
+    "coord": ["password", "token"],
+    "elasticsearch": ["api_key", "password"],
+    "flink": ["password"],
+    "gcp": ["access_token", "service_account_key"],
+    "graphql": ["auth_header_value"],
+    "grpc": ["token"],
+    "ibmmq": ["password"],
+    "k8s": ["token"],
+    "kafka_connect": ["password"],
+    "keycloak": ["client_secret", "token"],
+    "kong": ["admin_token"],
+    "mcp": ["token"],
+    "mft": ["admin_token"],
+    "mqtt": ["api_secret", "token"],
+    "mulesoft": ["access_token", "client_secret"],
+    "n8n": ["api_key"],
+    "nats": ["password"],
+    "pgbouncer": ["admin_password"],
+    "pulsar": ["token"],
     "rabbitmq": ["password"],
-    "redis":    ["password"],
-    "mcp":      ["token"],
-    "aws":      ["secret_access_key", "session_token"],
-    "k8s":      ["token"],
-    "azure":    ["client_secret"],
-    "gcp":      ["access_token", "service_account_key"]
+    "redis": ["password"],
+    "redpanda": ["password"],
+    "schema_registry": ["password"],
+    "solace": ["password"],
+    "solr": ["password"],
+    "vault": ["token"],
+    "vectordb": ["api_key", "dsn"],
+    "workato": ["api_token"]
   }';
   rec      record;
   k        text;

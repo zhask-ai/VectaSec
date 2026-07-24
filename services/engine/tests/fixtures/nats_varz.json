@@ -1,0 +1,62 @@
+{
+  "varz": {
+    "insecure": {
+      "server_id": "NARZ",
+      "version": "2.10.7",
+      "auth_required": false,
+      "tls_required": false,
+      "tls_verify": false,
+      "system_account": null
+    },
+    "hardened": {
+      "server_id": "NHARD",
+      "version": "2.11.2",
+      "auth_required": true,
+      "tls_required": true,
+      "tls_verify": true,
+      "system_account": "SYS"
+    }
+  },
+  "jsz": {"total": 3, "streams": 12},
+  "connz": {"num_connections": 5},
+  "config": {
+    "insecure": {
+      "system_account": "SYS",
+      "no_auth_user": "sysadmin",
+      "accounts": {
+        "SYS": {
+          "users": [{"user": "sysadmin", "password": "REDACTED"}]
+        },
+        "APP": {
+          "jetstream": true,
+          "users": [
+            {"user": "app", "password": "REDACTED",
+             "permissions": {"publish": {"allow": ["orders.>"]},
+                             "subscribe": {"allow": ["_INBOX.>"]}}},
+            {"user": "nocred"}
+          ]
+        }
+      },
+      "leafnodes": {"port": 7422},
+      "gateway": {"name": "east", "port": 7222}
+    },
+    "hardened": {
+      "system_account": "SYS",
+      "accounts": {
+        "SYS": {
+          "users": [{"user": "sysadmin", "nkey": "UBSYSADMINPUBLICKEY"}]
+        },
+        "APP": {
+          "jetstream": true,
+          "users": [
+            {"user": "app", "password": "REDACTED",
+             "permissions": {"publish": {"allow": ["orders.>"]},
+                             "subscribe": {"allow": ["_INBOX.>"]}}}
+          ]
+        }
+      },
+      "leafnodes": {"port": 7422, "tls": {"cert_file": "leaf.pem"}},
+      "gateway": {"name": "east", "port": 7222, "tls": {"cert_file": "gw.pem"}}
+    }
+  }
+}

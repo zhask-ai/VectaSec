@@ -1,0 +1,62 @@
+{
+  "version": {"version": "2.6.3", "git_version": ".release:2.6.3+abcdef"},
+  "config_exposed": {
+    "sections": [
+      {"name": "core", "options": [
+        {"key": "dags_folder", "value": "/opt/airflow/dags"},
+        {"key": "test_connection", "value": "Enabled"}
+      ]},
+      {"name": "webserver", "options": [
+        {"key": "expose_config", "value": "True"}
+      ]}
+    ]
+  },
+  "connections": {
+    "connections": [
+      {"connection_id": "postgres_default", "conn_type": "postgres",
+       "host": "db.internal", "login": "airflow", "schema": "airflow", "port": 5432,
+       "password": "***", "extra": null},
+      {"connection_id": "slack_alerts", "conn_type": "slack",
+       "host": "hooks.slack.com", "login": null, "schema": null, "port": null,
+       "password": null, "extra": "{\"webhook_token\": \"masked\", \"timeout\": 30}"},
+      {"connection_id": "s3_readonly", "conn_type": "aws",
+       "host": null, "login": "AKIA_MASKED", "schema": null, "port": null,
+       "password": null, "extra": "{\"region_name\": \"us-east-1\"}"}
+    ],
+    "total_entries": 3
+  },
+  "users": {
+    "users": [
+      {"username": "admin", "active": true, "email": "admin@example.com",
+       "roles": [{"name": "Admin"}]},
+      {"username": "svc_reporting", "active": true, "email": "svc@example.com",
+       "roles": [{"name": "Viewer"}]}
+    ],
+    "total_entries": 2
+  },
+  "dags": {
+    "dags": [
+      {"dag_id": "etl_pipeline"},
+      {"dag_id": "safe_dag"}
+    ],
+    "total_entries": 2
+  },
+  "dag_details_etl": {
+    "dag_id": "etl_pipeline",
+    "is_paused": false,
+    "owners": ["data"],
+    "tags": [{"name": "prod"}],
+    "params": {
+      "target_date": {"value": "2026-01-01"},
+      "db_password": {"value": "masked"},
+      "api_token": {"value": "masked"}
+    }
+  },
+  "dag_details_safe": {
+    "dag_id": "safe_dag",
+    "is_paused": true,
+    "owners": ["data"],
+    "tags": [],
+    "params": {"lookback_days": {"value": 7}}
+  }
+}

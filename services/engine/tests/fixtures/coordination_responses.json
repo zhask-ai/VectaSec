@@ -1,0 +1,80 @@
+{
+  "_comment": "Golden coordination-system responses for the connector parse layer. HTTP bodies are the JSON etcd/Nacos/Consul actually return; ZooKeeper values are the raw four-letter-word text a socket reads. Probes are stored as {status, body} (HTTP) or the decoded text (4lw), exactly what connect/coordination.py hands to the parse functions. No live socket/httpx is used in tests — parse layer only.",
+
+  "etcd": {
+    "version": {"etcdserver": "3.5.9", "etcdcluster": "3.5.0"},
+    "status": {"header": {"cluster_id": "14841639068965178418", "member_id": "10276657743932975437"},
+               "version": "3.5.9", "dbSize": "20480", "leader": "10276657743932975437",
+               "raftIndex": "12", "raftTerm": "3"},
+    "auth_probe": {
+      "auth_off": {"status": 400, "body": {"error": "etcdserver: authentication is not enabled", "code": 9, "message": "etcdserver: authentication is not enabled"}},
+      "auth_on_readable": {"status": 200, "body": {"header": {"cluster_id": "1", "member_id": "2", "revision": "5", "raft_term": "3"}, "users": ["root", "alice"]}},
+      "auth_on_denied": {"status": 401, "body": {"error": "etcdserver: user name is empty", "code": 16, "message": "etcdserver: user name is empty"}},
+      "unreachable": null
+    },
+    "role_probe": {"status": 200, "body": {"header": {"cluster_id": "1", "member_id": "2"}, "roles": ["root", "reader"]}},
+    "kv_probe": {
+      "read_ok": {"status": 200, "body": {"header": {"cluster_id": "1", "member_id": "2", "revision": "42", "raft_term": "3"}, "kvs": [{"key": "L2Zvbw==", "value": "YmFy"}], "count": "1"}},
+      "read_denied": {"status": 401, "body": {"error": "etcdserver: user name is empty", "code": 16, "message": "etcdserver: user name is empty"}},
+      "unreachable": null
+    },
+    "peer_probe": {
+      "plaintext": {"reachable": true, "plaintext_http": true, "tls_detected": false},
+      "tls": {"reachable": true, "plaintext_http": false, "tls_detected": true},
+      "unreachable": {"reachable": false, "plaintext_http": false, "tls_detected": false}
+    },
+    "user_roles": {"root": ["root"], "alice": ["reader"]}
+  },
+
+  "zookeeper": {
+    "ruok": "imok",
+    "conf_open": "clientPort=2181\nsecureClientPort=-1\ndataDir=/var/lib/zookeeper/version-2\ndataLogDir=/var/lib/zookeeper/version-2\ntickTime=2000\nmaxClientCnxns=60\nminSessionTimeout=4000\nmaxSessionTimeout=40000\nserverId=0\nsessionRequireClientSASLAuth=false\n",
+    "conf_hardened": "clientPort=2181\nsecureClientPort=2281\ndataDir=/var/lib/zookeeper/version-2\ntickTime=2000\nmaxClientCnxns=60\nsessionRequireClientSASLAuth=true\nauthProvider.1=org.apache.zookeeper.server.auth.SASLAuthenticationProvider\n",
+    "conf_minimal": "clientPort=2181\ndataDir=/var/lib/zookeeper/version-2\ntickTime=2000\nmaxClientCnxns=60\n",
+    "conf_blocked": "conf is not executed because it is not in the whitelist.\n",
+    "envi": "Environment:\nzookeeper.version=3.7.1-a3f4d5e6, built on 05/07/2022\nhost.name=zk1.internal\njava.version=11.0.20\njava.vendor=Eclipse Adoptium\nos.name=Linux\nos.arch=amd64\nuser.name=zookeeper\n",
+    "envi_blocked": "envi is not executed because it is not in the whitelist.\n",
+    "stat": "Zookeeper version: 3.7.1-a3f4d5e6, built on 05/07/2022\nClients:\n /10.0.0.5:52700[1](queued=0,recved=12,sent=12)\n\nLatency min/avg/max: 0/0/8\nReceived: 120\nSent: 120\nConnections: 1\nOutstanding: 0\nZxid: 0x300000012\nMode: leader\nNode count: 42\n",
+    "stat_blocked": "stat is not executed because it is not in the whitelist.\n"
+  },
+
+  "nacos": {
+    "state_auth_on": {"version": "2.2.3", "standalone_mode": "cluster", "auth_enabled": "true", "function_mode": null},
+    "state_auth_off": {"version": "2.2.3", "standalone_mode": "standalone", "auth_enabled": "false", "function_mode": null},
+    "state_no_flag": {"version": "2.2.3", "standalone_mode": "standalone"},
+    "state_old_version": {"version": "1.3.1", "auth_enabled": "true"},
+    "state_unparseable": {"version": "snapshot", "auth_enabled": "true"},
+    "console_reachable": {"status": 200, "is_html": true},
+    "console_protected": {"status": 403, "is_html": false},
+    "console_unknown": null,
+    "login_default_valid": {"status": 200, "body": {"accessToken": "eyJhbGciOiJIUzI1NiJ9.payload.sig", "tokenTtl": 18000, "globalAdmin": true, "username": "nacos"}},
+    "login_default_invalid": {"status": 403, "body": {"status": 403, "message": "unknown user!"}},
+    "login_unknown": null,
+    "bypass_ok": {"status": 200, "body": {"totalCount": 2, "pageNumber": 1, "pagesAvailable": 1, "pageItems": [{"username": "nacos", "password": "$2a$10$abcdefghijklmnopqrstuv"}, {"username": "svc-config", "password": "$2a$10$wxyzabcdefghijklmnopqr"}]}},
+    "bypass_blocked": {"status": 403, "body": {"status": 403, "message": "user not found!"}},
+    "bypass_unknown": null,
+    "admin_users": ["nacos"]
+  },
+
+  "consul": {
+    "agent_acl_allow": {"Config": {"Datacenter": "dc1", "Version": "1.15.4"}, "DebugConfig": {"ACLsEnabled": true, "ACLDefaultPolicy": "allow"}, "Stats": {"serf_lan": {"encrypted": "false", "members": "3"}}},
+    "agent_acl_disabled": {"Config": {"Datacenter": "dc1", "Version": "1.15.4"}, "DebugConfig": {"ACLsEnabled": false, "ACLDefaultPolicy": "allow"}, "Stats": {"serf_lan": {"encrypted": "false"}}},
+    "agent_hardened": {"Config": {"Datacenter": "dc1", "Version": "1.15.4"}, "DebugConfig": {"ACLsEnabled": true, "ACLDefaultPolicy": "deny"}, "Stats": {"serf_lan": {"encrypted": "true"}}},
+    "agent_no_acl_fields": {"Config": {"Datacenter": "dc1"}, "DebugConfig": {}, "Stats": {}},
+    "anon_with_policies": {"status": 200, "body": {"AccessorID": "00000000-0000-0000-0000-000000000002", "Description": "Anonymous Token", "Policies": [{"ID": "aaa", "Name": "global-management"}], "Roles": [], "Local": false}},
+    "anon_no_policies": {"status": 200, "body": {"AccessorID": "00000000-0000-0000-0000-000000000002", "Description": "Anonymous Token", "Policies": [], "Roles": []}},
+    "anon_denied": {"status": 403, "body": {"error": "Permission denied"}},
+    "intentions_wildcard": [{"ID": "i1", "SourceName": "*", "DestinationName": "*", "Action": "allow", "Precedence": 5}],
+    "intentions_wildcard_scoped": [{"ID": "i2", "SourceName": "*", "DestinationName": "payments", "Action": "allow", "Precedence": 6}, {"ID": "i3", "SourceName": "web", "DestinationName": "db", "Action": "deny", "Precedence": 9}],
+    "intentions_explicit": [{"ID": "i4", "SourceName": "web", "DestinationName": "db", "Action": "allow", "Precedence": 9}],
+    "intentions_denied": null,
+    "tokens": [
+      {"AccessorID": "11111111-1111-1111-1111-111111111111", "Description": "web service", "Policies": [{"ID": "p1", "Name": "web-read"}], "Roles": [], "Local": false, "SecretID": "SHOULD-NEVER-APPEAR"},
+      {"AccessorID": "22222222-2222-2222-2222-222222222222", "Description": "ci admin", "Policies": [{"ID": "p2", "Name": "global-management"}], "Roles": [], "Local": false, "SecretID": "SHOULD-NEVER-APPEAR"}
+    ],
+    "policies": [
+      {"ID": "p1", "Name": "web-read"},
+      {"ID": "p2", "Name": "global-management"}
+    ]
+  }
+}

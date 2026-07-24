@@ -1,0 +1,17 @@
+{
+  "enabled": true,
+  "reached": true,
+  "unauthenticated_ok": true,
+  "authenticated_scan": false,
+  "status_code": "OK",
+  "services": [
+    "grpc.reflection.v1alpha.ServerReflection",
+    "grpc.health.v1.Health",
+    "payments.v1.PaymentService",
+    "accounts.v1.AccountService"
+  ],
+  "methods": {
+    "payments.v1.PaymentService": ["CreateCharge", "RefundCharge", "ListCharges"],
+    "accounts.v1.AccountService": ["GetAccount", "CloseAccount"]
+  }
+}

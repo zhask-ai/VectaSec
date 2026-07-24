@@ -15,6 +15,8 @@ dependencies = [
   "pyjwt[crypto]>=2.9",       # verify Supabase ES256 JWTs on the engine API (public JWKS)
   "boto3>=1.34",              # aws connector (read-only SQS/SNS/MSK/EventBridge/API GW posture)
   "kubernetes>=29.0",         # k8s connector (read-only CRD posture: Istio/Linkerd/ingress/mesh)
+  "grpcio>=1.60",             # rpc connector (gRPC server-reflection posture)
+  "grpcio-reflection>=1.60",  # rpc connector (reflection client stubs)
 ]
 
 [dependency-groups]

@@ -1,0 +1,8 @@
+{
+  "version": {"outcome": "absent", "data": null},
+  "api_probe": {
+    "unauthenticated_reachable": true,
+    "authenticated_reachable": true,
+    "clients_outcome": "ok"
+  }
+}

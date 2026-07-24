@@ -1,0 +1,19 @@
+{
+  "nodes": {"outcome": "ok", "data": [
+    {"node": "emqx@127.0.0.1", "version": "5.8.0", "edition": "Opensource", "role": "core"}
+  ]},
+  "authentication": {"outcome": "ok", "data": []},
+  "authorization_sources": {"outcome": "ok", "data": []},
+  "authorization_settings": {"outcome": "ok", "data": {"no_match": "allow", "deny_action": "ignore", "cache": {"enable": true}}},
+  "listeners": {"outcome": "ok", "data": [
+    {"id": "tcp:default", "type": "tcp", "bind": "0.0.0.0:1883", "enable": true, "ssl_options": {}},
+    {"id": "ws:default", "type": "ws", "bind": "0.0.0.0:8083", "enable": true}
+  ]},
+  "dashboard_users": {"outcome": "ok", "data": [
+    {"username": "admin", "role": "administrator", "description": "administrator"}
+  ]},
+  "dashboard": {"outcome": "ok", "data": {"listeners": {"http": {"bind": "0.0.0.0:18083", "enable": true}}}},
+  "authn_users": {"outcome": "ok", "data": []},
+  "authz_rules": {"outcome": "ok", "data": []},
+  "api_probe": {"unauthenticated_reachable": true}
+}

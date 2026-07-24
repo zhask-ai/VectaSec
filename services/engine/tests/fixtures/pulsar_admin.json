@@ -1,0 +1,62 @@
+{
+  "insecure": {
+    "runtime_config": {
+      "clusterName": "standalone",
+      "authenticationEnabled": "false",
+      "authorizationEnabled": "false",
+      "tlsEnabled": "false",
+      "functionsWorkerEnabled": "true",
+      "anonymousUserRole": "anon"
+    },
+    "config_source": "admin_runtime",
+    "admin_readable": true,
+    "version": "3.1.2",
+    "proxy_config": {"tlsEnabledWithBroker": "false"},
+    "clusters": [
+      {"name": "standalone",
+       "data": {"serviceUrl": "http://b:8080", "brokerServiceUrl": "pulsar://b:6650"}},
+      {"name": "peer-west",
+       "data": {"serviceUrl": "http://w:8080", "brokerServiceUrl": "pulsar://w:6650",
+                "serviceUrlTls": "https://w:8443", "brokerServiceUrlTls": "pulsar+ssl://w:6651"}}
+    ],
+    "tenants": [
+      {"name": "public", "data": {"adminRoles": ["shared-admin"], "allowedClusters": ["standalone"]}},
+      {"name": "finance", "data": {"adminRoles": ["shared-admin", "fin-admin"], "allowedClusters": ["standalone"]}}
+    ],
+    "namespaces": [
+      {"tenant": "public", "namespace": "public/default",
+       "permissions": {"anon": ["produce", "consume"],
+                       "approle": ["produce", "consume", "functions", "sources", "sinks", "packages"]},
+       "policies": {}},
+      {"tenant": "finance", "namespace": "finance/ledger",
+       "permissions": {"ledger-app": ["consume"]}, "policies": {}}
+    ],
+    "topics": ["persistent://public/default/orders", "persistent://finance/ledger/entries"]
+  },
+  "hardened": {
+    "runtime_config": {
+      "clusterName": "standalone",
+      "authenticationEnabled": "true",
+      "authorizationEnabled": "true",
+      "tlsEnabled": "true",
+      "functionsWorkerEnabled": "false"
+    },
+    "config_source": "admin_runtime",
+    "admin_readable": true,
+    "version": "3.2.1",
+    "proxy_config": {"tlsEnabledWithBroker": "true"},
+    "clusters": [
+      {"name": "standalone",
+       "data": {"serviceUrl": "http://b:8080", "serviceUrlTls": "https://b:8443",
+                "brokerServiceUrl": "pulsar://b:6650", "brokerServiceUrlTls": "pulsar+ssl://b:6651"}}
+    ],
+    "tenants": [
+      {"name": "finance", "data": {"adminRoles": ["fin-admin"], "allowedClusters": ["standalone"]}}
+    ],
+    "namespaces": [
+      {"tenant": "finance", "namespace": "finance/ledger",
+       "permissions": {"ledger-app": ["consume"]}, "policies": {}}
+    ],
+    "topics": ["persistent://finance/ledger/entries"]
+  }
+}

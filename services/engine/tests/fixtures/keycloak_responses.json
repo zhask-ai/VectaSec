@@ -1,0 +1,140 @@
+{
+  "discovery_unsigned": {
+    "issuer": "https://kc.example.com/realms/myrealm",
+    "authorization_endpoint": "https://kc.example.com/realms/myrealm/protocol/openid-connect/auth",
+    "token_endpoint": "https://kc.example.com/realms/myrealm/protocol/openid-connect/token",
+    "id_token_signing_alg_values_supported": ["RS256", "ES256", "none"]
+  },
+  "discovery_signed": {
+    "issuer": "https://kc.example.com/realms/myrealm",
+    "authorization_endpoint": "https://kc.example.com/realms/myrealm/protocol/openid-connect/auth",
+    "token_endpoint": "https://kc.example.com/realms/myrealm/protocol/openid-connect/token",
+    "id_token_signing_alg_values_supported": ["RS256", "ES256", "PS256"]
+  },
+  "realm_weak": {
+    "realm": "myrealm",
+    "enabled": true,
+    "sslRequired": "none",
+    "bruteForceProtected": false,
+    "permanentLockout": false,
+    "registrationAllowed": true,
+    "defaultSignatureAlgorithm": "RS256",
+    "passwordPolicy": "length(8)"
+  },
+  "realm_external": {
+    "realm": "myrealm",
+    "enabled": true,
+    "sslRequired": "external",
+    "bruteForceProtected": true,
+    "registrationAllowed": false,
+    "defaultSignatureAlgorithm": "RS256"
+  },
+  "realm_hardened": {
+    "realm": "myrealm",
+    "enabled": true,
+    "sslRequired": "all",
+    "bruteForceProtected": true,
+    "registrationAllowed": false,
+    "defaultSignatureAlgorithm": "ES256"
+  },
+  "realm_master": {
+    "realm": "master",
+    "enabled": true,
+    "sslRequired": "all",
+    "bruteForceProtected": true,
+    "registrationAllowed": false
+  },
+  "clients": [
+    {
+      "id": "uuid-spa",
+      "clientId": "spa-app",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["https://app.example.com/*"],
+      "webOrigins": ["+"],
+      "attributes": {},
+      "defaultClientScopes": ["profile", "email"],
+      "optionalClientScopes": ["address"]
+    },
+    {
+      "id": "uuid-open",
+      "clientId": "open-redirect",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["https://*", "*"],
+      "webOrigins": ["*"],
+      "attributes": {"pkce.code.challenge.method": "S256"},
+      "defaultClientScopes": ["profile"],
+      "secret": "SHOULD-NEVER-BE-STORED"
+    },
+    {
+      "id": "uuid-ropc",
+      "clientId": "legacy-ropc",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "redirectUris": ["https://legacy.example.com/cb"],
+      "webOrigins": ["https://legacy.example.com"],
+      "attributes": {
+        "id.token.signed.response.alg": "none",
+        "pkce.code.challenge.method": "S256"
+      },
+      "defaultClientScopes": ["profile", "email", "roles"],
+      "optionalClientScopes": [],
+      "secret": "SHOULD-NEVER-BE-STORED"
+    },
+    {
+      "id": "uuid-impl",
+      "clientId": "implicit-app",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["https://impl.example.com/cb"],
+      "webOrigins": [],
+      "attributes": {"pkce.code.challenge.method": "S256"},
+      "defaultClientScopes": ["profile"]
+    },
+    {
+      "id": "uuid-hardened",
+      "clientId": "hardened-app",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["https://good.example.com/callback"],
+      "webOrigins": ["https://good.example.com"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "id.token.signed.response.alg": "RS256"
+      },
+      "defaultClientScopes": ["profile"],
+      "secret": "SHOULD-NEVER-BE-STORED"
+    }
+  ]
+}

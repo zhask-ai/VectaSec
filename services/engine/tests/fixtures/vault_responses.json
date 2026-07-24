@@ -1,0 +1,147 @@
+{
+  "health": {
+    "initialized": true,
+    "sealed": false,
+    "standby": false,
+    "version": "1.17.2",
+    "cluster_name": "vault-cluster-abc123"
+  },
+  "seal_status_weak": {
+    "type": "shamir",
+    "initialized": true,
+    "sealed": false,
+    "t": 1,
+    "n": 1,
+    "version": "1.17.2",
+    "recovery_seal": false
+  },
+  "seal_status_hardened": {
+    "type": "shamir",
+    "initialized": true,
+    "sealed": false,
+    "t": 3,
+    "n": 5,
+    "version": "1.17.2",
+    "recovery_seal": false
+  },
+  "seal_status_autounseal": {
+    "type": "awskms",
+    "initialized": true,
+    "sealed": false,
+    "t": 1,
+    "n": 1,
+    "version": "1.17.2",
+    "recovery_seal": true
+  },
+  "token_root": {
+    "id": "SHOULD-NEVER-BE-STORED",
+    "display_name": "root",
+    "policies": ["root"],
+    "ttl": 0,
+    "orphan": true,
+    "renewable": false
+  },
+  "token_scoped": {
+    "id": "SHOULD-NEVER-BE-STORED",
+    "display_name": "token-scanner",
+    "policies": ["default", "scanner-ro"],
+    "ttl": 2764800,
+    "orphan": false,
+    "renewable": true
+  },
+  "audit_empty": {},
+  "audit_enabled": {
+    "file/": {
+      "type": "file",
+      "description": "audit to disk",
+      "options": {"file_path": "/var/log/vault/audit.log"},
+      "local": false
+    }
+  },
+  "auth": {
+    "approle/": {"type": "approle", "accessor": "auth_approle_1", "local": false},
+    "jwt/": {"type": "jwt", "accessor": "auth_jwt_1", "local": false},
+    "oidc/": {"type": "oidc", "accessor": "auth_oidc_1", "local": false},
+    "kubernetes/": {"type": "kubernetes", "accessor": "auth_k8s_1", "local": false},
+    "token/": {"type": "token", "accessor": "auth_token_1", "local": false},
+    "userpass/": {"type": "userpass", "accessor": "auth_userpass_1", "local": false}
+  },
+  "mounts": {
+    "database/": {
+      "type": "database",
+      "accessor": "database_1",
+      "description": "dynamic db creds",
+      "config": {"default_lease_ttl": 0, "max_lease_ttl": 0}
+    },
+    "pki-tuned/": {
+      "type": "pki",
+      "accessor": "pki_1",
+      "config": {"default_lease_ttl": 3600, "max_lease_ttl": 86400}
+    },
+    "secret/": {
+      "type": "kv",
+      "accessor": "kv_1",
+      "options": {"version": "2"},
+      "config": {"default_lease_ttl": 0, "max_lease_ttl": 0}
+    },
+    "cubbyhole/": {
+      "type": "cubbyhole",
+      "accessor": "cubbyhole_1",
+      "config": {"default_lease_ttl": 0, "max_lease_ttl": 0}
+    }
+  },
+  "policies_list": {"keys": ["default", "admin-sudo", "write-all", "app-scoped", "json-ro", "root"]},
+  "policies": {
+    "admin-sudo": "path \"sys/*\" {\n  capabilities = [\"read\", \"list\", \"sudo\"]\n}\n\npath \"auth/token/create\" {\n  capabilities = [\"create\", \"update\"]\n}\n",
+    "narrow-sudo": "path \"pki/root/generate/internal\" {\n  capabilities = [\"update\", \"sudo\"]\n}\n",
+    "write-all": "path \"*\" {\n  capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"]\n}\n",
+    "app-scoped": "path \"secret/data/app/*\" {\n  capabilities = [\"read\", \"list\"]\n}\n",
+    "read-all": "path \"*\" {\n  capabilities = [\"read\", \"list\"]\n}\n",
+    "default": "path \"auth/token/lookup-self\" {\n  capabilities = [\"read\"]\n}\n",
+    "json-ro": {"path": {"secret/data/team/*": {"capabilities": ["read", "list"]}}}
+  },
+  "roles": {
+    "approle_unbounded": {
+      "bind_secret_id": false,
+      "secret_id_bound_cidrs": [],
+      "token_bound_cidrs": [],
+      "secret_id_num_uses": 0,
+      "secret_id_ttl": 0,
+      "token_policies": ["write-all"]
+    },
+    "approle_bound": {
+      "bind_secret_id": true,
+      "secret_id_bound_cidrs": ["10.0.0.0/8"],
+      "token_bound_cidrs": ["10.0.0.0/8"],
+      "secret_id_num_uses": 10,
+      "secret_id_ttl": 600,
+      "token_policies": ["app-scoped"]
+    },
+    "jwt_unbounded": {
+      "role_type": "jwt",
+      "bound_audiences": [],
+      "bound_subject": "",
+      "bound_claims": null,
+      "user_claim": "sub",
+      "token_policies": ["app-scoped", "read-all"]
+    },
+    "jwt_bound": {
+      "role_type": "jwt",
+      "bound_audiences": ["vault"],
+      "bound_subject": "",
+      "bound_claims": {"repository": "acme/app"},
+      "user_claim": "sub",
+      "token_policies": ["app-scoped"]
+    },
+    "kubernetes_wildcard": {
+      "bound_service_account_names": ["*"],
+      "bound_service_account_namespaces": ["*"],
+      "token_policies": ["write-all"]
+    },
+    "kubernetes_scoped": {
+      "bound_service_account_names": ["my-app"],
+      "bound_service_account_namespaces": ["prod"],
+      "token_policies": ["app-scoped"]
+    }
+  }
+}

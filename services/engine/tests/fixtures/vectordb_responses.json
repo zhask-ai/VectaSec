@@ -1,0 +1,76 @@
+{
+  "chroma": {
+    "version": "0.4.24",
+    "collections": [
+      {"name": "rag_docs", "id": "11111111-1111-1111-1111-111111111111", "tenant": "default_tenant", "database": "default_database"},
+      {"name": "tenant_a_docs", "id": "22222222-2222-2222-2222-222222222222", "tenant": "tenant_a", "database": "prod"}
+    ]
+  },
+  "weaviate": {
+    "meta": {"hostname": "http://[::]:8080", "version": "1.24.1", "modules": {"text2vec-openai": {}}},
+    "schema_no_mt": {"classes": [
+      {"class": "Article", "vectorizer": "text2vec-openai", "multiTenancyConfig": {"enabled": false}}
+    ]},
+    "schema_mt": {"classes": [
+      {"class": "TenantDocs", "vectorizer": "text2vec-openai", "multiTenancyConfig": {"enabled": true}}
+    ]},
+    "openid": {"clientId": "weaviate", "href": "https://issuer.example.com/.well-known/openid-configuration", "scopes": ["openid"]}
+  },
+  "qdrant": {
+    "root": {"title": "qdrant - vector search engine", "version": "1.7.4", "commit": "abcdef0"},
+    "collections": {"result": {"collections": [{"name": "rag_docs"}, {"name": "faqs"}]}, "status": "ok", "time": 0.000031}
+  },
+  "milvus": {
+    "healthz": "OK"
+  },
+  "pgvector": {
+    "bad": {
+      "dsn_has_password": false,
+      "extension_present": true,
+      "extension_version": "0.7.0",
+      "ssl_in_use": false,
+      "ssl_setting": "off",
+      "passwordless_auth": true,
+      "current_user": "postgres",
+      "is_superuser": true,
+      "hba_readable": true,
+      "roles": [
+        {"rolname": "postgres", "rolsuper": true, "rolcanlogin": true, "has_password": false},
+        {"rolname": "rag_app", "rolsuper": false, "rolcanlogin": true, "has_password": true},
+        {"rolname": "readonly_grp", "rolsuper": false, "rolcanlogin": false, "has_password": null}
+      ],
+      "vector_tables": [{"schema": "public", "table": "documents"}],
+      "errors": {}
+    },
+    "good": {
+      "dsn_has_password": true,
+      "extension_present": true,
+      "extension_version": "0.7.0",
+      "ssl_in_use": true,
+      "ssl_setting": "on",
+      "passwordless_auth": false,
+      "current_user": "rag_app",
+      "is_superuser": false,
+      "hba_readable": true,
+      "roles": [
+        {"rolname": "rag_app", "rolsuper": false, "rolcanlogin": true, "has_password": true}
+      ],
+      "vector_tables": [{"schema": "rag", "table": "documents"}],
+      "errors": {}
+    },
+    "unknown": {
+      "dsn_has_password": false,
+      "extension_present": true,
+      "extension_version": "0.7.0",
+      "ssl_in_use": null,
+      "ssl_setting": null,
+      "passwordless_auth": null,
+      "current_user": "rag_app",
+      "is_superuser": null,
+      "hba_readable": false,
+      "roles": [],
+      "vector_tables": [{"schema": "public", "table": "documents"}],
+      "errors": {"ssl_in_use": "InsufficientPrivilege: pg_stat_ssl"}
+    }
+  }
+}

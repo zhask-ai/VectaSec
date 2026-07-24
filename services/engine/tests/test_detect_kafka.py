@@ -48,6 +48,9 @@ EXPECTED_RULES = {
     "KAFKA.DURABILITY.UNCLEAN_LEADER_ELECTION",
     "KAFKA.ZK.LEGACY_MODE_UNSECURED_ZNODES",
     "KAFKA.ZK.LEGACY_MODE_PLAINTEXT_ZK",
+    "KAFKA.AUTHZ.SUPER_USERS_BREADTH",
+    "KAFKA.DELEGATION_TOKEN.INSECURE_TRANSPORT",
+    "KAFKA.ZK.KRAFT_MIGRATION_ACL_GAP",
 }
 
 
@@ -178,7 +181,7 @@ def test_all_expected_rules_are_registered():
 
 def test_rule_ids_are_unique():
     ids = [d.rule_id for d in DETECTORS if d.rule_id.startswith("KAFKA.")]
-    assert len(ids) == len(set(ids)) == 20
+    assert len(ids) == len(set(ids)) == 23
 
 
 def test_every_rule_declares_severity_and_title():
@@ -1275,3 +1278,131 @@ def test_advertised_listeners_matches_the_listener_regardless_of_case():
                   **AUTHZ_SET})
     b, ctx = fixture_scan(cfg)
     assert sev(fire("KAFKA.LISTENER.PLAINTEXT", b, ctx), "KAFKA.LISTENER.PLAINTEXT") == ["critical"]
+
+
+# ═══ KAFKA.AUTHZ.SUPER_USERS_BREADTH ══════════════════════════════════════
+def test_super_users_breadth_silent_when_absent():
+    """super.users is absent from a stock describe_configs response — the rule must stay silent,
+    never KeyError."""
+    b, ctx = fixture_scan()
+    assert fire("KAFKA.AUTHZ.SUPER_USERS_BREADTH", b, ctx) == []
+
+
+def test_super_users_breadth_low_for_a_small_operator_list():
+    b, ctx = fixture_scan(config({"super.users": "User:admin;User:broker"}))
+    hits = fire("KAFKA.AUTHZ.SUPER_USERS_BREADTH", b, ctx)
+    assert len(hits) == 1 and hits[0].severity == "low"
+    assert "2 principal(s)" in hits[0].observation
+
+
+def test_super_users_breadth_medium_above_five():
+    many = ";".join(f"User:svc{i}" for i in range(6))
+    b, ctx = fixture_scan(config({"super.users": many}))
+    hits = fire("KAFKA.AUTHZ.SUPER_USERS_BREADTH", b, ctx)
+    assert len(hits) == 1 and hits[0].severity == "medium"
+
+
+def test_super_users_breadth_critical_for_wildcard_principal():
+    b, ctx = fixture_scan(config({"super.users": "User:admin;User:*"}))
+    hits = fire("KAFKA.AUTHZ.SUPER_USERS_BREADTH", b, ctx)
+    assert len(hits) == 1 and hits[0].severity == "critical"
+    assert "User:*" in hits[0].observation
+
+
+def test_super_users_breadth_critical_for_anonymous_names_listeners():
+    """ANONYMOUS in super.users + the fixture's PLAINTEXT listeners = unauthenticated god mode."""
+    b, ctx = fixture_scan(config({"super.users": "User:ANONYMOUS"}))
+    hits = fire("KAFKA.AUTHZ.SUPER_USERS_BREADTH", b, ctx)
+    assert len(hits) == 1 and hits[0].severity == "critical"
+    assert "User:ANONYMOUS" in hits[0].observation
+    assert "INTERNAL" in hits[0].observation or "EXTERNAL" in hits[0].observation
+
+
+def test_super_users_splits_on_semicolon_in_breadth_rule():
+    """A DN with commas is ONE principal — semicolon is the delimiter, so this is 2 not 3."""
+    b, ctx = fixture_scan(config({"super.users": "User:admin;User:CN=broker,OU=eng,O=acme"}))
+    hits = fire("KAFKA.AUTHZ.SUPER_USERS_BREADTH", b, ctx)
+    assert len(hits) == 1 and "2 principal(s)" in hits[0].observation
+
+
+# ═══ KAFKA.DELEGATION_TOKEN.INSECURE_TRANSPORT ════════════════════════════
+_TOKEN_ENABLED = {"delegation.token.master.key":
+                  entry(None, source=4, is_default=False, is_sensitive=True)}
+
+
+def test_delegation_token_silent_when_at_default():
+    """The fixture's master key is is_default=true (feature off) — no finding."""
+    b, ctx = fixture_scan()
+    assert fire("KAFKA.DELEGATION_TOKEN.INSECURE_TRANSPORT", b, ctx) == []
+
+
+def test_delegation_token_fires_high_with_a_plaintext_listener():
+    b, ctx = fixture_scan(config(_TOKEN_ENABLED))
+    hits = fire("KAFKA.DELEGATION_TOKEN.INSECURE_TRANSPORT", b, ctx)
+    assert len(hits) == 1 and hits[0].severity == "high"
+    assert "delegation tokens are enabled" in hits[0].observation
+    assert hits[0].source_ref["config_key"] == "delegation.token.master.key"
+
+
+def test_delegation_token_uses_deprecated_secret_key_alias():
+    cfg = config({"delegation.token.master.key": DELETE,
+                  "delegation.token.secret.key":
+                      entry(None, source=4, is_default=False, is_sensitive=True)})
+    b, ctx = fixture_scan(cfg)
+    assert len(fire("KAFKA.DELEGATION_TOKEN.INSECURE_TRANSPORT", b, ctx)) == 1
+
+
+def test_delegation_token_does_not_fire_when_all_listeners_are_tls():
+    """Tokens enabled but every client listener is SSL/SASL_SSL — no interceptable transport."""
+    b = broker(hardened_config(_TOKEN_ENABLED))
+    ctx = scan(b, topic("orders", rf=3))
+    assert fire("KAFKA.DELEGATION_TOKEN.INSECURE_TRANSPORT", b, ctx) == []
+
+
+def test_delegation_token_does_not_fire_when_key_absent():
+    cfg = config({"delegation.token.master.key": DELETE})
+    b, ctx = fixture_scan(cfg)
+    assert fire("KAFKA.DELEGATION_TOKEN.INSECURE_TRANSPORT", b, ctx) == []
+
+
+# ═══ KAFKA.ZK.KRAFT_MIGRATION_ACL_GAP ═════════════════════════════════════
+def test_migration_gap_silent_when_not_migrating():
+    """The fixture has zookeeper.metadata.migration.enable=false — no finding."""
+    b, ctx = fixture_scan()
+    assert fire("KAFKA.ZK.KRAFT_MIGRATION_ACL_GAP", b, ctx) == []
+
+
+def test_migration_gap_fires_when_migrating_without_authorizer():
+    b, ctx = fixture_scan(config({"zookeeper.metadata.migration.enable": "true"}))
+    hits = fire("KAFKA.ZK.KRAFT_MIGRATION_ACL_GAP", b, ctx)
+    assert len(hits) == 1
+    # fixture authorizer is unset AND fixture listeners mint ANONYMOUS -> critical
+    assert hits[0].severity == "critical"
+    assert "migration is in progress" in hits[0].observation
+    assert hits[0].assessable is True
+
+
+def test_migration_gap_high_without_anonymous_listeners():
+    """Authorizer unset while migrating, but no listener mints ANONYMOUS -> high, not critical."""
+    cfg = config({"zookeeper.metadata.migration.enable": "true",
+                  "listener.security.protocol.map":
+                      "CONTROLLER:SSL,INTERNAL:SSL,EXTERNAL:SSL",
+                  "ssl.client.auth": entry("required")})
+    b, ctx = fixture_scan(cfg)
+    hits = fire("KAFKA.ZK.KRAFT_MIGRATION_ACL_GAP", b, ctx)
+    assert len(hits) == 1 and hits[0].severity == "high"
+
+
+def test_migration_gap_not_assessable_when_authorizer_is_set():
+    """Migrating with an authorizer here, but the controller side is unreachable -> coverage gap."""
+    cfg = config({"zookeeper.metadata.migration.enable": "true", **AUTHZ_SET})
+    b, ctx = fixture_scan(cfg)
+    hits = fire("KAFKA.ZK.KRAFT_MIGRATION_ACL_GAP", b, ctx)
+    assert len(hits) == 1 and hits[0].assessable is False and hits[0].assessment_reason
+
+
+def test_migration_gap_absent_authorizer_key_is_inconclusive():
+    cfg = config({"zookeeper.metadata.migration.enable": "true",
+                  "authorizer.class.name": DELETE})
+    b, ctx = fixture_scan(cfg)
+    assert fire("KAFKA.ZK.KRAFT_MIGRATION_ACL_GAP", b, ctx) == []

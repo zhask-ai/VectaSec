@@ -1,0 +1,63 @@
+{
+  "insecure": {
+    "about": {"sempVersion": "2.36", "platform": "VMR"},
+    "scheme": "http",
+    "vpns": [
+      {"msgVpnName": "prod", "enabled": true,
+       "authenticationBasicEnabled": true, "authenticationBasicType": "none",
+       "authenticationClientCertEnabled": false,
+       "serviceSmfPlainTextEnabled": true, "serviceSmfTlsEnabled": false,
+       "tlsAllowDowngradeToPlainTextEnabled": true},
+      {"msgVpnName": "legacy", "enabled": true,
+       "authenticationBasicEnabled": true, "authenticationBasicType": "internal",
+       "authenticationClientCertEnabled": false,
+       "serviceSmfPlainTextEnabled": false, "serviceSmfTlsEnabled": true,
+       "tlsAllowDowngradeToPlainTextEnabled": false}
+    ],
+    "usernames": {
+      "prod": [
+        {"clientUsername": "default", "enabled": true, "aclProfileName": "default",
+         "clientProfileName": "default", "guaranteedEndpointPermissionOverrideEnabled": false},
+        {"clientUsername": "app", "enabled": true, "aclProfileName": "open",
+         "clientProfileName": "default", "guaranteedEndpointPermissionOverrideEnabled": true}
+      ],
+      "legacy": []
+    },
+    "acls": {
+      "prod": [
+        {"aclProfileName": "default", "clientConnectDefaultAction": "disallow",
+         "publishTopicDefaultAction": "disallow", "subscribeTopicDefaultAction": "disallow"},
+        {"aclProfileName": "open", "clientConnectDefaultAction": "allow",
+         "publishTopicDefaultAction": "allow", "subscribeTopicDefaultAction": "allow"}
+      ],
+      "legacy": []
+    }
+  },
+  "hardened": {
+    "about": {"sempVersion": "2.36", "platform": "VMR"},
+    "scheme": "https",
+    "vpns": [
+      {"msgVpnName": "prod", "enabled": true,
+       "authenticationBasicEnabled": true, "authenticationBasicType": "internal",
+       "authenticationClientCertEnabled": true,
+       "serviceSmfPlainTextEnabled": false, "serviceSmfTlsEnabled": true,
+       "tlsAllowDowngradeToPlainTextEnabled": false}
+    ],
+    "usernames": {
+      "prod": [
+        {"clientUsername": "default", "enabled": false, "aclProfileName": "default",
+         "clientProfileName": "default", "guaranteedEndpointPermissionOverrideEnabled": false},
+        {"clientUsername": "app", "enabled": true, "aclProfileName": "scoped",
+         "clientProfileName": "default", "guaranteedEndpointPermissionOverrideEnabled": false}
+      ]
+    },
+    "acls": {
+      "prod": [
+        {"aclProfileName": "default", "clientConnectDefaultAction": "disallow",
+         "publishTopicDefaultAction": "disallow", "subscribeTopicDefaultAction": "disallow"},
+        {"aclProfileName": "scoped", "clientConnectDefaultAction": "disallow",
+         "publishTopicDefaultAction": "disallow", "subscribeTopicDefaultAction": "disallow"}
+      ]
+    }
+  }
+}
