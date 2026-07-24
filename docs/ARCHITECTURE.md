@@ -1,6 +1,10 @@
 # VectaSec — Architecture
 
-How the system that **exists** works. For what's planned but absent, see [STATUS.md](STATUS.md); for why any of it exists, see [vectasec-build-plan.md](vectasec-build-plan.md). Where the two disagree, this file is right and the plan is aspiration.
+How the system that **exists** works. For what's planned but absent, see [STATUS.md](STATUS.md);
+for why any of it exists, see [vectasec-build-plan.md](vectasec-build-plan.md) and
+[vectasec-v4-blueprint.md](vectasec-v4-blueprint.md). Where the two disagree, this file is right
+and the plan is aspiration. Per-connector coverage and its honest caveats live in
+[coverage-matrix.md](coverage-matrix.md).
 
 Read this first, then read `scan.py` and `connect/kafka.py`. Those two files teach the rest.
 
@@ -11,321 +15,426 @@ Read this first, then read `scan.py` and `connect/kafka.py`. Those two files tea
 Four pieces, one Python package shared by two of them.
 
 ```
-  ┌──────────────────────┐        reads (SELECT-only, RLS)        ┌────────────────────────┐
-  │  apps/web            │───────────────────────────────────────▶│  Supabase / Postgres   │
-  │  Next.js console     │                                        │  the system of record  │
-  │                      │──┐                                     └────────────────────────┘
-  └──────────────────────┘  │                                              ▲          ▲
-                            │ mutations only                               │          │
-                            ▼                                    BYPASSRLS │          │ (not wired)
-  ┌──────────────────────┐                                                 │          │
-  │ services/engine      │─────────────────────────────────────────────────┘          │
-  │  connect/ detect/    │                                                            │
-  │  scan.py ai.py       │──── read-only ───▶ Kafka / Kong / RabbitMQ / MCP           │
-  │  api/ (FastAPI)      │                    (the "cloud path")                      │
-  └──────────────────────┘                                                            │
-                                                                                      │
-  ┌──────────────────────┐   imports engine's connect/ + detect/ unmodified           │
-  │ services/collector   │─── read-only ───▶ the customer's private systems           │
-  │  (customer-side)     │─── outbound-only push ─────────────────────────────────────┘
-  └──────────────────────┘        ⚠ the receiving endpoints do not exist yet
+  apps/web (Next.js console)
+      │  reads: SELECT-only under RLS, straight to Supabase/PostgREST
+      │  mutations: engine API only, authenticated with the engine service
+      │  token (or a user JWT) — never a DB write from the console
+      ▼
+  services/engine (the product)
+      connect/  detect/  scan.py  identity.py  classify.py  ai.py  graph.py
+      compliance/map.py  creds.py  worker.py  api/ (FastAPI)
+      │  read-only collection ─▶ Kafka / Kong / RabbitMQ / Redis / MCP
+      │                          AWS (cross-account AssumeRole) / Kubernetes
+      │  BYPASSRLS psycopg ────▶ Supabase Postgres (+ Vault, pgmq, pg_cron, Realtime)
+      ▲
+      │  /collector/* — HMAC service token, outbound-only long-poll
+  services/collector (customer-side)
+      imports the engine's connect/ + detect/ unmodified; redact() at the exit;
+      pushes findings + resource METADATA, never Resource.raw.
+      ⚠ Both ends exist; a full enroll → poll → scan → push round trip has not
+        been OBSERVED against a live engine. See STATUS.md.
 ```
 
-The engine package is the product. The console is a view of its output. The collector is the same engine code with a different topology and a redaction boundary bolted to its exit.
+The engine package is the product. The console is a view of its output. The collector is the same
+engine code with a different topology and a redaction boundary bolted to its exit. The database is
+not passive: pg_cron schedules scans, a trigger snapshots posture history, and constraint triggers
+enforce the two integrity guarantees (§2) — those behaviors live in `supabase/migrations/`, not in
+any service.
 
-**Repo layout** (actual, not `vectasec-build-plan.md` §16 — that section describes a target that was never built):
+**Repo layout** (actual):
 
 ```
 services/engine/src/vectasec/
   contracts.py      Resource, Edge, Collected, Hit, ScanContext — the shapes everything speaks
-  registry.py       @connector / @detector decorators + the two registries
-  scan.py           the scan loop: collect → detect → persist. The spine.
-  config.py         settings (read from os.environ on access); .env loading, entry points only
-  db.py             psycopg connect()
-  connect/          one file per system: kafka.py, kong.py, rabbitmq.py, mcp.py
-  detect/           one file per system's rulepack: kafka.py, kong.py, rabbitmq.py, mcp.py
-  ai.py             grounded triage + deterministic fallback + fingerprint cache
-  graph.py          CTE walks over resources/edges     ⚠ currently unreferenced — see §9
-  compliance/map.py rule → framework control mapping   ⚠ currently never called — see §9
-  api/main.py       FastAPI: actions + scan orchestration
+  registry.py       @connector / @detector decorators, ConnectorField specs, the registries
+  scan.py           the scan loop: collect → detect → persist → compliance. The spine.
+  identity.py       NHI derivation: connector output → identity/credential/grant resources
+  classify.py       data-classification (DSPM) tagging
+  creds.py          Supabase Vault split/merge for connection credentials (§5)
+  worker.py         pgmq consumer: adopts queued scans, poison-message cap, stuck-scan reaper
+  ai.py             grounded triage + model fallback chain + deterministic fallback + cache
+  graph.py          blast radius / neighbours / exposure paths — THE one graph implementation
+  compliance/map.py rule → framework control mapping + evaluate(), called per scan
+  api/main.py       FastAPI: actions + scan orchestration + collector control plane
+  api/auth.py       Supabase JWT verification (JWKS) + collector HMAC service tokens
+  connect/          one file per system: kafka, kong, rabbitmq, redis, mcp, aws, k8s
+  detect/           one rulepack per system + cross-cutting identity.py, data.py
 services/collector/src/collector/
-  main.py           enroll → heartbeat → poll → run locally → redact → push
+  main.py           enroll → heartbeat → long-poll → run locally → redact → push
   config.py         targets.json + ${ENV_VAR} credential refs
   redact.py         the payload boundary
 apps/web/           Next.js 16 console
-supabase/migrations/  the schema (three files)
-deploy/dev/docker-compose.yml   a deliberately misconfigured Kafka — the thing we scan
-deploy/onprem/      self-hosted stack: Compose + Caddy + a Helm chart.
-                    Config-validated, NEVER BOOTED. Read its README before using it —
-                    it inherits the engine API's self-asserted-header cross-tenant hole.
+supabase/migrations/  ten files, 20260717000001 … 20260723000002 — the schema IS behavior here
+deploy/dev/docker-compose.yml   deliberately misconfigured Kafka + RabbitMQ + Redis — scan targets
+deploy/onprem/      self-hosted stack: Compose + Caddy + Helm. Config-validated, NEVER BOOTED,
+                    and written BEFORE the auth rework — read its README with that in mind.
 ```
 
 ---
 
-## 2. The schema, and the two guarantees Postgres enforces
+## 2. The schema, and the guarantees Postgres enforces
 
-`supabase/migrations/20260717000001_core_schema.sql` — the spine: `tenants`, `tenant_members`, `connections`, `resources`, `edges`, `scans`, `findings`, `observations`.
-
-`supabase/migrations/20260717000002_platform_schema.sql` — the platform layer: `collectors`, `api_keys`, `audit_log`, `suppressions`, `controls`, `ai_outputs`, `ai_output_evidence`, `integrations`, `routing_rules`, `usage`; `pgmq` + `pg_cron`; RLS hardening; and the triggers below.
-
-`supabase/migrations/20260717000005_citation_gate_completeness.sql` — the citation gate as originally shipped checked one transition (INSERT on `ai_outputs`) and three others walked around it. 005 re-states it as a check on *state*. Read it before you trust Guarantee 1; the history is in its header comment.
+`20260717000001` core spine (tenancy, inventory, graph, scans, findings, observations);
+`20260717000002` platform layer + RLS hardening + the original triggers; `003` pipeline fixes;
+`004` findings facets; `005` citation-gate completeness; `006` foundation (attestations,
+assessability, Realtime publication, the observation hash chain); `007` compliance unknown-state;
+`008` ledger FK housekeeping; `20260723000001` scheduler + posture history (§10);
+`20260723000002` Vault credentials (§5).
 
 ### Guarantee 1 — the citation gate
 
-> An `ai_outputs` row cannot exist in a committed transaction without citing at least one `observations` row **of its own tenant**.
+> An `ai_outputs` row cannot exist in a committed transaction without citing at least one
+> `observations` row **of its own tenant**.
 
-```sql
-create constraint trigger ai_outputs_citation_gate
-  after insert or update on ai_outputs
-  deferrable initially deferred
-  for each row execute function enforce_citation_gate();
+Deferred constraint triggers on both `ai_outputs` and `ai_output_evidence` (002 + 005).
+`DEFERRABLE INITIALLY DEFERRED` is the whole trick: the natural write order (output first, then
+its evidence links) would be rejected by a non-deferred trigger; deferring the check to `COMMIT`
+lets the transaction assemble a complete, cited output. 005 exists because "uncited output" is a
+*state* and the original gate checked one *event* — the evidence-DELETE, observation-cascade, and
+`ON CONFLICT DO UPDATE` paths (the engine's own write path) all walked around it, and a fourth
+hole let tenant A cite tenant B's observation. All four attacks run in CI. This is why
+`ai.triage_finding()` takes an open cursor: the caller owns the transaction, so output and
+citations commit together or not at all.
 
-create constraint trigger ai_output_evidence_citation_gate
-  after insert or update or delete on ai_output_evidence
-  deferrable initially deferred
-  for each row execute function enforce_citation_gate_evidence();
-```
+### Guarantee 2 — the evidence ledger: append-only, and now hash-chained
 
-`DEFERRABLE INITIALLY DEFERRED` is the whole trick, and it is not a performance knob. The natural write order is: insert the output, get its id, then insert the `ai_output_evidence` links that reference that id. A non-deferred trigger would fire on the INSERT — before any link could possibly exist — and reject every output, including correct ones. Deferring the check to `COMMIT` lets the transaction assemble a complete, cited output.
+> An observation's evidence can never be UPDATEd — and a delete/reinsert/reorder is **detectable**.
 
-**Why there are two triggers, and why the first one alone was a lie.** "Uncited output" is a *state*, and until 005 the schema only checked one *event* that could produce it. The other three all committed cleanly:
+Two layers, added in that order:
 
-| Attack | Why the INSERT-only gate never saw it |
-|---|---|
-| `delete from ai_output_evidence where ai_output_id = X` | no INSERT on `ai_outputs` happens; `ai_output_evidence` had no trigger at all |
-| `delete from observations where id = X` | `ai_output_evidence.observation_id` is `ON DELETE CASCADE` — the citation is stripped silently. Migration 002's own comment invites the retention job that does this |
-| `insert ... on conflict (tenant_id, kind, fingerprint) do update` | Postgres fires UPDATE triggers on the conflict path, not INSERT triggers. **This is the engine's own write path** (`ai.py::triage_finding`) — the one write in the system the gate never saw |
+- **Append-only** (002, narrowed by 008): UPDATE on `observations` and `audit_log` is rejected by
+  trigger. 008 narrows the block to the *evidence* fields — Postgres's own `ON DELETE SET NULL` on
+  `observations.resource_id` was being rejected too, which broke resource churn and offboarding;
+  the FK pointer is bookkeeping, not evidence. DELETE stays allowed (offboarding, FK cascades):
+  retention is a policy question, mutation is an integrity question.
+- **Hash chain** (006): each observation's `row_hash` commits to its claim and its position over
+  the previous observation of the same finding (`prev_hash`). Delete-and-reinsert at the same id —
+  the classic bypass of an UPDATE-only guard — now breaks the chain, and `verify_ledger()` reports
+  the first broken link per finding. Honest limits: rows written before 006 carry no hash and are
+  excluded (stated in the migration); the function **detects** tampering, it does not prevent it;
+  and nothing currently schedules or exposes `verify_ledger()` — checking is a manual query today
+  (STATUS.md gap). The claim to an auditor is "tamper-evident from 006 forward, if you run the
+  check", and nothing stronger.
 
-A fourth hole was on the tenant axis: nothing required a cited observation to belong to the same tenant as the output. `ai_output_evidence` has no `tenant_id` of its own and its RLS policy scopes reads through the parent output, so tenant A's output citing tenant B's observation committed cleanly and rendered in A's console as A's own evidence. 005 checks that too, on both sides of the link.
+### The third outcome: assessability (006)
 
-**Deferring rather than `ON DELETE RESTRICT`** is the load-bearing choice on the delete path. `RESTRICT` on `observation_id` would make the cascade order of `delete from tenants` significant — `tenants` cascades to *both* `observations` and `ai_outputs`, and Postgres does not promise which FK action runs first — so offboarding would fail intermittently. At COMMIT the deferred check has no such problem: the parent output is either already gone (offboarding, cascade — nothing to protect) or still there (a selective delete — raise). Retention still works; it just has to delete the outputs along with the evidence they cite, which is what "the output cites the evidence" means.
-
-This is why `ai.triage_finding()` takes an open cursor instead of opening its own connection: the caller owns the transaction, so the output and its citations commit together or not at all. `api/main.py::triage` catches the `DatabaseError` at `conn.commit()` and returns a 500 rather than swallowing it — that commit is where ungrounded output dies.
-
-All four attacks above are executed in CI (`.github/workflows/ci.yml`, the *evidence integrity* step) alongside controls proving the gate does not break the engine's cache refresh or tenant offboarding. Before 005 that job was green while three of them succeeded.
-
-### Guarantee 2 — the evidence ledger is append-only
-
-> An `observations.claim` can never be **UPDATE**d. That is what makes it evidence.
-
-```sql
-create trigger observations_append_only before update on observations
-  for each row execute function reject_update();
-create trigger audit_log_append_only before update on audit_log
-  for each row execute function reject_update();
-```
-
-DELETE is deliberately still allowed — tenant offboarding and FK cascades need it. Retention is a policy question; mutation is an integrity question. Only the second one is closed here.
-
-**Take that qualifier literally: the headline says UPDATE, not "rewritten".** `observations.id` defaults to `gen_random_uuid()` rather than being generated-always, so a writer who can DELETE can also re-INSERT at the same id with different claim text and never issue an UPDATE. Nothing in the schema detects that. It needs the `postgres`/`service_role` credential — the browser's `authenticated` role has no write policy on any table and cannot reach it — and no shipped code path does it. But an auditor who reads this section is entitled to know that the ledger's tamper-evidence stops at UPDATE, and that "an operator with the engine's own credential cannot rewrite history" is **not** a claim this schema supports. See *Known gaps* in [STATUS.md](STATUS.md) for the options and why none is taken yet.
+A detector has three honest answers: this is wrong (a finding), this is fine (no finding), or
+**I could not tell**. `findings.assessment` (`assessed` / `not_assessable`, with a reason) is the
+third one as a state instead of prose. The AWS pack files it when an API call is AccessDenied, the
+K8s pack when RBAC hides a resource type, the RabbitMQ pack when the credential can't read part of
+the surface. The console renders it distinctly and `compliance/map.py::evaluate()` maps it to
+`unknown` — never `fail`, never a silent pass.
 
 ### RLS and the trust model
 
-Migration 002 runs `ENABLE` + `FORCE ROW LEVEL SECURITY` over all 18 tenant tables and grants `authenticated` a **SELECT policy and nothing else**. There is no INSERT/UPDATE/DELETE policy for the browser role anywhere in the schema — least privilege by construction, not by convention.
+Migration 002 runs `ENABLE` + `FORCE ROW LEVEL SECURITY` over the tenant tables (and every later
+tenant table, e.g. `posture_snapshots`, follows suit) and grants `authenticated` a **SELECT policy
+and nothing else**. `app_tenant_ids()` is the pivot: `SECURITY DEFINER`, pinned `search_path`;
+`tenant_members_select` scopes on `user_id = auth.uid()` directly and must never call it (policy
+recursion).
 
-`app_tenant_ids()` is the pivot: `SECURITY DEFINER`, pinned `search_path`, owned by `postgres` (BYPASSRLS). Two non-obvious properties:
-
-- The pinned search_path is not hygiene, it is the difference between a helper and an injection vector.
-- `tenant_members_select` must **never** call `app_tenant_ids()`, because that function reads `tenant_members`. It scopes on `user_id = auth.uid()` directly. Break that and you get infinite policy recursion.
-
-The engine connects as `postgres` and **bypasses RLS entirely**. So in `api/main.py`, `graph.py`, and `scan.py`, a missing `and tenant_id = %s` is a cross-tenant leak, not a bug. RLS is not a backstop on the server side; the predicates in those files are the only thing between two customers' estates.
+The engine connects as `postgres` and **bypasses RLS entirely**. In `api/main.py`, `graph.py`, and
+`scan.py`, a missing `and tenant_id = %s` is a cross-tenant leak, not a bug. RLS is not a backstop
+server-side; the predicates in those files are the only thing between two customers' estates.
 
 ---
 
-## 3. The scan pipeline
+## 3. Who is calling — the auth matrix
 
-`services/engine/src/vectasec/scan.py` — `run_scan(type_, config, tenant_id, connection_name)`.
+`api/main.py::principal()` + `api/auth.py`. Nothing self-asserted is trusted by default. Three
+paths, checked in this order:
+
+| Path | Credential | Verified how | Tenant comes from | Actor comes from | Intended caller |
+|---|---|---|---|---|---|
+| 1 | `Authorization: Bearer <engine-token>` | constant-time compare against `VECTASEC_ENGINE_TOKEN` (unset ⇒ path disabled) | `VECTASEC_ENGINE_TOKEN_TENANT` if set (a mismatched header is 403); else the `X-VectaSec-Tenant` header, asserted by the authenticated *service* | `X-VectaSec-Actor`, the service's server-confirmed user id | the console's server side (`apps/web/lib/engine.ts`, which verifies the user and derives the tenant under RLS before calling) |
+| 2 | `Authorization: Bearer <supabase-jwt>` | signature against the project's **public JWKS** (ES256/RS256; `aud=authenticated`, `exp`, `sub` required — `api/auth.py::verify_supabase_jwt`) | resolved from `tenant_members` for the token's `sub`; a requested tenant the user doesn't belong to is 403; membership in none is 403, in several without naming one is 400 | the token's `sub` | end users / anything holding a real session |
+| 3 | bare `X-VectaSec-*` headers | **none** — accepted only when `VECTASEC_DEV_TRUST_HEADERS` is explicitly truthy; the default is OFF with no localhost carve-out, and enabling it prints a wall-of-text startup warning | the header | the header | a single-operator dev loop, nothing else |
+| — | `Authorization: Bearer <collector-token>` on `/collector/*` only | stateless HMAC over `{tenant, collector, exp}` with a server-side secret (`api/auth.py::mint_collector_token` / `verify_collector_token`), minted at `/collector/enroll`, short-lived, memory-only on the client | inside the signed token | the collector id | the customer-side collector |
+
+Mutating endpoints additionally require a non-empty actor (`acting()`): an unattributed write is
+refused rather than recorded anonymously, because the audit row is written in the same transaction
+as every mutation.
+
+**The honest caveat on path 1** (also STATUS.md gap #2): the engine token authenticates the
+*calling service*, which is then trusted to assert the acting user and (unless pinned) the tenant.
+A compromised token-holder can forge any actor into the audit trail. It is transitional — the end
+state is per-user JWTs on every console call — and it is why `VECTASEC_ENGINE_TOKEN_TENANT`
+pinning exists for single-tenant deployments.
+
+---
+
+## 4. The scan pipeline
+
+`scan.py::run_scan(type_, config, tenant_id, connection_name, mode)`.
 
 ```
-_ensure_connection    upsert the connections row
-insert scans          status='running'
-────────────────────  collect happens OUTSIDE the write critical section
+ensure_connection_with_creds   upsert the connections row; split declared secrets → Vault (§5)
+insert scans (status='running'), COMMIT   ── collect happens OUTSIDE the write critical section
+resolve_secrets + runtime_config          ── Vault secrets merged into config IN MEMORY only
 CONNECTORS[type](config) → Collected(resources, edges)
-    on exception: mark the scan 'error', commit, re-raise. A slow or dead target fails the
-    scan cleanly instead of holding a write lock.
-────────────────────
-_persist_resources    upsert on (connection_id, ext_id); anything absent now → stale = true
-_persist_edges        delete this connection's edges, re-insert; unresolvable endpoints dropped
-for d in DETECTORS:
-  for r in resources:
-    if r.kind in d.kinds:
-      hits = d.fn(r, ctx)          ← one detector raising is caught, recorded, and skipped
-      for h in hits:
-        upsert findings on (tenant_id, fingerprint)
-        insert observations        ← same transaction, always
-update scans          status='done', stats
-insert audit_log      'scan.completed'
-COMMIT                one transaction for the whole scan
+    on exception: mark the scan 'error' on its own transaction, re-raise
+_enrich_collected      identity.py derivation + classify.py tagging appended to the collection
+_persist_resources     upsert on (connection_id, ext_id); anything absent now → stale = true
+_persist_edges         delete this connection's edges, re-insert; unresolvable endpoints dropped
+for d in DETECTORS: for r in resources of d.kinds:
+    hits = d.fn(r, ctx)          ← one detector raising is caught, recorded, skipped
+    upsert findings on (tenant_id, fingerprint)   +   insert observations — same transaction
+compliance.evaluate(cur, tenant_id)   ← recomputed IN the scan's transaction, so `controls`
+                                        can never lag the findings it derives from; an evaluate
+                                        failure is recorded in stats, never voids the scan
+update scans (status='done', stats);  insert audit_log;  COMMIT — one transaction
 ```
 
-Four decisions worth understanding before you touch this file:
+The same tail (persist → compliance → commit) runs for collector-pushed results
+(`scan.py::persist_pushed`).
 
-**Fingerprint dedup.** `fingerprint(tenant_id, rule_id, ext_id)` → `sha256(...)[:32]`, unique with `tenant_id` on `findings`. It deliberately excludes the scan id and the resource's DB uuid (which changes if a resource is deleted and recollected). It is keyed on *what a human would call the same problem on the same thing*. Consequence: the same real-world issue across 100 scans is ONE row with a stable history, and `status` / `assignee` / `due_at` survive re-scanning. Re-scanning must never resurrect a finding a human resolved into a fresh row. `apps/web/components/LiveFindings.tsx` depends on this to claim an INSERT means "genuinely new" — if the dedupe contract changes, that component silently starts lying.
-
-**Evidence is written with the finding, not after it.** The `observations` insert sits inside the same `for h in hits` block as the `findings` upsert. A finding without evidence is a rumour.
-
-**One transaction per scan.** A half-written scan shows a security team an incomplete picture, which is worse than showing them an error.
-
-**Stale, not deleted.** A resource that vanishes is itself a signal, and deleting it would destroy finding history. It gets `stale = true`.
-
-**Suppressions** are applied *by the scan loop* (`_is_suppressed`), matching `{}` (tenant-wide), `{ext_id}`, or `{kind}`. So a new suppression bites at the next scan — `POST /suppressions` says so explicitly in its `applies_at_next_scan: true` response rather than implying it took effect now.
+Decisions worth understanding before touching this file — unchanged from day one:
+**fingerprint dedup** (`fingerprint(tenant_id, connection_id, rule_id, ext_id)` — same real-world
+problem across 100 scans is ONE row; triage state survives rescans; `LiveFindings.tsx` depends on
+INSERT meaning "genuinely new"); **evidence written with the finding, never after**; **one
+transaction per scan**; **stale, not deleted**; **suppressions applied by the scan loop** — a new
+suppression bites at the next scan and `POST /suppressions` says so.
 
 ---
 
-## 4. The registry
+## 5. Credentials: the Vault flow
 
-`services/engine/src/vectasec/registry.py`. Two decorators, two module-level registries, **no central list to edit**.
+`creds.py` + migration `20260723000002`. The rule: **`connections.config` holds metadata only;
+anything a connector declares `secret=True` lives in Supabase Vault.**
 
-```python
-@connector("kafka")
-def collect(config: dict) -> Collected: ...
+- **The connector's own field spec is the authority.** `registry.ConnectorField(secret=True)`
+  (e.g. `rabbitmq.password`, `aws.secret_access_key`, `k8s.token`; kafka declares none) drives the
+  split — there is no second list to maintain, so a new connector's secrets are Vault-handled the
+  moment it declares them.
+- **Write path** (`creds.split_config` → `store_secrets`, called from the API, the CLI, and
+  `run_scan` itself): secret fields are stripped from the submitted config and stored as **one**
+  Vault secret per connection (`vectasec/connection/<id>`, a JSON object of the secret fields);
+  `connections.creds_ref` holds the `vault.secrets.id`. Same transaction as the connection row —
+  a row and its secret commit or fail together. An empty secret on a re-submitted form means
+  "unchanged" (merge), not "empty password".
+- **Read path** (`resolve_secrets` → `runtime_config`): at scan/test time the secrets are read
+  from `vault.decrypted_secrets` and merged into the in-memory config handed to the connector.
+  They exist joined-together only inside the process about to dial the target. Nothing logs,
+  returns, or persists them; audit rows record config **keys** only.
+- **Delete path**: `delete_secret` in the same transaction as the connection delete — an orphaned
+  credential is pure risk.
+- **Queue hygiene**: pgmq job payloads carry the public config only. Messages enqueued *before*
+  the migration may persist secrets in pgmq's archive table; the migration header documents the
+  purge (`delete from pgmq.a_vectasec_scans`).
 
-@detector(kinds=["broker"], rule_id="KAFKA.AUTHZ.NO_AUTHORIZER", severity="high", title="...")
-def no_authorizer(resource: Resource, ctx: ScanContext) -> list[Hit]: ...
-```
-
-Registration happens on import. `connect/__init__.py` and `detect/__init__.py` import their submodules, and every entry point (`scan.py`, `cli.py`, `api/main.py`, `collector/main.py`) does `from . import connect as _connect  # noqa: F401`. That `noqa` is load-bearing — an over-eager linter removing it silently empties the registries.
-
-**To add a detector: drop a file in `src/vectasec/detect/`.** That is the entire process. Nothing else changes.
-
-### The contracts (`contracts.py`)
-
-- **`Resource`** — `kind`, `name`, `ext_id`, `namespace`, `labels`, `raw`. `ext_id` is the stable id within a connection and the join key for the whole graph. `raw` is the normalized read from the target.
-- **`Edge`** — `src_ext_id` → `dst_ext_id` by `ext_id`, resolved to uuids at persist time. An edge to something not collected is dropped, never guessed at.
-- **`Hit`** — what a detector returns. `severity` is optional and overrides the decorator's when a rule's seriousness depends on the resource.
-- **`ScanContext`** — carries **every** resource in the scan, so cross-resource rules are expressible ("this topic is exposed *because* its broker's listener is PLAINTEXT"). `ctx.of_kind("broker")` is the accessor.
-
-### `Hit.observation` is the load-bearing field
-
-It is the exact string written to the immutable ledger and **the only thing the AI is ever allowed to cite**. It must state a fact read from the target, with the actual observed value in it:
-
-```
-✅ "config authorizer.class.name is empty"
-✅ "listener EXTERNAL://0.0.0.0:9092 maps to security protocol PLAINTEXT"
-❌ "the broker is insecure"          ← a conclusion, not an observation
-❌ "authorizer is misconfigured"     ← no observed value
-```
-
-Every rule read from a target uses `resource.raw.get(...)`, never `resource.raw[...]`. Real API responses omit keys.
-
-### Connector rules
-
-Read-only. Always. Never write to a customer system. Two patterns from `connect/kafka.py` (the reference — read it):
-
-- **Record the outcome, not just the result.** ACL collection stores `{"outcome": "ok"|"security_disabled"|"error", "bindings": [...], "error": ...}`. An empty list does not prove "no authorizer" — an authorizer with zero ACLs returns `[]` too, and a permissions failure must never be read as "there are no ACLs". Detectors read `outcome` and can say *indeterminate*.
-- **Distinguish "not read" from "read, empty".** `None` vs `{}`. `is_sensitive`/`is_default` are preserved because the broker redacts PASSWORD-typed values to `None`; without them a detector cannot tell "explicitly configured but unreadable" from "not set" and would report the wrong one.
-
-Current coverage: **5 connectors, 85 detectors** — KAFKA 20, MCP 19, RABBITMQ 18, KONG 16, REDIS 6, plus cross-cutting NHI (4) and DATA (2) packs that run on the normalized identity/credential/grant and data-classified resources. `uv run vectasec rules` prints the live rulepack.
+What this protects against: any read of `connections` (a dump, PostgREST, a misissued read
+credential) sees hosts and usernames, never passwords. What it does not: the engine's own role can
+read `vault.decrypted_secrets` — Vault moves the boundary from "anyone who can read the table" to
+"the key-holding extension path", it does not make the engine unable to read what it must use.
 
 ---
 
-## 5. The Collector's trust model
+## 6. The registry, and the fan-out connector pattern
 
-`services/collector/src/collector/main.py`. It runs inside the customer's network, next to their broker. Three properties, and every choice in that file serves one of them:
+`registry.py`. Two decorators, module-level registries, no central list. Registration happens on
+import; every entry point does `from . import connect as _connect  # noqa: F401` — that `noqa` is
+load-bearing. **To add a detector: drop a file in `detect/`.** That is the entire process.
 
-**1. Outbound only.** No `bind()`, no `listen()`, no web framework, no port. Jobs are *pulled* via long-poll: the collector opens the connection, the control plane parks it until a job exists, then answers on that same socket. Dispatch rides an egress flow the customer already allows. The collector is not reachable — it runs behind NAT with every ingress rule denied.
+The contracts (`contracts.py`): `Resource` (kind/name/`ext_id`/labels/raw), `Edge` (by ext_id,
+resolved at persist, unresolvable = dropped), `Hit` (severity override, `assessable` +
+`assessment_reason` for the third outcome), `ScanContext` (every resource in the scan —
+cross-resource rules like "this topic is exposed *because* its broker is PLAINTEXT").
 
-**2. Credentials stay local.** The customer's credential is read from local config (`${ENV_VAR}` refs in `targets.json`, never literals), used in-process to dial the private system, and never serialised outbound. The control plane does not have it and has no way to ask for it. The enrollment token is the only long-lived secret and is not kept at rest — the state file gets `sha256(token)`. The service token it buys lives in memory only.
+`Hit.observation` is the load-bearing field: the exact string in the immutable ledger and the only
+thing the AI may cite. It states a fact with the observed value in it, never a conclusion.
+Connectors record the *outcome*, not just the result (`ok` / `security_disabled` / `error` /
+`access_denied`) — an empty ACL list must never be read as "no authorizer", and "not read" is
+distinguishable from "read, empty".
 
-**3. Raw config stays local.** Connectors **and detectors** both run in the collector. `Resource.raw` — the broker config, the plugin config, the topic settings the rules ran against — is deliberately never built into the outbound payload. What leaves is the conclusion: findings, observations, resource metadata (`kind`, `name`, `ext_id`, `namespace`, `labels`), edges. That omission is the difference between "we send findings" and "we send your configuration".
+**The fan-out pattern** (`connect/aws.py`, `connect/k8s.py` — the shape every wide connector
+should copy): one connection, many surfaces, honest per-surface failure.
 
-Two more mechanisms:
+- **One credential fans out**: AWS reaches SQS + SNS + EventBridge + MSK + API Gateway per region
+  from a single role; K8s reaches core + RBAC + Istio + Linkerd + Gateway API from one cluster
+  read. The connector, not the user, does the enumeration.
+- **Per-surface error isolation**: each (service, region) or CRD-group collection runs in its own
+  try/except. A denied `kafka:ListClusters` or a 403 on `security.istio.io` records an outcome on
+  the umbrella resource (`aws_account`, `k8s_cluster`) instead of voiding the scan — and the
+  rulepack turns it into a `not_assessable` coverage-gap finding. A 404 on a CRD group means "not
+  installed": fewer kinds, no error.
+- **Distinct kinds, always** (`aws_sqs_queue`, `mesh_gateway`, …) so no other rulepack ever runs
+  against these resources by accident — the same reason `connect/redis.py` refused to reuse
+  `broker`.
+- **Pure parse layer**: boto3 dicts / cluster snapshots in, `Resources` out, tested offline
+  against golden fixtures (`tests/fixtures/aws_responses.json`). A shape drift between connector
+  and rulepack fails a test instead of silently mis-firing — and the SDK stays out of the suite.
+- **NHI comes with it**: an `@identity_extractor` per connector (inline for aws/k8s, in
+  `identity.py` for the rest) means every new connector feeds the identity plane on day one.
 
-- **A job is a reference, never a config.** `{"target": "prod-kafka"}` — a name that must already exist in the collector's local `targets.json`. Config-shaped fields on an incoming job are ignored by construction. If the control plane could hand this process a host and a credential, then whoever took the control plane could aim the collector at any address inside the customer's network — or at a broker of their own — while it holds the customer's credentials.
-- **`redact()` is the boundary.** One line in `_handle()`; nothing reaches the control plane except through it. `run_job()` is already assembled from credential-free parts — `redact()` is what makes that a guarantee rather than a promise, for this payload and for every connector added later. A `_SecretFilter` on the log *handler* (not the logger — a logger filter isn't consulted for records propagating up from `vectasec.*`) scrubs connector exception text that might carry a URL with userinfo.
-
-`vectasec-collector preview` exists for the security review: it scans real targets with real credentials and prints exactly what *would* be pushed, sending nothing. Rather than take our word for what leaves the network, an operator reads the JSON.
-
-Fingerprints are computed with the engine's `fingerprint()`, imported not reimplemented — so a tenant migrating a cluster from the cloud path to a collector does not have its triage history reset.
-
-> ⚠️ **The collector cannot run today.** It enrolls and polls against `/collector/enroll`, `/collector/heartbeat`, `/collector/jobs`, `/collector/results` — none of which exist in `api/main.py`. Only `check` and `preview` work. See [STATUS.md](STATUS.md).
-
----
-
-## 6. Grounded AI
-
-`services/engine/src/vectasec/ai.py`. The premise: an LLM that confidently narrates a finding it cannot substantiate is worse than no LLM, because a security team acts on it. Four mechanisms, in increasing order of strength:
-
-1. **The model gets only this finding's observations**, numbered, and is told it was not there and cannot see the system. The citation array is enforced by a JSON schema (structured outputs) — not by parsing prose for `[1]`. The model physically cannot return an uncited shape.
-2. **Every citation is range-checked** against the observations actually sent. One out-of-range index means the model invented evidence, so the *whole* output is discarded — never partially trusted.
-3. **The database refuses to commit** an `ai_output` with no linked observation (§2). Even if 1 and 2 were bypassed, Postgres is the backstop.
-4. **Refusals are a normal outcome.** A security scanner asks about exploitation for a living. `stop_reason == "refusal"` and `max_tokens` both raise `UncitedOutput` and fall through, rather than crashing or surfacing nothing.
-
-**The fallback** (`_rule_based`) runs when the model is unavailable, unconfigured, refuses, or returns something uncited. It is deterministic, constructed *from* the observation (so it cites trivially), labels itself `model="rule-based-fallback"`, and asserts nothing beyond the evidence — which is why its `confidence` is `high`. **The product never depends on the AI being reachable.** No `ANTHROPIC_API_KEY`? Everything still works; you get the deterministic summary and the finding and its evidence are unaffected.
-
-**The cache.** `ai_outputs` is unique on `(tenant_id, kind, fingerprint)`. One explanation of "wildcard ACL" serves every occurrence, on every re-scan, forever. That is what makes it affordable to default to the strongest model: triage quality is the product, and we pay per distinct finding-class, not per occurrence.
-
-If a finding has no observations, `triage_finding` returns `None` and the API returns 422. A finding with no evidence is a rumour, and the AI layer does not speak about it.
-
----
-
-## 7. The API
-
-`services/engine/src/vectasec/api/main.py`. FastAPI. **It has no list endpoints, on purpose.**
-
-> The console READS Supabase directly (PostgREST + RLS). This service only changes state or starts work — and both need what RLS cannot give: an authenticated actor and an audit trail.
-
-- `GET /health` — 200 even when the DB is down; `db` carries the truth. A health check that refuses to answer can't tell an operator which half is broken.
-- `POST /scans` — `inline: true` runs it in-request (the dev/demo path). Otherwise it enqueues to `pgmq` in the same transaction as the `scans` row, so a worker can never pull a job whose scan row doesn't exist yet. ⚠️ **No worker consumes the queue.**
-- `GET /scans/{id}`, `POST /findings/{id}/status`, `POST /findings/{id}/assign`, `POST /findings/{id}/triage`, `POST /suppressions`, `GET /compliance/{framework}`, `GET /graph/blast-radius/{id}`
-
-Rules this file lives by:
-
-- **Every statement filters `tenant_id` explicitly** — BYPASSRLS role, so isolation is not free here the way it is in the browser.
-- **Every mutation writes its `audit_log` row in the same transaction as the change.** An action that commits without its audit row is an action nobody can account for. An unattributed write is *refused* (`acting` requires `X-VectaSec-Actor`) rather than recorded anonymously.
-- **Status transitions take `FOR UPDATE`** — two analysts triaging the same finding must not interleave into an audit trail recording a transition that never happened. The note lives only in the audit row: it explains a *change*, so a column on `findings` would be overwritten by the next one.
-- **`suppressed` is not a settable status.** A suppression carries a reason and an expiry and is applied by the scan loop, so it goes through `POST /suppressions`. As a plain status it would create exceptions nobody can audit or expire. `reason` is validated non-blank; unknown scope keys are rejected rather than silently matching nothing.
-- **Handlers are sync `def`** on purpose: psycopg blocks, and FastAPI runs sync handlers in a threadpool, so blocking costs a worker thread instead of stalling the event loop.
-
-> ⚠️ **`principal()` is a development stand-in.** `X-VectaSec-Tenant` and `X-VectaSec-Actor` are self-asserted — any caller can name any tenant and any actor. A real deployment must verify a Supabase JWT against the project JWKS and take the tenant from membership claims. This is why `main()` binds `127.0.0.1` by default and why the console proxies rather than letting the browser call it. There is a `TODO(auth)` on it.
+Current coverage: **7 connectors, 129 detectors** (AWS 21, MCP 24, KAFKA 20, K8S 18, RABBITMQ 18,
+KONG 16, REDIS 6, + cross-cutting NHI 4 and DATA 2). `uv run vectasec rules` prints the live
+rulepack; [coverage-matrix.md](coverage-matrix.md) is the per-connector statement with caveats.
 
 ---
 
-## 8. The console
+## 7. The Collector's trust model
 
-`apps/web` — Next.js 16, React 19, server components. Routes: `/`, `/findings`, `/findings/[id]`, `/assets`, `/assets/[id]`, `/connections`, `/compliance`, `/login`.
+`services/collector/src/collector/main.py`, runs inside the customer's network. Three properties:
+
+1. **Outbound only.** No `bind()`, no `listen()`, no port. Jobs are pulled via long-poll against
+   `/collector/jobs`; the engine parks the connection until a job exists.
+2. **Credentials stay local.** `${ENV_VAR}` refs in `targets.json`, used in-process, never
+   serialised outbound. The enrollment token is not kept at rest (state file stores its sha256);
+   the service token it buys is a short-lived HMAC token (§3) held in memory only.
+3. **Raw config stays local.** Connectors *and* detectors run in the collector; `Resource.raw`
+   never enters the outbound payload. What leaves is findings, observations, resource metadata,
+   edges — `redact()` is the single exit boundary, and `vectasec-collector preview` prints exactly
+   what would be pushed so an operator can read it instead of trusting us.
+
+A job is a *reference* (`{"target": "prod-kafka"}`) that must already exist in the collector's
+local config — the control plane can never aim the collector at a host of its choosing while it
+holds the customer's credentials. Fingerprints are computed with the engine's `fingerprint()`,
+imported not reimplemented, so migrating a system from cloud path to collector keeps its triage
+history.
+
+The engine side (`/collector/enroll|heartbeat|jobs|results` in `api/main.py`) exists: HMAC
+service tokens, tenant-scoped job claiming with `skip locked`, a results path that persists
+through the same `persist_pushed` tail as any scan (compliance recompute included) and never
+receives `Resource.raw`. **What has not happened: a real collector observed completing the round
+trip against a live engine.** Until then, treat the loop as untested integration ([STATUS.md](STATUS.md)).
+
+---
+
+## 8. Grounded AI
+
+`ai.py`. The premise: an LLM that confidently narrates a finding it cannot substantiate is worse
+than no LLM. Four mechanisms, in increasing order of strength: (1) the model gets only this
+finding's observations, numbered, citations enforced by structured-output schema; (2) every
+citation is range-checked — one invented index discards the whole output; (3) Postgres refuses to
+commit an uncited output (§2); (4) refusals are a normal outcome, not a crash.
+
+Availability is a *chain*, not a pin: `MODELS` lists a primary (overridable via
+`VECTASEC_AI_MODEL`) and fixed alternates; an overloaded model hands off to the next before
+anything falls back to the deterministic `_rule_based` summary — which cites trivially, labels
+itself, and runs with no API key at all. The `ai_outputs` cache is unique on
+`(tenant_id, kind, fingerprint)`: one explanation per finding-class, ever.
+
+Injection honesty: observation text quotes scanned systems verbatim, and scanning hostile systems
+is the product — MCP metadata, AWS policy documents, K8s annotations are all attacker-influencable
+prose that lands in the prompt. Claims are fenced in unclosable `<observation>` elements, capped,
+and the system prompt calls an embedded "known false positive" note evidence of tampering — but
+that is mitigation, not proof. The deterministic severity, not the AI priority, is what the
+findings list sorts and filters on; AI priority appears only on the detail page inside a labelled
+provenance fence. Do not let anything route or alert on model-owned `priority` before reading
+STATUS.md gap #5.
+
+---
+
+## 9. The API
+
+`api/main.py`. FastAPI. **No list endpoints, on purpose** — the console reads Supabase directly
+under RLS; this service only changes state or starts work, which needs what RLS cannot give: an
+authenticated actor (§3) and an audit trail.
+
+Surface: `GET /health`; `POST /scans` (inline or enqueued to pgmq in the same transaction as the
+scans row); `GET /scans/{id}`; connection lifecycle (`GET /connectors` from the registry,
+`POST /connections` with declared-field validation + Vault split, `POST /connections/{id}/test`
+via the real collect path, `POST /connections/{id}/scan`, `DELETE /connections/{id}`); finding
+actions (`status`, `assign`, `triage`); `POST /suppressions`;
+`GET /compliance/{framework}` + `POST /compliance/{framework}/{control_id}/attest`;
+`GET /graph/blast-radius/{id}` (delegates to `graph.py` — one implementation, cycle-guarded,
+`depth_bounded` honesty flag); the `/collector/*` control plane (§7).
+
+Rules this file lives by: every statement filters `tenant_id` explicitly (BYPASSRLS role); every
+mutation writes its audit row in the same transaction; status transitions take `FOR UPDATE`;
+`suppressed` is not a settable status (suppressions carry reason + expiry and apply at the next
+scan); handlers are sync `def` (psycopg blocks; FastAPI threadpools sync handlers).
+
+---
+
+## 10. The scheduler and posture history (DB-side, deliberately)
+
+Migration `20260723000001`. Both features live in the database because their inputs and outputs
+do: the queue contract already exists between `api/main.py::_enqueue_scan` and
+`worker.py::parse_job`, and the migration *reproduces* it rather than inventing a second path.
+
+**Scheduler.** `connections.scan_interval_minutes` (NULL = point-in-time only — absence is a
+meaningful state, not a default) + `queue_due_scans()`, run by pg_cron every minute. For each
+active, due connection it inserts the same `queued` scans row `POST /scans` writes and — cloud
+mode only — sends the same pgmq payload; collector-mode connections get only the row, which the
+enrolled collector claims via `GET /collector/jobs` (same rule as the API: pgmq must never hand a
+cloud worker a job whose target it cannot reach). Due = interval elapsed since the later of
+`last_queued_at` and `last_scanned_at` (a manual "Scan now" resets the clock); a queued/running
+scan blocks re-queueing; `FOR UPDATE SKIP LOCKED` keeps overlapping cron ticks from double-queueing.
+The function is `revoke`d from public — the browser cannot queue work by calling it.
+
+⚠ **The payload shape is a hand-mirrored contract.** `queue_due_scans()` must build exactly what
+`worker.py::parse_job` validates — anything else is archived as poison. A change to
+`_enqueue_scan`'s payload **must** change the SQL twin in the same commit (STATUS.md gap #7 asks
+for the test that enforces this).
+
+**Posture history.** `posture_snapshots` gets one row per scan transitioning to `done` (an
+`AFTER UPDATE OF status` trigger — every completion path is such an UPDATE), throttled to one per
+tenant per 5 minutes so a scheduler burst records one honest point. The console's Overview renders
+the trend (`PostureTrend` in `app/page.tsx`); RLS: SELECT-only for members, written only by the
+trigger as `postgres`.
+
+⚠ **The formula lives in two places and must change in lockstep.** `snapshot_posture()` mirrors
+`apps/web/lib/posture.ts` digit-for-digit: `weighted = 10·crit + 4·high + 1.5·med + 0.5·low` over
+open findings (info excluded), `score = 100` when weighted = 0 else
+`max(1, round(100·(1 − weighted/(weighted+40))))` — and SQL `round(numeric)` matches JS
+`Math.round` for positive inputs by rounding half away from zero. If you touch the weights, the
+curve, or the rounding in **either** place, change the other in the same commit, or the sparkline
+and the live score silently diverge — in the product whose pitch is that its numbers are
+checkable. (Gap #6 in STATUS.md asks for the shared-fixture test.)
+
+---
+
+## 11. The console
+
+`apps/web` — Next.js 16, React 19, server components. Routes: `/`, `/findings`, `/findings/[id]`,
+`/assets`, `/assets/[id]`, `/identities`, `/connections`, `/scans`, `/compliance`, `/login`.
 
 ### Reads go to Supabase. Actions go to the engine. Never the reverse.
 
-**Reads** — `lib/supabase/server.ts` creates a server client with `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY`, marked `server-only` (a build error if imported from a client component). It talks to Postgres as `authenticated`: SELECT-only, RLS-scoped. Pages don't filter by `tenant_id` — RLS does. The console must **never** receive `SUPABASE_SERVICE_ROLE_KEY` or `DATABASE_URL`; those bypass RLS and the tenant-isolation guarantee with them.
+**Reads** — `lib/supabase/server.ts`, `server-only`, anon key, `authenticated` role: SELECT-only,
+RLS-scoped. Pages don't filter by tenant — RLS does. The console must never receive
+`SUPABASE_SERVICE_ROLE_KEY` or `DATABASE_URL`. List pages read a bounded page (`LIST_LIMIT`) plus
+`count: 'exact'` head-counts, so totals are never a JS tally of a silently capped array — and the
+UI says what it is not showing.
 
-**Actions** — `app/findings/actions.ts` (Server Actions) → `app/findings/engine.ts` → the engine API. The browser role is SELECT-only on every table, so nothing in the console writes to Postgres.
-
-`engine.ts` is `server-only` and its URL is deliberately not `NEXT_PUBLIC_`. **The console is the thing that makes the engine's self-asserted headers trustworthy:** callers never pass a tenant — it's derived from a row RLS already agreed the user can see — and the actor is the id from a server-confirmed `getUser()`, never a form field. The browser cannot reach that file, cannot see the URL, and cannot influence either header.
+**Actions** — Server Actions → `lib/engine.ts` (`server-only`, URL not `NEXT_PUBLIC_`) → the
+engine API, authenticated with the engine service token (§3 path 1) and carrying the
+server-verified tenant/actor. The browser cannot reach that file, see the URL, or influence the
+headers.
 
 ### Three layers of auth; only one is load-bearing
 
-1. `proxy.ts` (**not** `middleware.ts` — Next 16 renamed the convention) refreshes the session and redirects anonymous users. **This is not an authorization boundary.** Server Functions are POSTs to the route where they're defined, so a matcher change silently removes coverage with no test failing.
-2. Every Server Action re-verifies with `getVerifiedUser()` — a network hop to the Auth server, not `getClaims()`. `getClaims` verifies a signature, not revocation: a fired analyst's unexpired token still has a valid signature. Then `getActionContext()` reads the finding **under RLS** — if Postgres doesn't hand back the row, the user cannot act on it. That is the IDOR check, which authentication alone never answers.
+1. `proxy.ts` refreshes sessions and redirects anonymous users — **not** an authorization boundary.
+2. Every Server Action re-verifies with `getVerifiedUser()` (a revocation-checking network hop,
+   not a signature check) and then reads the target row **under RLS** — the IDOR check.
 3. **RLS is the actual guarantee.**
 
-### Two design constraints worth knowing
+### Design constraints worth knowing
 
-- **`LiveFindings.tsx`** subscribes to Realtime and shows a *pill*, not an auto-refresh. Re-sorting a table under an analyst's cursor loses their place and invites a click on the wrong finding — in a tool whose buttons are suppressions and triage decisions, that's a real misfire. Interruption is opt-in. It needs two things **not in any migration**: `findings` in the `supabase_realtime` publication, and a Realtime authorization policy on `realtime.messages` (a table-level SELECT policy on `findings` is not sufficient). Without both it renders nothing, forever — by design. The live layer is an enhancement over a page that is already correct without it.
-- **`/compliance`** computes its score over *evaluated controls only*. A finding can prove a control FAILS; a finding's absence can never prove it PASSES. `0/0` renders as "Not scored", never 100%.
-
----
-
-## 9. Two things that are not wired up
-
-Both are real code with real intent that nothing calls. Know about them before you rebuild either by accident.
-
-**`graph.py` is unreferenced.** It implements `neighbours()`, `blast_radius()`, `exposure_paths()`, `summary()` — with a per-path cycle guard (`not (r.id = any(w.path))`), a `distinct on` that keeps the *shortest* path to each node, a `depth_bounded` flag so a truncated walk is never presented as complete, and an undirected default (reachability in a posture sense is symmetric even when the edge recording it is not). `api/main.py::blast_radius` does **not** use any of it — it reimplements a *different* walk inline: directed-only, depth-guard only, no path guard, so on a cyclic graph it can report the root as its own blast radius. Two implementations that disagree on semantics. Pick one.
-
-**`compliance/map.py` is never called.** 1000+ lines of sourced rule→control mapping for PCI DSS 4.0.1 / DORA / HIPAA / the pinned MCP spec, with an `evaluate()` that would populate the `controls` table. Nothing in `scan.py` or `api/main.py` calls it. So `controls` is always empty, `GET /compliance/{framework}` always returns `count: 0`, and the console's compliance page always renders its empty state. Unlike `detect/` and `connect/`, there is deliberately no auto-registration here — a mapping is a claim about a published standard, so it lives in one reviewable table with its sources attached.
+- **`LiveFindings.tsx`** shows a pill, not an auto-refresh (re-sorting under an analyst's cursor
+  invites a click on the wrong finding). Its DB prerequisite — `findings`/`scans` in the
+  `supabase_realtime` publication — landed in migration 006; live delivery has still not been
+  *observed*, and the component fails silent by design, so verify before relying on it.
+- **`/compliance`** scores over evaluated controls only; a pass requires a human attestation
+  (`control_attestations`), a live failing finding beats an attestation, `0/0` renders "Not
+  scored", never 100%.
 
 ---
 
-## 10. Day-one checklist
+## 12. Day-one checklist
 
 ```bash
 cd services/engine
-uv run vectasec doctor                                      # 5 connectors, 85 detectors, DB, pgmq+pg_cron
-docker compose -f deploy/dev/docker-compose.yml up -d        # the misconfigured Kafka
+uv run vectasec doctor                                       # 7 connectors, 129 detectors, DB, pgmq+pg_cron
+docker compose -f deploy/dev/docker-compose.yml up -d        # misconfigured Kafka + RabbitMQ + Redis
 uv run vectasec scan --type kafka --bootstrap localhost:9092
 uv run vectasec findings                                     # cited findings
 uv run vectasec rules                                        # the rulepack
 uv run pytest                                                # the offline suite
 ```
 
-Then read, in this order: `contracts.py` → `registry.py` → `connect/kafka.py` → `scan.py` → one detector in `detect/kafka.py` → `ai.py`. Then [STATUS.md](STATUS.md) for what's missing.
+Then read, in this order: `contracts.py` → `registry.py` → `connect/kafka.py` → `scan.py` →
+one detector in `detect/kafka.py` → `connect/aws.py` (the fan-out pattern) → `ai.py`. Then
+[STATUS.md](STATUS.md) for what's missing and [coverage-matrix.md](coverage-matrix.md) for what's
+covered.

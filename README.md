@@ -1,91 +1,121 @@
 # VectaSec
 
-**A security posture platform for the integration layer** — the message brokers, API gateways, service meshes, iPaaS/ESB platforms, and MCP / agent gateways that connect a company's systems together.
+**A security posture product for the integration layer** — the message brokers, API gateways,
+service meshes, event buses, and MCP / agent gateways that connect a company's systems together.
+Not a middleware platform: it routes no traffic and brokers no messages. The claim it is growing
+into is **the security posture, identity, and governance layer for everything that connects
+systems together** ([docs/vectasec-v4-blueprint.md](docs/vectasec-v4-blueprint.md) Part 1).
 
-VectaSec builds a live inventory of everything running and how it's wired, checks each asset against a security benchmark, maps the results to compliance frameworks, and presents findings through an AI assistant that explains and prioritizes them. Detection is deterministic; the AI is grounded — every claim it makes cites a stored observation.
+VectaSec builds a live inventory of what's running and how it's wired, checks each asset against
+deterministic detectors, derives the non-human identities behind it all, maps results to
+compliance frameworks, and explains findings through a grounded AI — every claim it makes cites a
+stored observation, enforced by the database, not by convention.
 
 It ships **two ways from one codebase**:
 
-- **Hosted SaaS** — a multi-tenant control plane we run on Supabase; customers connect in minutes.
-- **On-prem / self-hosted** — a regulated customer runs the *entire* stack (self-hosted Supabase + our services) in their own environment; nothing leaves their network.
+- **Hosted SaaS** — a multi-tenant control plane on Supabase.
+- **On-prem / self-hosted** — the entire stack in the customer's environment. *Written but
+  unproven: `deploy/onprem/` validates and has never been booted. See
+  [docs/STATUS.md](docs/STATUS.md) before deploying it.*
 
-Because the systems being scanned live in private networks with no cloud-API equivalent (there's no `AssumeRole` that returns a Kafka ACL), the **primary** collection path is a lightweight **customer-side Collector** that reads systems locally, keeps their credentials and raw data in the customer's network, and sends only findings outward over an outbound-only channel. Managed middleware (MSK, API Gateway, hosted MCP) can optionally be reached agentlessly via a cross-account read-only role — no install — for a first finding in minutes.
+Collection is read-only, always, over two paths:
 
-**Positioning:** we don't sell "middleware security" as a category (no budget line yet). The wedge is **Non-Human Identity + integration posture** — the OAuth tokens, service accounts, connectors, and MCP tools across your brokers, iPaaS, gateways, meshes, and agent gateways that Wiz/Salt/CNAPP can't see — with **MCP/agent-gateway security as the fast-growing land-grab** and the Salesloft Drift breach as the cold-open.
+- A **customer-side Collector** for private systems (there's no cloud API that returns a
+  self-hosted Kafka's ACLs): credentials and raw config stay in the customer's network; only
+  findings and resource metadata leave, outbound-only. *Both ends of this loop exist in code; a
+  full round trip has not yet been observed — see STATUS.md.*
+- An **agentless path via a cross-account read-only role — true today for AWS, and only AWS**:
+  one `AssumeRole` connection scans SQS, SNS, EventBridge, MSK, and API Gateway across regions
+  with List/Get/Describe calls only. No other provider has an agentless path yet (Azure and GCP
+  are on the roadmap; [docs/coverage-matrix.md](docs/coverage-matrix.md) is the honest list).
+
+**Positioning:** we don't sell "middleware security" as a category (no budget line exists). The
+wedge is **Non-Human Identity + integration posture** — the service accounts, OAuth clients, ACL
+principals, and MCP tools across brokers, gateways, meshes, and agent infrastructure that
+CNAPP/API-security tools can't see — with the cross-layer graph as the long-term moat.
 
 ## What it does
 
-**This table is the target product, not a description of the code.** Read the Status column, not
-the prose — three of these seven rows have no code at all today. The per-phase breakdown is
-**[docs/STATUS.md](docs/STATUS.md)**; where the two disagree, STATUS.md is right.
+**Read the Status column, not the prose** — this table is the target product, and two of its
+seven rows still have no code. The per-phase breakdown is **[docs/STATUS.md](docs/STATUS.md)**;
+where the two disagree, STATUS.md is right.
 
 | Capability | What it does | Status |
 |---|---|---|
-| **Discovery** | Inventories every broker, topic, gateway, route, mesh service, iPaaS recipe, credential, and MCP tool, and maps how they connect. | ⚠️ **Partial** — resource kinds across Kafka/Kong/RabbitMQ/Redis/MCP, **now including derived `identity`/`credential`/`grant` kinds** and data-classified resources. No mesh service or iPaaS recipe kind yet. Kafka/Kong/RabbitMQ/Redis/MCP emit graph edges, including credential→identity and grant→resource. |
-| **Posture** | Scores each asset against a security benchmark (Kafka ACLs, Kong auth, Redis auth, Istio mTLS, …) into findings with severity and remediation. | ✅ **Built** for Kafka, Kong, RabbitMQ, Redis, MCP — 85 detectors, severity + remediation. Plus NHI + data-classification cross-cutting packs and a posture-score dashboard. **No Istio.** |
-| **Identity** | Inventories non-human identities and OAuth grants; flags over-scoped, stale, or leaked credentials and their blast radius. | ✅ **Built (v1).** Normalized NHI model (identity/credential/grant) derived across all 5 connectors, a cross-system `/identities` inventory, and OWASP-NHI-Top-10 detectors (wildcard grants, default/shared identities, weak-hash credentials). Credentials are metadata only. *Gap: no usage/staleness telemetry or third-party-OAuth blast radius yet.* |
-| **Supply chain** | SBOM + CVE scan of connectors/images/deps; static analysis of integration-as-code (DataWeave, gateway policies, workflow JSON, MCP manifests). | ❌ **Not built.** No SBOM, no CVE scan, no IaC static analysis. (Some RabbitMQ rules read a version string — a version check, not a CVE scan.) |
-| **Compliance** | Maps findings to PCI DSS 4.0.1, DORA, HIPAA, NIS2; generates audit evidence and the DORA Article 28 register. | ⚠️ **Mapping only.** The PCI/DORA/HIPAA/NIS2 mapping is written and sourced, but **nothing calls the evaluator**, so the `controls` table is always empty and the compliance page renders empty. No Article 28 register, no OSCAL export. |
-| **MCP security** | Discovers MCP servers/tools and agent gateways; scans for tool-poisoning and auth-spec violations; ties each tool to the middleware it wraps. | ⚠️ **Mostly built** — 19 rules: tool-poisoning, auth-spec, transport, session. Spec pinned to `2025-11-25`. "Ties each tool to the middleware it wraps" needs the graph and is **not** done. |
-| **Runtime** *(optional)* | In-cluster sensor for east-west traffic, egress anomalies, and attack paths. | ❌ **Not built.** No sensor. |
+| **Discovery** | Inventories brokers, topics, gateways, routes, mesh policies, cloud messaging, MCP tools, and how they connect. | ⚠️ **Partial** — resource kinds + graph edges across all 7 connectors (Kafka now emits broker→topic edges too), plus derived identity/credential/grant kinds and data-classified resources. No iPaaS recipe kind; no auto-discovery of estates (you connect what you name). |
+| **Posture** | Scores each asset against deterministic detectors with severity, evidence, and remediation. | ✅ **Built** — **129 detectors over 7 connectors**: Kafka, Kong, RabbitMQ, Redis, MCP, **AWS** (SQS/SNS/EventBridge/MSK/API Gateway), **Kubernetes** (Istio/Linkerd/Gateway API/Ingress/RBAC). Continuous: per-connection scheduled rescans (DB-side pg_cron) + posture trend history. Rules that cannot read their evidence file an honest `not_assessable` state — never a silent pass. |
+| **Identity (NHI)** | Inventories non-human identities, credentials, and grants; flags over-scoped, default, weak. | ✅ **Built (v1)** — normalized identity/credential/grant model derived from **all 7 connectors** (ACL principals, consumers, service users, OAuth clients, IAM policy principals, ServiceAccounts+RBAC), cross-system `/identities` inventory, OWASP-NHI-aligned detectors. Credentials are metadata only — no secret value is ever read or stored. *Gap: no usage/staleness telemetry yet.* |
+| **Supply chain** | SBOM + CVE scan; static analysis of integration-as-code. | ❌ **Not built.** Version-floor rules exist (RediShell, Kong CVEs, RabbitMQ series) — version checks, not a CVE scanner. |
+| **Compliance** | Maps findings to PCI DSS 4.0.1, DORA, HIPAA, and the MCP spec; human attestation for passes. | ✅ **Wired** — `evaluate()` runs in the same transaction as every scan; a control shows `fail` from findings, `unknown` from coverage gaps, and `pass` **only** from a human attestation (a live failing finding beats a signature). No OSCAL export or Article 28 register yet. |
+| **MCP security** | Discovers MCP servers/tools; scans for tool poisoning, auth-spec and transport violations, session hygiene. | ✅ **Built** — 24 rules, speaking **both protocol generations**: the 2026-07-28 stateless revision (`server/discover`) first, with fallback to ≤ 2025-11-25 `initialize`, plus lifecycle rules that flag servers stuck on the superseded spec. No fleet discovery or registry/rug-pull tracking yet. |
+| **Runtime** *(optional)* | In-cluster sensor for east-west traffic and attack paths. | ❌ **Not built.** |
 
 ## Architecture (one line)
 
-A Supabase-backed control plane (Postgres + RLS multi-tenancy, Auth/SSO, Storage, Realtime, `pgmq` queue, Vault) + a Python **engine** (connectors, deterministic detectors, grounded AI, compliance) + a customer-side **Collector** for private systems. Runs as multi-tenant SaaS or fully on-prem from the same artifacts. Credentials for private systems never leave the customer's environment.
-
-*That is the target. Postgres + RLS, Auth (email+password sign-in), and `pgmq` are real today; SSO, Storage, and Vault are not, and the Collector cannot yet reach the control plane. The on-prem path is **written but unproven**: `deploy/onprem/` is a complete 8-service self-hosted stack (Postgres, auth, rest, realtime, engine, web, Caddy) plus a Helm chart, and its compose file validates — but nobody has ever booted it, so treat it as untested. See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for what is built and **[docs/STATUS.md](docs/STATUS.md)** for the gap.*
+A Supabase control plane (Postgres + FORCE-RLS multi-tenancy, Auth, **Vault** for connection
+credentials, Realtime, `pgmq` queue, `pg_cron` scheduler) + a Python **engine** (connectors,
+detectors, NHI derivation, grounded AI, compliance) + a queue **worker** + a customer-side
+**Collector** for private systems. The database enforces the integrity guarantees itself: an AI
+output cannot commit without citing evidence, and the evidence ledger is append-only and
+hash-chained. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** is the real map.
 
 ## Docs
 
 | Doc | What's in it |
 |---|---|
-| **[docs/vectasec-build-plan.md](docs/vectasec-build-plan.md)** | The plan: product critique, market analysis, target architecture, credential/trust model, data model, pricing hypothesis, phases. |
-| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How the code that exists actually works. Start here on day one. |
-| **[docs/STATUS.md](docs/STATUS.md)** | What is done, partial, and not built — mapped to the plan's phases, with the known gaps named. |
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How the code that exists actually works — auth matrix, Vault flow, scan pipeline, scheduler. Start here on day one. |
+| **[docs/STATUS.md](docs/STATUS.md)** | What is done, partial, and not built, with every claim pointing at a file. Where anything disagrees, STATUS.md is right. |
+| **[docs/coverage-matrix.md](docs/coverage-matrix.md)** | The falsifiable coverage matrix: per connector — what it reads, what it emits, every rule pack's honest caveats, and the not-yet-supported list. |
+| **[docs/vectasec-v4-blueprint.md](docs/vectasec-v4-blueprint.md)** | The verdict on this codebase and the complete-product blueprint: market bar, connector roadmap, execution order. |
+| **[docs/vectasec-build-plan.md](docs/vectasec-build-plan.md)** | The original plan: architecture, trust model, data model, phases. |
 | **[docs/research/](docs/research/)** | Sourced research behind the rulepacks, compliance mapping, and console UX. |
 
 ## Status
 
-Phase 0 is substantially done; parts of Phase 1–3 were built out of order (the rulepacks ran ahead of the plumbing). **[docs/STATUS.md](docs/STATUS.md)** is the honest, per-phase breakdown. The short version:
+**[docs/STATUS.md](docs/STATUS.md)** (as of 2026-07-23) is the honest breakdown. The short version:
 
-**Works end to end today.** Two proven paths to the same result. Console: sign in → **Connections → Connect a system** (form) → the first scan queues on `pgmq`, `vectasec worker` runs it, and findings with cited observations land live on the page. CLI: `docker compose up` the misconfigured dev targets → `vectasec scan` → `vectasec findings`. Both verified against the live Supabase project with Kafka and RabbitMQ targets.
+**Works end to end today.** Console: sign in → Connections → connect a system → the scan queues on
+`pgmq`, the worker runs it, findings with cited observations land on the page. CLI:
+`docker compose up` the misconfigured dev targets → `vectasec scan` → `vectasec findings`.
 
-- 5 read-only connectors (`kafka`, `kong`, `rabbitmq`, `redis`, `mcp`) and 85 detectors
-- **Non-Human Identity (NHI) inventory** — a normalized identity/credential/grant model derived across every connector (Kafka ACL principals, Kong consumers, RabbitMQ users, Redis ACL users, MCP OAuth clients), a cross-system `/identities` view, and OWASP-NHI-Top-10 detectors. Credentials are metadata only — a secret's value is never read or stored.
-- **Data classification (DSPM)** — data-carrying resources are tagged by inferred sensitivity (PCI/PHI/PII/secrets) from naming, with the toxic-combination rule `DATA.EXPOSURE.SENSITIVE_PLAINTEXT` firing **critical** when regulated data rides a plaintext, unauthenticated broker
-- **Posture dashboard** — an Overview with a posture score (grounded in the raw counts), coverage-gap honesty, NHI + sensitive-data lenses, a "do this now" list, and a compliance strip; `vectasec posture` / `vectasec identities` for the CLI
-- Connect-and-scan from **either surface**: the console form (per-connector fields declared by the connector itself, served at `GET /connectors`) or `vectasec connections add` / `vectasec scan --connection <name>`; per-connection **Scan now / Test / Remove** in the UI; scan history at `/scans` and `vectasec scans`
-- A queue worker (`vectasec worker`) that drains `pgmq`, adopts queued scan rows, retries with poison-message capping, and reaps scans stuck `running`
-- A passing offline unit suite (`uv run pytest` in `services/engine` and `services/collector`) — detector, redaction, scan-logic and AI-citation-gate level, plus CI jobs for cross-tenant RLS and the integrity triggers; see gaps below
-- Schema with `FORCE RLS` on 18 tenant tables; the citation gate (no `ai_output` commits without citing an observation of its own tenant) and the append-only evidence ledger (`observations` and `audit_log` reject UPDATE) are enforced by Postgres triggers, not by application code — and attacked in CI, including via the engine's own write path. What the ledger does **not** stop is DELETE, so a holder of the engine's DB credential can still delete-and-reinsert an observation; see [docs/STATUS.md](docs/STATUS.md) *Known gaps*
-- Grounded AI triage: structured-output citations, range-checked, with a deterministic fallback and a fingerprint cache
-- FastAPI engine for actions (connections / scans / status / assign / suppress / triage / attest), one audit row per mutation, in the same transaction
-- Next.js console: server-rendered, reads Supabase under RLS, forwards every mutation to the engine with a revocation-checked actor
+- **7 read-only connectors, 129 detectors** (counted from the live registry: `vectasec rules`) —
+  see [the coverage matrix](docs/coverage-matrix.md)
+- **Agentless AWS**: one cross-account read-only role → SQS, SNS, EventBridge, MSK, API Gateway
+- **Kubernetes/mesh posture**: one cluster read → Istio, Linkerd, Gateway API, Ingress, RBAC, NHI
+- **Continuous scanning**: per-connection cadence, queued by `pg_cron` in the database; posture
+  trend history (`posture_snapshots`) with a sparkline on the Overview
+- **Verified-token engine auth**: Supabase JWTs (public JWKS) or a scoped engine service token;
+  self-asserted headers are a dev-only opt-in, **default off**
+- **Connection credentials in Supabase Vault** — `connections.config` holds metadata only;
+  secrets are split out per the connector's own field declarations and merged back in memory at
+  scan time
+- **NHI inventory** across every connector; **data classification** with the toxic-combination
+  rule (sensitive-named data on an unauthenticated plaintext broker → critical)
+- **Compliance evaluated per scan** with human attestation for passes; append-only,
+  **hash-chained** evidence ledger; citation-gated AI triage with a model fallback chain
+- Postgres-enforced tenancy: FORCE RLS, SELECT-only browser role, audit row per mutation in the
+  same transaction
 
-**Not built yet.** Named plainly because the plan is not the product:
+**Not proven yet** — named plainly because the plan is not the product:
 
-- **Engine API auth is self-asserted headers** (dev stand-in, binds to localhost). Any caller can name any tenant and any actor. The console is the only trustworthy caller; do not expose the engine.
-- **Connection credentials live in `connections.config` as plain JSONB** — the Vault-backed `creds_ref` path is unbuilt. The browser can never read them (no console query selects `config`), but a DB-credential holder can.
-- **Collector round trip is unproven** — the `/collector/*` control-plane endpoints exist and the agent's code and tests exist, but a real collector process has not yet completed enroll → poll → scan → push against them.
-- **No Identity / NHI capability at all** — no non-human-identity inventory, no OAuth-grant blast radius, no workload-identity audit. This is the wedge in the positioning line above and it has zero code.
-- **No supply chain capability at all** — no SBOM, no CVE scan, no integration-as-code static analysis (DataWeave, gateway policies, workflow JSON).
-- **No DORA Article 28 register and no OSCAL export.**
-- **No runtime sensor** — the optional Runtime row is unstarted.
-- **No Istio, iPaaS, or mesh connectors** — the 5 connectors are Kafka, Kong, RabbitMQ, Redis, MCP. (Fully-scoped, cited check-lists for NATS, Istio/Linkerd/Consul, n8n/MuleSoft/Boomi and more are in [docs/research/middleware-security-platform-capabilities.md](docs/research/middleware-security-platform-capabilities.md).)
-- **The Kafka connector emits no graph edges**, so blast radius on the one end-to-end target is a single node.
-- No agentless cross-account role, no Slack/Jira, no SSO/RBAC, no SOC 2.
-- **The on-prem path is config-validated but never booted** — `deploy/onprem/` has Compose + a Helm chart that lint clean, but the stack has never been started and it ships with the self-asserted-header cross-tenant hole above. See [deploy/onprem/README.md](deploy/onprem/README.md) before deploying anything.
+- **The collector round trip has never been observed** (both ends exist in code)
+- **The on-prem stack has never been booted** (config-validated only — and written before the
+  auth rework; read `deploy/onprem/README.md` first)
+- **CI has never been seen green on GitHub**
+- **No SSO/SAML/SCIM**, no Slack/Jira/SIEM out (in progress), no iPaaS or Azure/GCP connectors
+  yet, no SBOM/CVE scanning, no runtime sensor, **no SOC 2, no design partner, no customer**
 
 ## Quickstart
 
-Gets you from clone to a cited finding. ~5 minutes.
+Clone to a cited finding, ~5 minutes.
 
 ### Prerequisites
 
-- **Docker** — runs the dev scan target
+- **Docker** — the dev scan targets
 - **[uv](https://docs.astral.sh/uv/)** — the engine is a Python 3.12 uv project
-- **Postgres 17** — a [Supabase](https://supabase.com) project (free tier is fine) or self-hosted Supabase. `pgmq` and `pg_cron` must be available.
-- **Node 20+ / pnpm 9** — only if you want the console
+- **Postgres 17** via [Supabase](https://supabase.com) (free tier fine) or self-hosted.
+  `pgmq`, `pg_cron`, and `supabase_vault` must be available.
+- **Node 20+ / pnpm 9** — only for the console
 
 ### 1. Environment
 
@@ -93,31 +123,35 @@ Gets you from clone to a cited finding. ~5 minutes.
 cp .env.example .env
 ```
 
-Fill in `DATABASE_URL` (Supabase → Settings → Database) and the `SUPABASE_*` values. `ANTHROPIC_API_KEY` is optional — without it the AI layer runs its deterministic fallback and nothing else changes. `.env` is gitignored; never commit it.
-
-The `vectasec` CLI and the engine API find `.env` by searching upward from the working directory, so they work from `services/engine`. Only those two entry points load it: importing `vectasec` as a library does not touch `os.environ`, because the Collector imports the engine and reads its own security posture from the environment (see `services/engine/src/vectasec/config.py`).
+Fill in `DATABASE_URL` and the `SUPABASE_*` values. `ANTHROPIC_API_KEY` is optional — without it
+AI triage runs its deterministic fallback. For the console flow, also set `VECTASEC_ENGINE_TOKEN`
+to a random secret in both the engine's environment and `apps/web/.env.local` — the engine
+requires a verified token by default (see step 7).
 
 ### 2. Apply the schema
 
-Apply every migration in `supabase/migrations/` in filename order against your database — via the Supabase SQL editor, `psql`, or `supabase db push`. The first two are the load-bearing ones:
+Apply every migration in `supabase/migrations/` in filename order (SQL editor, `psql`, or
+`supabase db push`):
 
 ```
-supabase/migrations/20260717000001_core_schema.sql     # tenancy, inventory, graph, scans, findings, evidence
-supabase/migrations/20260717000002_platform_schema.sql # platform tables, pgmq/pg_cron, RLS hardening, the two integrity triggers
-supabase/migrations/2026071700000{3..8}_*.sql          # fixes + facets + citation-gate completeness + compliance unknown-state
+20260717000001_core_schema.sql        # tenancy, inventory, graph, scans, findings, evidence
+20260717000002_platform_schema.sql    # platform tables, pgmq/pg_cron, RLS, integrity triggers
+20260717000003..8                     # fixes, facets, citation-gate completeness, attestations,
+                                      # assessability, realtime, hash chain
+20260723000001_scheduler_trend.sql    # continuous scanning + posture history
+20260723000002_vault_creds.sql        # credentials → Supabase Vault (backfills existing rows)
 ```
 
-`001` seeds a Demo tenant (`00000000-0000-0000-0000-000000000001`) that the CLI defaults to, so you can scan before you have any users.
+`001` seeds a Demo tenant the CLI defaults to, so you can scan before you have users.
 
 ### 3. Start the dev targets
-
-A single-node Kafka and a RabbitMQ wired with real, deliberate misconfigurations — each one annotated with the rule it should trigger. They are the fixture for the end-to-end proof, not a deployment of VectaSec.
 
 ```bash
 docker compose -f deploy/dev/docker-compose.yml up -d
 ```
 
-Kafka seeds topics (`payments`, `customer-pii`, `orders`, …); RabbitMQ ships the default `guest` user with remote login deliberately enabled. Healthy in ~30s.
+A deliberately misconfigured Kafka, RabbitMQ, and Redis — each bad value annotated with the rule
+it should trigger. Healthy in ~30s.
 
 ### 4. Check the wiring
 
@@ -126,57 +160,65 @@ cd services/engine
 uv run vectasec doctor
 ```
 
-Expect 5 connectors, 85 detectors, a connected database, and `pgmq, pg_cron` present. If this is unhappy, nothing below will work.
+Expect **7 connectors, 129 detectors**, a connected database, `pgmq, pg_cron` present.
 
 ### 5. Scan (CLI path)
 
 ```bash
-# save a connection, then scan it by name — this is what the console's buttons do too
 uv run vectasec connections add --type kafka --name dev-kafka --bootstrap localhost:9092
 uv run vectasec scan --connection dev-kafka
 
-# or ad-hoc (saves the connection as a side effect)
+# or ad-hoc; secret fields (passwords, tokens) go to Vault, never into connections.config
 uv run vectasec scan --type rabbitmq --url http://localhost:15672 --username guest --password guest
 ```
 
-The whole scan is one transaction: resources and edges upsert, every detector runs against every matching resource, and each finding writes its triggering observation to the evidence ledger alongside it. Findings dedupe on a fingerprint of `(tenant, connection, rule_id, ext_id)`, so re-running this is idempotent and never resurrects a finding a human resolved.
+One transaction per scan: resources and edges upsert, every matching detector runs, each finding
+commits with its cited observation. Findings dedupe on a fingerprint, so re-running is idempotent
+and never resurrects what a human resolved.
 
 ### 6. See what it found
 
 ```bash
-uv run vectasec findings      # findings for the tenant, worst first, with evidence counts
-uv run vectasec connections   # the estate: every connection, health, resources, open findings
-uv run vectasec scans         # scan history with status and durations
-uv run vectasec rules         # the loaded rulepack — every rule, severity, and target kind
-uv run vectasec doctor        # engine + database wiring, incl. queue depth
+uv run vectasec findings      # worst first, with evidence counts
+uv run vectasec identities    # the cross-system NHI inventory
+uv run vectasec posture       # the score, beside the raw counts it came from
+uv run vectasec connections   # the estate: health, resources, open findings
+uv run vectasec scans         # history with status and durations
+uv run vectasec rules         # the live rulepack
+uv run vectasec doctor        # wiring, incl. queue depth
 ```
-
-`--json` on `scan` prints the stats blob. `--tenant <uuid>` targets a tenant other than Demo.
 
 ### 7. The engine API + worker (needed for the console flow)
 
-The API takes actions — connections, scans, status, assign, suppress, AI triage — and the worker executes what the API queues.
-
 ```bash
 cd services/engine
-uv run python -m vectasec.api.main   # http://127.0.0.1:8000, /docs for the OpenAPI UI
-uv run vectasec worker               # in a second terminal: drains the pgmq scan queue
+uv run python -m vectasec.api.main   # http://127.0.0.1:8000, /docs for OpenAPI
+uv run vectasec worker               # second terminal: drains the pgmq scan queue
 ```
 
-(`python -m vectasec.api.main`, not bare `uvicorn` — the module entry point is what loads `.env`.) The API binds to localhost on purpose: it holds a `BYPASSRLS` database connection and its auth is a self-asserted header. Do not expose it. A scan queued from the console sits `queued` until the worker (or an enrolled collector, for collector-mode connections) picks it up — `vectasec doctor` shows the queue.
+(`python -m vectasec.api.main`, not bare `uvicorn` — the module entry point loads `.env`.)
+The API accepts **verified tokens only** by default: a Supabase user JWT, or the
+`VECTASEC_ENGINE_TOKEN` service token for the console's server side (pin it to one tenant with
+`VECTASEC_ENGINE_TOKEN_TENANT`). The old self-asserted-header mode exists solely behind
+`VECTASEC_DEV_TRUST_HEADERS=1`, is off by default, and warns loudly when enabled. The API still
+binds localhost by default — it holds a BYPASSRLS database connection; keep it off untrusted
+networks regardless.
 
 ### 8. The console
 
 ```bash
 cd apps/web
-cp .env.example .env.local     # NEXT_PUBLIC_SUPABASE_URL + NEXT_PUBLIC_SUPABASE_ANON_KEY only
+cp .env.example .env.local     # Supabase URL + anon key; add VECTASEC_ENGINE_TOKEN (see step 1)
 pnpm install
 pnpm dev                       # http://localhost:3000
 ```
 
-Sign in (email + password via Supabase Auth; the user needs a `tenant_members` row), then **Connections → + Connect a system**: pick a connector, fill its fields, and the first scan queues immediately. Watch it run on **Scans** (the page polls while anything is in flight), then work the queue on **Findings**. Every mutation — connect, scan, test, remove, triage — goes through the engine API with a revocation-checked actor and lands in the audit log.
-
-The console never receives `SUPABASE_SERVICE_ROLE_KEY` or `DATABASE_URL`. It reads Postgres as `authenticated` (SELECT-only, RLS-scoped) and forwards every mutation to the engine API. Connection credentials pass through a Server Action to the engine and are never readable from the browser afterwards.
+Sign in (email + password; the user needs a `tenant_members` row), then **Connections →
++ Connect a system**. Watch the scan on **Scans**, work the queue on **Findings**, see the estate
+on **Assets** and **Identities**. The console never receives `SUPABASE_SERVICE_ROLE_KEY` or
+`DATABASE_URL`: it reads Postgres as `authenticated` (SELECT-only, RLS-scoped) and forwards every
+mutation to the engine with a server-verified actor. Connection secrets pass through a Server
+Action to the engine, land in Vault, and are never readable from the browser afterwards.
 
 ### Running the tests
 

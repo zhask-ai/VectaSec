@@ -1,0 +1,348 @@
+{
+  "subscription_id": "11111111-1111-1111-1111-111111111111",
+  "client_id": "22222222-2222-2222-2222-222222222222",
+  "servicebus": {
+    "namespaces": [
+      {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-msg/providers/Microsoft.ServiceBus/namespaces/sb-open",
+        "name": "sb-open",
+        "location": "eastus",
+        "sku": {"name": "Standard", "tier": "Standard"},
+        "properties": {
+          "publicNetworkAccess": "Enabled",
+          "disableLocalAuth": false,
+          "minimumTlsVersion": "1.1",
+          "privateEndpointConnections": [],
+          "serviceBusEndpoint": "https://sb-open.servicebus.windows.net:443/"
+        }
+      },
+      {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-msg/providers/Microsoft.ServiceBus/namespaces/sb-hardened",
+        "name": "sb-hardened",
+        "location": "eastus",
+        "sku": {"name": "Premium", "tier": "Premium"},
+        "properties": {
+          "publicNetworkAccess": "Disabled",
+          "disableLocalAuth": true,
+          "minimumTlsVersion": "1.2",
+          "privateEndpointConnections": [
+            {"id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-msg/providers/Microsoft.ServiceBus/namespaces/sb-hardened/privateEndpointConnections/pe-1"}
+          ],
+          "serviceBusEndpoint": "https://sb-hardened.servicebus.windows.net:443/"
+        }
+      }
+    ],
+    "authorization_rules": {
+      "sb-open": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-msg/providers/Microsoft.ServiceBus/namespaces/sb-open/authorizationRules/RootManageSharedAccessKey",
+          "name": "RootManageSharedAccessKey",
+          "properties": {"rights": ["Listen", "Send", "Manage"]}
+        },
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-msg/providers/Microsoft.ServiceBus/namespaces/sb-open/authorizationRules/producer-send",
+          "name": "producer-send",
+          "properties": {"rights": ["Send"]}
+        }
+      ],
+      "sb-hardened": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-msg/providers/Microsoft.ServiceBus/namespaces/sb-hardened/authorizationRules/consumer-listen",
+          "name": "consumer-listen",
+          "properties": {"rights": ["Listen"]}
+        }
+      ]
+    },
+    "queues": {
+      "sb-open": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-msg/providers/Microsoft.ServiceBus/namespaces/sb-open/queues/orders",
+          "name": "orders",
+          "properties": {
+            "status": "Active",
+            "deadLetteringOnMessageExpiration": false,
+            "maxDeliveryCount": 10,
+            "requiresDuplicateDetection": false,
+            "requiresSession": false
+          }
+        }
+      ],
+      "sb-hardened": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-msg/providers/Microsoft.ServiceBus/namespaces/sb-hardened/queues/payments",
+          "name": "payments",
+          "properties": {
+            "status": "Active",
+            "deadLetteringOnMessageExpiration": true,
+            "maxDeliveryCount": 5,
+            "requiresDuplicateDetection": true,
+            "requiresSession": false
+          }
+        }
+      ]
+    },
+    "topics": {
+      "sb-open": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-msg/providers/Microsoft.ServiceBus/namespaces/sb-open/topics/events",
+          "name": "events",
+          "properties": {
+            "status": "Active",
+            "requiresDuplicateDetection": false,
+            "supportOrdering": true
+          }
+        }
+      ]
+    }
+  },
+  "eventhub": {
+    "namespaces": [
+      {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-stream/providers/Microsoft.EventHub/namespaces/eh-open",
+        "name": "eh-open",
+        "location": "eastus",
+        "sku": {"name": "Standard", "tier": "Standard"},
+        "properties": {
+          "publicNetworkAccess": "Enabled",
+          "disableLocalAuth": false,
+          "minimumTlsVersion": "1.0",
+          "kafkaEnabled": true,
+          "privateEndpointConnections": []
+        }
+      },
+      {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-stream/providers/Microsoft.EventHub/namespaces/eh-hardened",
+        "name": "eh-hardened",
+        "location": "eastus",
+        "sku": {"name": "Premium", "tier": "Premium"},
+        "properties": {
+          "publicNetworkAccess": "Disabled",
+          "disableLocalAuth": true,
+          "minimumTlsVersion": "1.2",
+          "kafkaEnabled": true,
+          "privateEndpointConnections": [
+            {"id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-stream/providers/Microsoft.EventHub/namespaces/eh-hardened/privateEndpointConnections/pe-2"}
+          ]
+        }
+      }
+    ],
+    "authorization_rules": {
+      "eh-open": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-stream/providers/Microsoft.EventHub/namespaces/eh-open/authorizationRules/RootManageSharedAccessKey",
+          "name": "RootManageSharedAccessKey",
+          "properties": {"rights": ["Listen", "Send", "Manage"]}
+        }
+      ],
+      "eh-hardened": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-stream/providers/Microsoft.EventHub/namespaces/eh-hardened/authorizationRules/telemetry-listen",
+          "name": "telemetry-listen",
+          "properties": {"rights": ["Listen"]}
+        }
+      ]
+    },
+    "hubs": {
+      "eh-open": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-stream/providers/Microsoft.EventHub/namespaces/eh-open/eventhubs/telemetry",
+          "name": "telemetry",
+          "properties": {
+            "status": "Active",
+            "partitionCount": 4,
+            "messageRetentionInDays": 7,
+            "captureDescription": {
+              "enabled": true,
+              "destination": {
+                "name": "EventHubArchive.AzureBlockBlob",
+                "properties": {
+                  "storageAccountResourceId": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-stream/providers/Microsoft.Storage/storageAccounts/capturesa",
+                  "blobContainer": "capture"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "eh-hardened": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-stream/providers/Microsoft.EventHub/namespaces/eh-hardened/eventhubs/audit",
+          "name": "audit",
+          "properties": {
+            "status": "Active",
+            "partitionCount": 2,
+            "messageRetentionInDays": 1,
+            "captureDescription": {"enabled": false}
+          }
+        }
+      ]
+    },
+    "consumer_groups": {
+      "telemetry": [
+        {"name": "$Default"},
+        {"name": "analytics"}
+      ],
+      "audit": [
+        {"name": "$Default"}
+      ]
+    },
+    "storage_accounts": {
+      "capturesa": {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-stream/providers/Microsoft.Storage/storageAccounts/capturesa",
+        "name": "capturesa",
+        "properties": {
+          "allowBlobPublicAccess": true,
+          "publicNetworkAccess": "Enabled"
+        }
+      },
+      "lockedsa": {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-stream/providers/Microsoft.Storage/storageAccounts/lockedsa",
+        "name": "lockedsa",
+        "properties": {
+          "allowBlobPublicAccess": false,
+          "publicNetworkAccess": "Disabled"
+        }
+      }
+    }
+  },
+  "apim": {
+    "services": [
+      {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-api/providers/Microsoft.ApiManagement/service/apim-legacy",
+        "name": "apim-legacy",
+        "location": "eastus",
+        "sku": {"name": "Developer", "capacity": 1},
+        "properties": {
+          "publicNetworkAccess": "Enabled",
+          "virtualNetworkType": "None",
+          "gatewayUrl": "https://apim-legacy.azure-api.net",
+          "publicIPAddresses": ["20.1.2.3"],
+          "customProperties": {
+            "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Protocols.Tls10": "True",
+            "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Protocols.Tls11": "False",
+            "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Ciphers.TripleDes168": "True",
+            "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Backend.Protocols.Tls10": "False"
+          }
+        }
+      },
+      {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-api/providers/Microsoft.ApiManagement/service/apim-hardened",
+        "name": "apim-hardened",
+        "location": "eastus",
+        "sku": {"name": "Premium", "capacity": 1},
+        "properties": {
+          "publicNetworkAccess": "Enabled",
+          "virtualNetworkType": "Internal",
+          "gatewayUrl": "https://apim-hardened.azure-api.net",
+          "publicIPAddresses": [],
+          "customProperties": {
+            "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Protocols.Tls10": "False",
+            "Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Protocols.Tls11": "False"
+          }
+        }
+      }
+    ],
+    "apis": {
+      "apim-legacy": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-api/providers/Microsoft.ApiManagement/service/apim-legacy/apis/orders-api",
+          "name": "orders-api",
+          "properties": {
+            "displayName": "Orders",
+            "path": "orders",
+            "protocols": ["https"],
+            "subscriptionRequired": true,
+            "authenticationSettings": {"oAuth2": null, "openid": null}
+          }
+        },
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-api/providers/Microsoft.ApiManagement/service/apim-legacy/apis/secure-api",
+          "name": "secure-api",
+          "properties": {
+            "displayName": "Secure",
+            "path": "secure",
+            "protocols": ["https"],
+            "subscriptionRequired": true,
+            "authenticationSettings": {"oAuth2": {"authorizationServerId": "entra-id"}}
+          }
+        }
+      ],
+      "apim-hardened": []
+    },
+    "named_values": {
+      "apim-legacy": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-api/providers/Microsoft.ApiManagement/service/apim-legacy/namedValues/backend-key",
+          "name": "backend-key",
+          "properties": {"displayName": "backend-key", "secret": true}
+        },
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-api/providers/Microsoft.ApiManagement/service/apim-legacy/namedValues/env-name",
+          "name": "env-name",
+          "properties": {"displayName": "env-name", "secret": false}
+        }
+      ],
+      "apim-hardened": []
+    },
+    "subscriptions": {
+      "apim-legacy": [
+        {
+          "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-api/providers/Microsoft.ApiManagement/service/apim-legacy/subscriptions/ci-pipeline",
+          "name": "ci-pipeline",
+          "properties": {"displayName": "CI pipeline", "scope": "/apis", "state": "active"}
+        }
+      ],
+      "apim-hardened": []
+    }
+  },
+  "logic": {
+    "workflows": [
+      {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-flow/providers/Microsoft.Logic/workflows/wf-open",
+        "name": "wf-open",
+        "location": "eastus",
+        "properties": {
+          "state": "Enabled",
+          "definition": {
+            "triggers": {
+              "manual": {"type": "Request", "kind": "Http"}
+            }
+          },
+          "accessControl": {}
+        }
+      },
+      {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-flow/providers/Microsoft.Logic/workflows/wf-restricted",
+        "name": "wf-restricted",
+        "location": "eastus",
+        "properties": {
+          "state": "Enabled",
+          "definition": {
+            "triggers": {
+              "manual": {"type": "Request", "kind": "Http"}
+            }
+          },
+          "accessControl": {
+            "triggers": {
+              "allowedCallerIpAddresses": [{"addressRange": "10.0.0.0/24"}]
+            }
+          }
+        }
+      },
+      {
+        "id": "/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-flow/providers/Microsoft.Logic/workflows/wf-disabled",
+        "name": "wf-disabled",
+        "location": "eastus",
+        "properties": {
+          "state": "Disabled",
+          "definition": {
+            "triggers": {
+              "daily": {"type": "Recurrence"}
+            }
+          },
+          "accessControl": {}
+        }
+      }
+    ]
+  }
+}

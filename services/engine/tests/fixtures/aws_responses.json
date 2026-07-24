@@ -1,0 +1,328 @@
+{
+  "_comment": "Golden AWS API response shapes, exactly as boto3 returns them, for the aws connector parse layer. Policy / RedrivePolicy / EventPattern documents are stored as JSON objects for readability; tests re-serialize them to strings before feeding the parse layer, because that is how boto3 delivers them. Account 111111111111 is 'ours'; 222222222222 is a foreign account.",
+  "caller_identity": {
+    "Account": "111111111111",
+    "Arn": "arn:aws:sts::111111111111:assumed-role/vectasec-readonly/vectasec-readonly-scan",
+    "UserId": "AROAEXAMPLE:vectasec-readonly-scan"
+  },
+  "sqs": {
+    "list_queues": {
+      "QueueUrls": [
+        "https://sqs.us-east-1.amazonaws.com/111111111111/orders",
+        "https://sqs.us-east-1.amazonaws.com/111111111111/payments"
+      ]
+    },
+    "attributes": {
+      "orders": {
+        "QueueArn": "arn:aws:sqs:us-east-1:111111111111:orders",
+        "VisibilityTimeout": "30",
+        "Policy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowEveryone",
+              "Effect": "Allow",
+              "Principal": "*",
+              "Action": "sqs:*",
+              "Resource": "arn:aws:sqs:us-east-1:111111111111:orders"
+            }
+          ]
+        }
+      },
+      "payments": {
+        "QueueArn": "arn:aws:sqs:us-east-1:111111111111:payments",
+        "VisibilityTimeout": "60",
+        "SqsManagedSseEnabled": "true",
+        "Policy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowBillingTopic",
+              "Effect": "Allow",
+              "Principal": {"Service": "sns.amazonaws.com"},
+              "Action": "sqs:SendMessage",
+              "Resource": "arn:aws:sqs:us-east-1:111111111111:payments",
+              "Condition": {
+                "ArnEquals": {"aws:SourceArn": "arn:aws:sns:us-east-1:111111111111:billing"}
+              }
+            }
+          ]
+        },
+        "RedrivePolicy": {
+          "deadLetterTargetArn": "arn:aws:sqs:us-east-1:111111111111:payments-dlq",
+          "maxReceiveCount": "5"
+        }
+      }
+    }
+  },
+  "sns": {
+    "list_topics": {
+      "Topics": [
+        {"TopicArn": "arn:aws:sns:us-east-1:111111111111:alerts"},
+        {"TopicArn": "arn:aws:sns:us-east-1:111111111111:billing"}
+      ]
+    },
+    "attributes": {
+      "alerts": {
+        "TopicArn": "arn:aws:sns:us-east-1:111111111111:alerts",
+        "SubscriptionsConfirmed": "1",
+        "Policy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "OpenTopic",
+              "Effect": "Allow",
+              "Principal": {"AWS": "*"},
+              "Action": "sns:*",
+              "Resource": "arn:aws:sns:us-east-1:111111111111:alerts"
+            }
+          ]
+        }
+      },
+      "billing": {
+        "TopicArn": "arn:aws:sns:us-east-1:111111111111:billing",
+        "SubscriptionsConfirmed": "1",
+        "KmsMasterKeyId": "alias/aws/sns",
+        "Policy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "OwnerOnly",
+              "Effect": "Allow",
+              "Principal": {"AWS": "111111111111"},
+              "Action": ["sns:Publish", "sns:Subscribe"],
+              "Resource": "arn:aws:sns:us-east-1:111111111111:billing",
+              "Condition": {"StringEquals": {"AWS:SourceOwner": "111111111111"}}
+            }
+          ]
+        }
+      }
+    },
+    "subscriptions": {
+      "alerts": [
+        {
+          "SubscriptionArn": "arn:aws:sns:us-east-1:111111111111:alerts:11111111-aaaa-bbbb-cccc-000000000001",
+          "Owner": "111111111111",
+          "Protocol": "http",
+          "Endpoint": "http://hooks.example.com/ingest",
+          "TopicArn": "arn:aws:sns:us-east-1:111111111111:alerts"
+        },
+        {
+          "SubscriptionArn": "PendingConfirmation",
+          "Owner": "111111111111",
+          "Protocol": "https",
+          "Endpoint": "https://hooks.example.com/confirmed",
+          "TopicArn": "arn:aws:sns:us-east-1:111111111111:alerts"
+        }
+      ],
+      "billing": [
+        {
+          "SubscriptionArn": "arn:aws:sns:us-east-1:111111111111:billing:11111111-aaaa-bbbb-cccc-000000000002",
+          "Owner": "111111111111",
+          "Protocol": "sqs",
+          "Endpoint": "arn:aws:sqs:us-east-1:111111111111:payments",
+          "TopicArn": "arn:aws:sns:us-east-1:111111111111:billing"
+        }
+      ]
+    }
+  },
+  "events": {
+    "buses": [
+      {"Name": "default", "Arn": "arn:aws:events:us-east-1:111111111111:event-bus/default"},
+      {"Name": "partner", "Arn": "arn:aws:events:us-east-1:111111111111:event-bus/partner"}
+    ],
+    "bus_policies": {
+      "default": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "AllowAnySender",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "events:PutEvents",
+            "Resource": "arn:aws:events:us-east-1:111111111111:event-bus/default"
+          }
+        ]
+      },
+      "partner": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Sid": "PartnerFullControl",
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::222222222222:root"},
+            "Action": "events:*",
+            "Resource": "arn:aws:events:us-east-1:111111111111:event-bus/partner"
+          }
+        ]
+      }
+    },
+    "rules": {
+      "default": [
+        {
+          "Name": "forward-orders",
+          "Arn": "arn:aws:events:us-east-1:111111111111:rule/forward-orders",
+          "State": "ENABLED",
+          "EventBusName": "default",
+          "EventPattern": {"source": ["app.orders"]}
+        }
+      ]
+    },
+    "targets": {
+      "forward-orders": [
+        {
+          "Id": "to-orders-queue",
+          "Arn": "arn:aws:sqs:us-east-1:111111111111:orders",
+          "Input": "{\"note\": \"payload template that must NOT be collected\"}"
+        },
+        {
+          "Id": "to-partner-bus",
+          "Arn": "arn:aws:events:us-east-1:222222222222:event-bus/partner-ingest",
+          "RoleArn": "arn:aws:iam::111111111111:role/eb-cross-account"
+        }
+      ]
+    }
+  },
+  "msk": {
+    "clusters": [
+      {
+        "ClusterArn": "arn:aws:kafka:us-east-1:111111111111:cluster/wide-open/aaaa1111-1",
+        "ClusterName": "wide-open",
+        "ClusterType": "PROVISIONED",
+        "State": "ACTIVE",
+        "Provisioned": {
+          "CurrentBrokerSoftwareInfo": {"KafkaVersion": "3.6.0"},
+          "NumberOfBrokerNodes": 3,
+          "EnhancedMonitoring": "DEFAULT",
+          "BrokerNodeGroupInfo": {
+            "InstanceType": "kafka.m5.large",
+            "ConnectivityInfo": {"PublicAccess": {"Type": "SERVICE_PROVIDED_EIPS"}}
+          },
+          "EncryptionInfo": {
+            "EncryptionAtRest": {"DataVolumeKMSKeyId": "arn:aws:kms:us-east-1:111111111111:key/k-msk"},
+            "EncryptionInTransit": {"ClientBroker": "TLS_PLAINTEXT", "InCluster": false}
+          },
+          "ClientAuthentication": {
+            "Unauthenticated": {"Enabled": true},
+            "Sasl": {"Scram": {"Enabled": false}, "Iam": {"Enabled": false}},
+            "Tls": {"Enabled": false}
+          }
+        }
+      },
+      {
+        "ClusterArn": "arn:aws:kafka:us-east-1:111111111111:cluster/hardened/bbbb2222-1",
+        "ClusterName": "hardened",
+        "ClusterType": "PROVISIONED",
+        "State": "ACTIVE",
+        "Provisioned": {
+          "CurrentBrokerSoftwareInfo": {"KafkaVersion": "3.7.0"},
+          "NumberOfBrokerNodes": 3,
+          "EnhancedMonitoring": "PER_TOPIC_PER_BROKER",
+          "BrokerNodeGroupInfo": {
+            "InstanceType": "kafka.m5.large",
+            "ConnectivityInfo": {"PublicAccess": {"Type": "DISABLED"}}
+          },
+          "EncryptionInfo": {
+            "EncryptionAtRest": {"DataVolumeKMSKeyId": "arn:aws:kms:us-east-1:111111111111:key/k-msk"},
+            "EncryptionInTransit": {"ClientBroker": "TLS", "InCluster": true}
+          },
+          "ClientAuthentication": {
+            "Unauthenticated": {"Enabled": false},
+            "Sasl": {"Scram": {"Enabled": false}, "Iam": {"Enabled": true}},
+            "Tls": {"Enabled": false}
+          }
+        }
+      },
+      {
+        "ClusterArn": "arn:aws:kafka:us-east-1:111111111111:cluster/on-demand/cccc3333-1",
+        "ClusterName": "on-demand",
+        "ClusterType": "SERVERLESS",
+        "State": "ACTIVE",
+        "Serverless": {
+          "Sasl": {"Iam": {"Enabled": true}}
+        }
+      }
+    ]
+  },
+  "apigw_v1": {
+    "api": {
+      "id": "abc123",
+      "name": "legacy-api",
+      "apiKeySource": "HEADER",
+      "endpointConfiguration": {"types": ["REGIONAL"]}
+    },
+    "resources": [
+      {
+        "id": "r-public",
+        "path": "/public",
+        "resourceMethods": {
+          "GET": {"httpMethod": "GET", "authorizationType": "NONE", "apiKeyRequired": false},
+          "OPTIONS": {"httpMethod": "OPTIONS", "authorizationType": "NONE", "apiKeyRequired": false}
+        }
+      },
+      {
+        "id": "r-orders",
+        "path": "/orders",
+        "resourceMethods": {
+          "POST": {"httpMethod": "POST", "authorizationType": "CUSTOM", "authorizerId": "auth1", "apiKeyRequired": false}
+        }
+      },
+      {
+        "id": "r-metrics",
+        "path": "/metrics",
+        "resourceMethods": {
+          "GET": {"httpMethod": "GET", "authorizationType": "NONE", "apiKeyRequired": true}
+        }
+      },
+      {
+        "id": "r-opaque",
+        "path": "/opaque",
+        "resourceMethods": {
+          "GET": {}
+        }
+      }
+    ],
+    "authorizers": [
+      {"id": "auth1", "name": "lambda-token-auth", "type": "TOKEN"}
+    ],
+    "stages": [
+      {
+        "stageName": "prod",
+        "methodSettings": {},
+        "tracingEnabled": false
+      },
+      {
+        "stageName": "hardened",
+        "accessLogSettings": {
+          "destinationArn": "arn:aws:logs:us-east-1:111111111111:log-group:apigw-access",
+          "format": "$context.requestId"
+        },
+        "methodSettings": {"*/*": {"loggingLevel": "INFO", "metricsEnabled": true}},
+        "webAclArn": "arn:aws:wafv2:us-east-1:111111111111:regional/webacl/api-acl/w-1",
+        "tracingEnabled": true
+      }
+    ]
+  },
+  "apigw_v2": {
+    "api": {
+      "ApiId": "h1http",
+      "Name": "events-http",
+      "ProtocolType": "HTTP",
+      "ApiEndpoint": "https://h1http.execute-api.us-east-1.amazonaws.com"
+    },
+    "routes": [
+      {"RouteId": "rt1", "RouteKey": "$default", "AuthorizationType": "NONE"},
+      {"RouteId": "rt2", "RouteKey": "GET /pets", "AuthorizationType": "JWT", "AuthorizerId": "jwt1"}
+    ],
+    "authorizers": [
+      {"AuthorizerId": "jwt1", "Name": "cognito-jwt", "AuthorizerType": "JWT"}
+    ],
+    "stages": [
+      {
+        "StageName": "$default",
+        "AutoDeploy": true,
+        "DefaultRouteSettings": {"DetailedMetricsEnabled": false}
+      }
+    ]
+  }
+}

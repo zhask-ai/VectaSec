@@ -1,6 +1,7 @@
 import type { Route } from 'next';
 import Link from 'next/link';
 
+import { canEdit, getOwnMembership } from '@/lib/role';
 import { createClient } from '@/lib/supabase/server';
 import { SEVERITIES, SEVERITY_RANK, type ControlStatus, type Severity } from '@/lib/types';
 import { Card, CardBody, CardFooter, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
@@ -353,7 +354,7 @@ function Caveat({ children }: { children: React.ReactNode }) {
  * Collapsed by default but the severity spread shows in the summary, so the row is scannable
  * without a click and expandable when it is the row you care about. Native <details> keeps
  * the whole page a Server Component — no client bundle for a disclosure. */
-function Evidence({ control }: { control: Control }) {
+function Evidence({ control, editable }: { control: Control; editable: boolean }) {
   // A passing control is passing on a human's sign-off, never on a scan — so its "evidence" is the
   // attestation provenance, not findings.
   if (control.status === 'pass') {
@@ -368,7 +369,9 @@ function Evidence({ control }: { control: Control }) {
         <span style={{ color: 'var(--text-muted)', fontSize: 'var(--text-2xs)' }}>
           No violation found — but a clean scan is not a pass.
         </span>
-        <AttestControl controlPk={control.id} controlLabel={control.control_id} />
+        {/* Attesting is an accountable sign-off — editor+ only. Viewers still see the honest
+            "unknown" state; they just cannot sign it away. */}
+        {editable && <AttestControl controlPk={control.id} controlLabel={control.control_id} />}
       </div>
     );
   }
@@ -499,7 +502,7 @@ function AttestationProvenance({ attestation }: { attestation: AttestationRef | 
   );
 }
 
-function FrameworkCard({ group }: { group: FrameworkGroup }) {
+function FrameworkCard({ group, editable }: { group: FrameworkGroup; editable: boolean }) {
   const meta = metaFor(group.framework);
 
   return (
@@ -550,7 +553,7 @@ function FrameworkCard({ group }: { group: FrameworkGroup }) {
                 )}
               </TD>
               <TD>
-                <Evidence control={c} />
+                <Evidence control={c} editable={editable} />
               </TD>
               <TD muted>{c.evaluated_at ? relative(c.evaluated_at) : '—'}</TD>
             </TR>
@@ -565,6 +568,10 @@ function FrameworkCard({ group }: { group: FrameworkGroup }) {
 
 export default async function CompliancePage() {
   const data = await getData();
+
+  // Role gates the attest affordance only; every read on this page is RLS-scoped regardless.
+  const membership = await getOwnMembership();
+  const editable = canEdit(membership?.role);
 
   const missingFrameworks =
     data.state === 'ok'
@@ -643,7 +650,8 @@ export default async function CompliancePage() {
         </Card>
       )}
 
-      {data.state === 'ok' && data.groups.map((g) => <FrameworkCard key={g.framework} group={g} />)}
+      {data.state === 'ok' &&
+        data.groups.map((g) => <FrameworkCard key={g.framework} group={g} editable={editable} />)}
 
       {/* Absent frameworks are named rather than silently omitted — but they are NOT rendered
           as empty scorecards, because "PCI: not scored" on a tenant that has no CDE would

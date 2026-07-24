@@ -1,6 +1,7 @@
 import type { Metadata, Route } from 'next';
 import Link from 'next/link';
 import { ScanStrip } from '@/components/ScanStrip';
+import { getOwnMembership, isAdmin } from '@/lib/role';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -28,7 +29,16 @@ const NAV: { href: Route; label: string }[] = [
   { href: '/scans', label: 'Scans' },
 ];
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  // Settings (members, integrations) is tenant administration, so the link renders for admins
+  // only. Hiding it is coherence, not security: /settings pages re-check the role server-side,
+  // and every Settings Server Action re-verifies with getVerifiedUser + a fresh role read.
+  // On /login (no session) this resolves null and the nav simply has no Settings entry.
+  const membership = await getOwnMembership();
+  const nav: { href: Route; label: string }[] = isAdmin(membership?.role)
+    ? [...NAV, { href: '/settings', label: 'Settings' }]
+    : NAV;
+
   return (
     <html lang="en">
       <body>
@@ -96,7 +106,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             }}
           >
             <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: '2px' }}>
-              {NAV.map((item) => (
+              {nav.map((item) => (
                 <li key={item.href}>
                   <Link
                     href={item.href}

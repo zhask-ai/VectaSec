@@ -69,7 +69,10 @@ def test_validate_config_unknown_type():
 
 
 # ── GET /connectors (offline endpoint) ─────────────────────────────────────
-def test_connectors_catalogue_shape():
+# Auth default is deny (see test_api_auth.py); these catalogue tests opt into the explicit
+# dev header-trust gate because what they pin is the /connectors payload, not the auth.
+def test_connectors_catalogue_shape(monkeypatch):
+    monkeypatch.setenv("VECTASEC_DEV_TRUST_HEADERS", "1")
     client = TestClient(app)
     res = client.get("/connectors")
     assert res.status_code == 200
@@ -84,9 +87,10 @@ def test_connectors_catalogue_shape():
             assert set(f) == {"key", "label", "required", "secret", "placeholder", "help"}
 
 
-def test_connectors_rule_counts_match_registry():
+def test_connectors_rule_counts_match_registry(monkeypatch):
     """The picker says "N checks"; N must be the registry's truth, not a hardcode."""
     from vectasec.registry import DETECTORS
+    monkeypatch.setenv("VECTASEC_DEV_TRUST_HEADERS", "1")
     client = TestClient(app)
     for entry in client.get("/connectors").json()["connectors"]:
         expected = sum(1 for d in DETECTORS

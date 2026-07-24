@@ -55,12 +55,13 @@ def config_from_args(args) -> dict:
 
 def _load_connection(cur, tenant: str, name: str, type_: str | None = None):
     """Resolve a saved connection by name (+type when the name is ambiguous).
-    Returns (id, type, name, config, mode) or exits with the available names."""
+    Returns (id, type, name, config, mode, creds_ref) or exits with the available names.
+    config is the PUBLIC config — secret fields live in Vault behind creds_ref."""
     if type_:
-        cur.execute("select id, type, name, config, mode from connections "
+        cur.execute("select id, type, name, config, mode, creds_ref from connections "
                     "where tenant_id=%s and name=%s and type=%s", (tenant, name, type_))
     else:
-        cur.execute("select id, type, name, config, mode from connections "
+        cur.execute("select id, type, name, config, mode, creds_ref from connections "
                     "where tenant_id=%s and name=%s", (tenant, name))
     rows = cur.fetchall()
     if not rows:
@@ -83,7 +84,9 @@ def cmd_scan(args) -> int:
         # same rows the console and worker use — one source of truth for "how to reach it".
         from .db import connect
         with connect() as conn, conn.cursor() as cur:
-            _, type_, name, config, _mode = _load_connection(cur, tenant, args.connection, args.type)
+            # The stored config is the public half; run_scan resolves creds_ref from Vault
+            # itself, so no secret needs to round-trip through the CLI here.
+            _, type_, name, config, _mode, _ref = _load_connection(cur, tenant, args.connection, args.type)
     else:
         if not args.type:
             raise SystemExit("pass --type for an ad-hoc scan, or --connection for a saved one")
@@ -211,7 +214,7 @@ def cmd_connections_list(args) -> int:
 def cmd_connections_add(args) -> int:
     """Save a connection without scanning it. Same validation the console form gets."""
     from .db import connect
-    from .scan import _ensure_connection
+    from .scan import ensure_connection_with_creds
 
     config = config_from_args(args)
     problems = validate_config(args.type, config)
@@ -232,7 +235,9 @@ def cmd_connections_add(args) -> int:
             cur.execute("select id from connections where tenant_id=%s and type=%s and name=%s",
                         (tenant, args.type, args.name))
             existed = cur.fetchone() is not None
-            cid = _ensure_connection(cur, tenant, args.type, args.name, config, mode=args.mode)
+            # Declared-secret fields go to Vault (creds_ref); config keeps metadata only.
+            cid, _public, _ref = ensure_connection_with_creds(
+                cur, tenant, args.type, args.name, config, mode=args.mode)
             # Keys only, never values — config carries credentials, audit_log is append-only.
             cur.execute(
                 """insert into audit_log (tenant_id, actor, action, target, detail)
@@ -253,9 +258,13 @@ def cmd_connections_test(args) -> int:
     """Run the connector against the saved config and say what a scan would see."""
     from .db import connect
 
+    from .creds import resolve_secrets, runtime_config
+
     tenant = args.tenant or settings.demo_tenant
     with connect() as conn, conn.cursor() as cur:
-        cid, type_, name, config, _mode = _load_connection(cur, tenant, args.name, args.type)
+        cid, type_, name, config, _mode, creds_ref = _load_connection(cur, tenant, args.name, args.type)
+        # Merge Vault secrets in memory only, for this one collect — never printed, never stored.
+        config = runtime_config(config or {}, resolve_secrets(cur, creds_ref))
 
     print(f"{DIM}testing {type_}/{name}…{RESET}")
     try:
@@ -282,11 +291,13 @@ def cmd_connections_rm(args) -> int:
     """Delete a connection and everything collected through it (scan history survives)."""
     from .db import connect
 
+    from .creds import delete_secret
+
     tenant = args.tenant or settings.demo_tenant
     with connect() as conn:
         conn.autocommit = False
         with conn.cursor() as cur:
-            cid, type_, name, _config, _mode = _load_connection(cur, tenant, args.name, args.type)
+            cid, type_, name, _config, _mode, creds_ref = _load_connection(cur, tenant, args.name, args.type)
             cur.execute("select count(*) from resources where connection_id=%s", (cid,))
             n_res = cur.fetchone()[0]
             cur.execute("""select count(*) from findings f join resources r on r.id=f.resource_id
@@ -306,6 +317,8 @@ def cmd_connections_rm(args) -> int:
                                                "resources": n_res, "findings": n_find})),
             )
             cur.execute("delete from connections where id=%s and tenant_id=%s", (cid, tenant))
+            # The Vault secret goes with its connection — an orphaned credential is pure risk.
+            delete_secret(cur, creds_ref)
         conn.commit()
 
     print(f"deleted {type_}/{name} ({n_res} resources, {n_find} findings)")

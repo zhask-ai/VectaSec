@@ -17,9 +17,12 @@ Two rules this file lives by:
 Handlers are sync `def` on purpose: psycopg blocks, and FastAPI runs sync handlers in a
 threadpool, so blocking here costs a worker thread rather than stalling the event loop.
 """
+import hmac as _hmac
 import json
+import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Literal, Optional
 
@@ -31,15 +34,24 @@ from pydantic import BaseModel, Field, field_validator
 from ..config import load_env, settings
 from ..db import connect
 from ..registry import CONNECTORS, CONNECTOR_FIELDS, DETECTORS, validate_config
-from ..scan import run_scan, _ensure_connection   # _ensure_connection: reused so a queued scan
-                                                  # points at the same connection row the worker
-                                                  # will land on — not a second one
+from ..scan import run_scan, ensure_connection_with_creds   # reused so a queued scan points at
+                                                            # the same connection row the worker
+                                                            # will land on — not a second one
 from .. import connect as _connect_pkg   # noqa: F401 — import triggers connector auto-registration
 from .. import detect as _detect_pkg     # noqa: F401 — import triggers detector auto-registration
 
+log = logging.getLogger("vectasec.api")
+
 QUEUE = "vectasec_scans"                 # created in 20260717000002_platform_schema.sql
 
-app = FastAPI(title="VectaSec engine", version="0.0.1")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    _warn_if_header_trust_enabled()
+    yield
+
+
+app = FastAPI(title="VectaSec engine", version="0.0.1", lifespan=_lifespan)
 
 # The console is a browser app on another origin, so it cannot call this service at all
 # without CORS. Origins are an allowlist, never "*": this API takes actions.
@@ -57,33 +69,66 @@ app.add_middleware(
 class Principal(BaseModel):
     tenant_id: str
     actor: str
+    # Which auth path admitted the request ("service" | "jwt" | "dev") and, when already
+    # known (the JWT path resolves membership anyway), the actor's tenant_members.role.
+    # The service path resolves the role lazily, at mutation time (_require_rank).
+    via: str = "dev"
+    role: Optional[str] = None
 
 
-# Dev header-trust is OFF unless explicitly enabled. Default on for localhost single-host dev so
-# the CLI/demo keep working; a container that binds 0.0.0.0 must leave this unset, and then a
-# real Supabase JWT is the ONLY way to authenticate.
-_DEV_TRUST_HEADERS = os.environ.get("VECTASEC_DEV_TRUST_HEADERS", "1").strip() not in ("", "0", "false")
+# Dev header-trust is OFF, unconditionally, unless VECTASEC_DEV_TRUST_HEADERS is EXPLICITLY set
+# truthy. There is no localhost carve-out any more: an unset environment means a verified token
+# (Supabase JWT or the engine service token) is the ONLY way to authenticate, on every bind.
+# Read at request time, not import time, so a process cannot capture a stale default.
+def _dev_trust_headers() -> bool:
+    return os.environ.get("VECTASEC_DEV_TRUST_HEADERS", "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
-def _tenant_for_user(user_id: str, requested: Optional[str]) -> str:
-    """Resolve the authoritative tenant for a verified user from tenant_members.
+def _warn_if_header_trust_enabled() -> None:
+    """The loud half of the gate: enabling header trust must be impossible to miss."""
+    if _dev_trust_headers():
+        log.warning("=" * 76)
+        log.warning("SECURITY: VECTASEC_DEV_TRUST_HEADERS is ENABLED.")
+        log.warning("Self-asserted X-VectaSec-Tenant / X-VectaSec-Actor headers are TRUSTED:")
+        log.warning("any caller that can reach this port can name any tenant and any actor.")
+        log.warning("This is a single-operator DEV convenience only. Unset it (the default is")
+        log.warning("OFF) before this engine is reachable by anything you do not control.")
+        log.warning("=" * 76)
+
+
+def _engine_token() -> str:
+    """Optional shared-secret bearer token for trusted server-to-server callers (the console's
+    server side). Transitional: it authenticates the CALLING SERVICE, which is then trusted to
+    assert the acting user/tenant it has itself verified (apps/web verifies both via Supabase
+    before ever calling here). Scope it with VECTASEC_ENGINE_TOKEN_TENANT to pin the token to
+    one tenant."""
+    return os.environ.get("VECTASEC_ENGINE_TOKEN", "").strip()
+
+
+def _tenant_for_user(user_id: str, requested: Optional[str]) -> tuple[str, Optional[str]]:
+    """Resolve (tenant, role) for a verified user from tenant_members.
 
     The tenant is NEVER taken from the request — it is looked up from membership. If the user
     asked for a specific tenant (X-VectaSec-Tenant), honour it only if they actually belong to
     it; otherwise use their (single) membership. A user in no tenant is 403, not defaulted.
+    The role rides along because the same query answers both questions, and every mutation
+    will need it (_require_rank).
     """
     with _db() as conn, conn.cursor() as cur:
-        cur.execute("select tenant_id::text from tenant_members where user_id = %s", (user_id,))
-        member_of = {r[0] for r in cur.fetchall()}
+        cur.execute("select tenant_id::text, role from tenant_members where user_id = %s",
+                    (user_id,))
+        member_of = {r[0]: r[1] for r in cur.fetchall()}
     if not member_of:
         raise HTTPException(403, "authenticated user belongs to no tenant")
     if requested:
         if requested not in member_of:
             raise HTTPException(403, "not a member of the requested tenant")
-        return requested
+        return requested, member_of[requested]
     if len(member_of) > 1:
         raise HTTPException(400, "user belongs to multiple tenants; specify X-VectaSec-Tenant")
-    return next(iter(member_of))
+    tenant = next(iter(member_of))
+    return tenant, member_of[tenant]
 
 
 def principal(
@@ -91,17 +136,24 @@ def principal(
     x_vectasec_tenant: Optional[str] = Header(None),
     x_vectasec_actor: Optional[str] = Header(None),
 ) -> Principal:
-    """Who is calling. A verified Supabase JWT is authoritative; the dev headers are a gated
-    fallback, never trusted on their own in production.
+    """Who is calling. Verified tokens only, by default — nothing self-asserted is trusted.
 
-    Path 1 — `Authorization: Bearer <supabase-jwt>`: the signature is verified against the
+    Path 1 — `Authorization: Bearer <engine-token>` (checked first, constant-time): the shared
+    service secret in VECTASEC_ENGINE_TOKEN, for trusted server-to-server callers (the console's
+    server side). The tenant comes from VECTASEC_ENGINE_TOKEN_TENANT when that scope is set
+    (a mismatched X-VectaSec-Tenant is refused); otherwise from X-VectaSec-Tenant — asserted by
+    the authenticated SERVICE, which verifies the user and derives the tenant under RLS before
+    calling (apps/web/lib/{engine,tenant}.ts). The actor is X-VectaSec-Actor, the service's
+    server-confirmed user id. Unset VECTASEC_ENGINE_TOKEN disables this path entirely.
+
+    Path 2 — `Authorization: Bearer <supabase-jwt>`: the signature is verified against the
     project's public JWKS (auth.verify_supabase_jwt), the actor is the token's `sub`, and the
     tenant is resolved from tenant_members for that user. The request cannot name a tenant the
-    user does not belong to. This is the real path.
+    user does not belong to.
 
-    Path 2 — the X-VectaSec-* headers: self-asserted, so accepted ONLY when
-    VECTASEC_DEV_TRUST_HEADERS is enabled (default on for localhost dev, off the moment a
-    container binds a public interface). Without it, and without a valid JWT, the request is 401.
+    Path 3 — the bare X-VectaSec-* headers: self-asserted, accepted ONLY when
+    VECTASEC_DEV_TRUST_HEADERS is explicitly enabled (default OFF, always — see
+    _dev_trust_headers and the startup warning). Without it, no Authorization header is 401.
     """
     if x_vectasec_tenant:
         try:
@@ -111,6 +163,26 @@ def principal(
 
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
+
+        engine_token = _engine_token()
+        if engine_token and _hmac.compare_digest(token.encode(), engine_token.encode()):
+            scoped = os.environ.get("VECTASEC_ENGINE_TOKEN_TENANT", "").strip()
+            if scoped:
+                if x_vectasec_tenant and x_vectasec_tenant != scoped:
+                    raise HTTPException(403, "engine token is not scoped to the requested tenant")
+                tenant = scoped
+            elif x_vectasec_tenant:
+                tenant = x_vectasec_tenant
+            else:
+                raise HTTPException(400, "engine-token calls must name a tenant "
+                                          "(X-VectaSec-Tenant or VECTASEC_ENGINE_TOKEN_TENANT)")
+            try:
+                uuid.UUID(tenant)
+            except ValueError:
+                raise HTTPException(400, "tenant must be a uuid")
+            return Principal(tenant_id=tenant, actor=(x_vectasec_actor or "").strip(),
+                             via="service")
+
         try:
             from .auth import verify_supabase_jwt
             claims = verify_supabase_jwt(token)
@@ -119,18 +191,19 @@ def principal(
         user_id = str(claims.get("sub") or "")
         if not user_id:
             raise HTTPException(401, "token has no subject")
-        tenant = _tenant_for_user(user_id, x_vectasec_tenant)
-        return Principal(tenant_id=tenant, actor=user_id)
+        tenant, role = _tenant_for_user(user_id, x_vectasec_tenant)
+        return Principal(tenant_id=tenant, actor=user_id, via="jwt", role=role)
 
-    if not _DEV_TRUST_HEADERS:
-        raise HTTPException(401, "a verified Supabase JWT is required (dev header-trust is disabled)")
+    if not _dev_trust_headers():
+        raise HTTPException(401, "authentication required: a Supabase JWT or the engine service "
+                                 "token (dev header-trust is disabled by default)")
 
     tenant = (x_vectasec_tenant or settings.demo_tenant).strip()
     try:
         uuid.UUID(tenant)
     except ValueError:
         raise HTTPException(400, "X-VectaSec-Tenant must be a uuid")
-    return Principal(tenant_id=tenant, actor=(x_vectasec_actor or "").strip())
+    return Principal(tenant_id=tenant, actor=(x_vectasec_actor or "").strip(), via="dev")
 
 
 def acting(p: Principal = Depends(principal)) -> Principal:
@@ -142,6 +215,72 @@ def acting(p: Principal = Depends(principal)) -> Principal:
     if not p.actor:
         raise HTTPException(401, "X-VectaSec-Actor is required for actions (it is written to the audit log)")
     return p
+
+
+# ── RBAC ──────────────────────────────────────────────────────────────────
+# tenant_members.role is the authority. The live values are the console's MemberRole set
+# (owner|admin|analyst|viewer, apps/web/lib/types.ts); 'editor' is accepted as a synonym of
+# analyst so the API reads naturally. Three tiers of capability:
+#   viewer (rank 1)         — read-only: every GET, nothing else
+#   editor/analyst (rank 2) — scans, triage, suppressions, connections, attestations
+#   admin/owner (rank 3)    — everything, incl. integrations, routing rules and members
+ROLE_RANK = {"viewer": 1, "analyst": 2, "editor": 2, "admin": 3, "owner": 3}
+_TIER_NAME = {2: "editor", 3: "admin"}
+
+
+def _role_for_actor(tenant_id: str, actor: str) -> Optional[str]:
+    """The actor's tenant_members.role, or None (not a uuid / not a member).
+
+    Used on the SERVICE path: the console authenticated with the shared engine token and
+    named its server-verified user in X-VectaSec-Actor — the console is trusted to name the
+    actor, but the ENGINE decides what that actor may do, from the membership table."""
+    try:
+        user_id = str(uuid.UUID(actor))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("select role from tenant_members where tenant_id = %s and user_id = %s",
+                    (tenant_id, user_id))
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _require_rank(p: Principal, min_rank: int) -> Principal:
+    """Enforce the role matrix on an acting principal. Dev header-trust is exempt: that mode
+    already trusts self-asserted headers wholesale (single-operator opt-in), so a role check
+    against a made-up actor would be theatre, not security."""
+    if p.via == "dev":
+        return p
+    role = p.role if p.role is not None else _role_for_actor(p.tenant_id, p.actor)
+    p.role = role
+    if ROLE_RANK.get(role or "", 0) < min_rank:
+        raise HTTPException(
+            403, f"this action requires the {_TIER_NAME[min_rank]} role or above "
+                 f"(actor's role: {role or 'not a member'})")
+    return p
+
+
+def editing(p: Principal = Depends(acting)) -> Principal:
+    """Acting principal with at least the editor tier (scans/triage/suppressions/connections)."""
+    return _require_rank(p, 2)
+
+
+def admin(p: Principal = Depends(acting)) -> Principal:
+    """Acting principal with the admin tier (integrations, routing rules, members)."""
+    return _require_rank(p, 3)
+
+
+def would_drop_last_admin(members: list[tuple[str, str]], target_user: str,
+                          new_role: Optional[str]) -> bool:
+    """Would changing target_user to new_role (None = removal) leave the tenant with no
+    admin-tier member? Pure — the members list is [(user_id, role)]. A tenant nobody can
+    administer is a locked room, so this is checked before every demotion/removal."""
+    admins = {u for u, r in members if ROLE_RANK.get(r, 0) >= 3}
+    if target_user not in admins:
+        return False
+    if new_role is not None and ROLE_RANK.get(new_role, 0) >= 3:
+        return False
+    return admins == {target_user}
 
 
 def _db() -> psycopg.Connection:
@@ -220,14 +359,17 @@ class ScanRequest(BaseModel):
 
 
 @app.post("/scans", status_code=202)
-def create_scan(req: ScanRequest, p: Principal = Depends(acting)) -> dict:
+def create_scan(req: ScanRequest, p: Principal = Depends(editing)) -> dict:
     """Start a scan. Queued by default — `vectasec worker` drains the queue and adopts the
     row (worker.py); `inline: true` runs it in this request instead (dev and demo path).
     """
     if req.type not in CONNECTORS:
         raise HTTPException(400, f"no connector for type {req.type!r} (have: {sorted(CONNECTORS)})")
-    # TODO(auth): once the JWT lands, the token's tenant is authoritative and a body tenant_id
-    # is only honourable after a membership check.
+    # The principal's tenant is authoritative (membership-derived on the JWT path, service-
+    # asserted on the token path). A body tenant_id may only AGREE with it — anything else is
+    # a cross-tenant write. Dev header-trust keeps the old permissive behaviour.
+    if req.tenant_id and str(req.tenant_id) != p.tenant_id and p.via != "dev":
+        raise HTTPException(403, "body tenant_id does not match the authenticated tenant")
     tenant = str(req.tenant_id) if req.tenant_id else p.tenant_id
     actor = Principal(tenant_id=tenant, actor=p.actor)
 
@@ -248,9 +390,13 @@ def create_scan(req: ScanRequest, p: Principal = Depends(acting)) -> dict:
     with _db() as conn:
         conn.autocommit = False
         with conn.cursor() as cur:
-            connection_id = _ensure_connection(cur, tenant, req.type, name, req.config)
+            # Secret fields go to Vault with the connection row; the QUEUE payload carries the
+            # public config only — pgmq (and its archive) is a table, and a job that carried a
+            # password would persist it forever. The worker's run_scan resolves creds_ref.
+            connection_id, public_config, _ref = ensure_connection_with_creds(
+                cur, tenant, req.type, name, req.config)
             scan_id, msg_id = _enqueue_scan(cur, tenant, connection_id, req.type,
-                                            req.config, name, p.actor)
+                                            public_config, name, p.actor)
             _audit(cur, actor, "scan.requested", scan_id,
                    {"type": req.type, "name": name, "mode": "queued", "msg_id": msg_id})
         conn.commit()
@@ -313,12 +459,14 @@ class ConnectionRequest(BaseModel):
 
 
 @app.post("/connections", status_code=201)
-def create_connection(req: ConnectionRequest, p: Principal = Depends(acting)) -> dict:
+def create_connection(req: ConnectionRequest, p: Principal = Depends(editing)) -> dict:
     """Create (or update the config of) a connection without scanning it.
 
     Validation happens HERE, at the moment a human is looking at a form, not later inside a
-    queued job nobody is watching. The audit row records config KEYS only — config values
-    carry credentials and must never enter the append-only log."""
+    queued job nobody is watching. Declared-secret fields are split out of the config and
+    stored in Supabase Vault (creds_ref); connections.config keeps metadata only. The audit
+    row records config KEYS only — config values carry credentials and must never enter the
+    append-only log."""
     problems = validate_config(req.type, req.config)
     if problems:
         raise HTTPException(400, "; ".join(problems))
@@ -331,12 +479,13 @@ def create_connection(req: ConnectionRequest, p: Principal = Depends(acting)) ->
                 (p.tenant_id, req.type, req.name),
             )
             existed = cur.fetchone() is not None
-            connection_id = _ensure_connection(cur, p.tenant_id, req.type, req.name,
-                                               req.config, mode=req.mode)
+            connection_id, public_config, _ref = ensure_connection_with_creds(
+                cur, p.tenant_id, req.type, req.name, req.config, mode=req.mode)
             _audit(cur, p, "connection.updated" if existed else "connection.created",
                    str(connection_id),
                    {"type": req.type, "name": req.name, "mode": req.mode,
-                    "config_keys": sorted(req.config)})
+                    "config_keys": sorted(req.config),
+                    "secret_keys_vaulted": sorted(set(req.config) - set(public_config))})
         conn.commit()
 
     return {"connection_id": str(connection_id), "type": req.type, "name": req.name,
@@ -344,22 +493,27 @@ def create_connection(req: ConnectionRequest, p: Principal = Depends(acting)) ->
 
 
 @app.post("/connections/{connection_id}/test")
-def test_connection(connection_id: uuid.UUID, p: Principal = Depends(acting)) -> dict:
+def test_connection(connection_id: uuid.UUID, p: Principal = Depends(editing)) -> dict:
     """Run the connector's collect against the stored config and report what came back.
 
     Read-only against the target, same code path a real scan uses — so "test passed" means
     the scan will actually work, not that a TCP port answered. Persists nothing from the
     collect; only connections.status is updated so the console can show reachability. 200
     either way: the test *ran*; `ok` says what it found."""
+    from ..creds import resolve_secrets, runtime_config
+
     with _db() as conn, conn.cursor() as cur:
         cur.execute(
-            "select type, name, config from connections where id=%s and tenant_id=%s",
+            "select type, name, config, creds_ref from connections where id=%s and tenant_id=%s",
             (str(connection_id), p.tenant_id),
         )
         row = cur.fetchone()
+        # Vaulted credentials are resolved HERE, into this request's memory only — the merged
+        # config is handed to the connector and never persisted or echoed anywhere.
+        config = runtime_config(row[2] or {}, resolve_secrets(cur, row[3])) if row else {}
     if not row:
         raise HTTPException(404, "no such connection")
-    type_, name, config = row[0], row[1], row[2] or {}
+    type_, name = row[0], row[1]
     if type_ not in CONNECTORS:
         raise HTTPException(400, f"no connector loaded for type {type_!r}")
 
@@ -389,7 +543,7 @@ def test_connection(connection_id: uuid.UUID, p: Principal = Depends(acting)) ->
 
 
 @app.post("/connections/{connection_id}/scan", status_code=202)
-def scan_connection(connection_id: uuid.UUID, p: Principal = Depends(acting)) -> dict:
+def scan_connection(connection_id: uuid.UUID, p: Principal = Depends(editing)) -> dict:
     """Queue a scan of an EXISTING connection from its stored config.
 
     This is the console's "Scan now": the browser sends only the connection id it can
@@ -432,24 +586,26 @@ def scan_connection(connection_id: uuid.UUID, p: Principal = Depends(acting)) ->
 
 
 @app.delete("/connections/{connection_id}")
-def delete_connection(connection_id: uuid.UUID, p: Principal = Depends(acting)) -> dict:
+def delete_connection(connection_id: uuid.UUID, p: Principal = Depends(editing)) -> dict:
     """Remove a connection and everything collected through it.
 
     The cascade is the schema's: resources (and their edges, findings, observations) go
     with the connection; scans rows survive with connection_id nulled — scan history is
     an audit artefact and outlives the thing scanned. The audit row records the counts
     BEFORE the delete so what was removed is on the record."""
+    from ..creds import delete_secret
+
     with _db() as conn:
         conn.autocommit = False
         with conn.cursor() as cur:
             cur.execute(
-                "select type, name from connections where id=%s and tenant_id=%s",
+                "select type, name, creds_ref from connections where id=%s and tenant_id=%s",
                 (str(connection_id), p.tenant_id),
             )
             row = cur.fetchone()
             if not row:
                 raise HTTPException(404, "no such connection")
-            type_, name = row
+            type_, name, creds_ref = row
 
             cur.execute("select count(*) from resources where connection_id=%s", (str(connection_id),))
             n_resources = cur.fetchone()[0]
@@ -463,13 +619,65 @@ def delete_connection(connection_id: uuid.UUID, p: Principal = Depends(acting)) 
 
             _audit(cur, p, "connection.deleted", str(connection_id),
                    {"type": type_, "name": name, "resources": n_resources,
-                    "findings": n_findings})
+                    "findings": n_findings, "creds_vaulted": creds_ref is not None})
             cur.execute("delete from connections where id=%s and tenant_id=%s",
                         (str(connection_id), p.tenant_id))
+            # The Vault secret goes with its connection — an orphaned credential is pure risk.
+            delete_secret(cur, creds_ref)
         conn.commit()
 
     return {"deleted": True, "connection_id": str(connection_id), "type": type_,
             "name": name, "resources": n_resources, "findings": n_findings}
+
+
+class ConnectionPatch(BaseModel):
+    # None is meaningful (unschedule), so "was the field sent at all" is model_fields_set.
+    scan_interval_minutes: Optional[int] = None
+
+    @field_validator("scan_interval_minutes")
+    @classmethod
+    def _interval_sane(cls, v: Optional[int]) -> Optional[int]:
+        # 5 minutes to 7 days — below 5 the scheduler would queue faster than most scans
+        # finish; the DB check constraint only enforces > 0, so the real floor lives here.
+        if v is not None and not (5 <= v <= 10080):
+            raise ValueError("scan_interval_minutes must be null (unscheduled) or 5..10080")
+        return v
+
+
+@app.patch("/connections/{connection_id}")
+def patch_connection(connection_id: uuid.UUID, req: ConnectionPatch,
+                     p: Principal = Depends(editing)) -> dict:
+    """Update a connection's schedule knob (20260723000001: queue_due_scans() consumes it).
+
+    scan_interval_minutes: null turns the schedule off; 5..10080 sets the cadence in minutes.
+    Deliberately narrow — config/credential changes go through POST /connections, which owns
+    the Vault split."""
+    if "scan_interval_minutes" not in req.model_fields_set:
+        raise HTTPException(400, "nothing to update: pass scan_interval_minutes (int or null)")
+
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                """select type, name, scan_interval_minutes from connections
+                   where id = %s and tenant_id = %s for update""",
+                (str(connection_id), p.tenant_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "no such connection")
+            type_, name, previous = row
+            cur.execute(
+                "update connections set scan_interval_minutes = %s where id = %s and tenant_id = %s",
+                (req.scan_interval_minutes, str(connection_id), p.tenant_id),
+            )
+            _audit(cur, p, "connection.updated", str(connection_id),
+                   {"type": type_, "name": name,
+                    "scan_interval_minutes": {"from": previous, "to": req.scan_interval_minutes}})
+        conn.commit()
+
+    return {"connection_id": str(connection_id), "type": type_, "name": name,
+            "scan_interval_minutes": req.scan_interval_minutes, "previous": previous}
 
 
 # ── Findings workflow ─────────────────────────────────────────────────────
@@ -485,7 +693,7 @@ class StatusRequest(BaseModel):
 
 
 @app.post("/findings/{finding_id}/status")
-def set_status(finding_id: uuid.UUID, req: StatusRequest, p: Principal = Depends(acting)) -> dict:
+def set_status(finding_id: uuid.UUID, req: StatusRequest, p: Principal = Depends(editing)) -> dict:
     with _db() as conn:
         conn.autocommit = False
         with conn.cursor() as cur:
@@ -517,7 +725,7 @@ class AssignRequest(BaseModel):
 
 
 @app.post("/findings/{finding_id}/assign")
-def assign(finding_id: uuid.UUID, req: AssignRequest, p: Principal = Depends(acting)) -> dict:
+def assign(finding_id: uuid.UUID, req: AssignRequest, p: Principal = Depends(editing)) -> dict:
     with _db() as conn:
         conn.autocommit = False
         with conn.cursor() as cur:
@@ -542,7 +750,7 @@ def assign(finding_id: uuid.UUID, req: AssignRequest, p: Principal = Depends(act
 
 @app.post("/findings/{finding_id}/triage")
 def triage(finding_id: uuid.UUID, force: bool = Query(False, description="bypass the fingerprint cache"),
-           p: Principal = Depends(acting)) -> dict:
+           p: Principal = Depends(editing)) -> dict:
     """Grounded AI triage. The citations ARE the product: every claim in `triage` is backed by
     an observation returned in `citations`, quoted exactly as it was read from the target."""
     from ..ai import triage_finding
@@ -634,7 +842,7 @@ class SuppressionRequest(BaseModel):
 
 
 @app.post("/suppressions", status_code=201)
-def create_suppression(req: SuppressionRequest, p: Principal = Depends(acting)) -> dict:
+def create_suppression(req: SuppressionRequest, p: Principal = Depends(editing)) -> dict:
     with _db() as conn:
         conn.autocommit = False
         with conn.cursor() as cur:
@@ -711,7 +919,7 @@ class AttestRequest(BaseModel):
 
 @app.post("/compliance/{framework}/{control_id}/attest", status_code=201)
 def attest_control(framework: str, control_id: str, req: AttestRequest,
-                   p: Principal = Depends(acting)) -> dict:
+                   p: Principal = Depends(editing)) -> dict:
     """A human signs that a control is met. This is the ONLY path to a compliance `pass`, and a
     live assessed failing finding still overrides it (compliance.map: fail beats attestation). The
     attestation, the recomputed controls, and the audit row all land in one transaction."""
@@ -801,6 +1009,443 @@ def blast_radius(resource_id: uuid.UUID, depth: int = Query(4, ge=1, le=10),
         "edges": edges,
         "totals": {"resources": len(nodes), "findings_by_severity": totals},
     }
+
+
+# ── Integrations (the action layer's destinations) ──────────────────────────
+# Admin surface: who we notify is a tenant-governance decision, like who is a member.
+# Secret-shaped config fields (webhook/Slack/SIEM URLs, Jira tokens, HMAC secrets) never land
+# in integrations.config — notify.split_integration_config sends them to Vault, exactly as
+# connection credentials are handled, and audit rows record config KEYS only.
+
+class IntegrationRequest(BaseModel):
+    type: str
+    name: str = Field(min_length=1)
+    config: dict = Field(default_factory=dict)
+    enabled: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def _name_trimmed(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("name is required")
+        return v
+
+
+@app.get("/integrations")
+def list_integrations(p: Principal = Depends(principal)) -> dict:
+    """The tenant's destinations, public config only. `has_credentials` says a Vault secret
+    exists without saying what is in it; `secret_keys` is the TYPE's declared secret fields so
+    the console knows which form inputs to render as passwords."""
+    from ..notify import INTEGRATION_SECRET_KEYS
+
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select id::text, type, name, config, enabled, created_at, creds_ref is not null
+               from integrations where tenant_id = %s order by created_at""",
+            (p.tenant_id,),
+        )
+        rows = cur.fetchall()
+    return {"integrations": [
+        {"id": r[0], "type": r[1], "name": r[2], "config": r[3] or {}, "enabled": r[4],
+         "created_at": r[5], "has_credentials": r[6],
+         "secret_keys": list(INTEGRATION_SECRET_KEYS.get(r[1], ()))}
+        for r in rows]}
+
+
+@app.post("/integrations", status_code=201)
+def upsert_integration(req: IntegrationRequest, p: Principal = Depends(admin)) -> dict:
+    """Create (or update, matched on tenant+type+name) a destination. On update, absent/empty
+    secret fields mean "unchanged" — the stored Vault secret is merged over, so re-saving a
+    Slack integration does not require re-pasting the webhook URL."""
+    from ..notify import (split_integration_config, store_integration_secrets,
+                          validate_integration_config)
+    from ..creds import resolve_secrets
+
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                "select id::text, creds_ref from integrations where tenant_id=%s and type=%s and name=%s",
+                (p.tenant_id, req.type, req.name),
+            )
+            row = cur.fetchone()
+            existing_id, existing_ref = (row[0], row[1]) if row else (None, None)
+
+            stored_keys = tuple(resolve_secrets(cur, existing_ref)) if existing_ref else ()
+            problems = validate_integration_config(req.type, req.config, stored_keys)
+            if problems:
+                raise HTTPException(400, "; ".join(problems))
+
+            public, secrets = split_integration_config(req.type, req.config)
+            if existing_id:
+                cur.execute(
+                    "update integrations set config=%s, enabled=%s where id=%s",
+                    (json.dumps(public), req.enabled, existing_id),
+                )
+                integration_id = existing_id
+            else:
+                cur.execute(
+                    """insert into integrations (tenant_id, type, name, config, enabled)
+                       values (%s,%s,%s,%s,%s) returning id::text""",
+                    (p.tenant_id, req.type, req.name, json.dumps(public), req.enabled),
+                )
+                integration_id = cur.fetchone()[0]
+
+            if secrets:
+                ref = store_integration_secrets(cur, integration_id, secrets, existing_ref)
+                if ref != existing_ref:
+                    cur.execute("update integrations set creds_ref=%s where id=%s",
+                                (ref, integration_id))
+
+            _audit(cur, p, "integration.updated" if existing_id else "integration.created",
+                   integration_id,
+                   {"type": req.type, "name": req.name, "enabled": req.enabled,
+                    "config_keys": sorted(public), "secret_keys_vaulted": sorted(secrets)})
+        conn.commit()
+
+    return {"integration_id": integration_id, "type": req.type, "name": req.name,
+            "created": existing_id is None}
+
+
+@app.delete("/integrations/{integration_id}")
+def delete_integration(integration_id: uuid.UUID, p: Principal = Depends(admin)) -> dict:
+    """Remove a destination. Its routing rules cascade with it (FK), and the Vault secret goes
+    in the same transaction — an orphaned webhook URL is a live credential nobody owns."""
+    from ..creds import delete_secret
+
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                "select type, name, creds_ref from integrations where id=%s and tenant_id=%s",
+                (str(integration_id), p.tenant_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "no such integration")
+            type_, name, creds_ref = row
+            cur.execute("select count(*) from routing_rules where integration_id=%s",
+                        (str(integration_id),))
+            n_rules = cur.fetchone()[0]
+            _audit(cur, p, "integration.deleted", str(integration_id),
+                   {"type": type_, "name": name, "routing_rules": n_rules,
+                    "creds_vaulted": creds_ref is not None})
+            cur.execute("delete from integrations where id=%s and tenant_id=%s",
+                        (str(integration_id), p.tenant_id))
+            delete_secret(cur, creds_ref)
+        conn.commit()
+
+    return {"deleted": True, "integration_id": str(integration_id), "type": type_,
+            "name": name, "routing_rules_removed": n_rules}
+
+
+@app.post("/integrations/{integration_id}/test")
+def test_integration(integration_id: uuid.UUID, p: Principal = Depends(admin)) -> dict:
+    """Send a real test message through the stored destination — the same sender a scan would
+    use, so "test passed" means notifications will actually arrive. 200 either way; `ok` says
+    what happened, and the attempt lands in notification_deliveries like any delivery."""
+    from ..creds import resolve_secrets, runtime_config
+    from ..notify import deliver
+
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            "select type, name, config, creds_ref from integrations where id=%s and tenant_id=%s",
+            (str(integration_id), p.tenant_id),
+        )
+        row = cur.fetchone()
+        # Merged in this request's memory only, exactly like connection credentials.
+        merged = runtime_config(row[2] or {}, resolve_secrets(cur, row[3])) if row else {}
+    if not row:
+        raise HTTPException(404, "no such integration")
+    type_, name = row[0], row[1]
+
+    event = {
+        "kind": "test", "tenant_id": p.tenant_id, "scan_id": None,
+        "connection": {"type": "vectasec", "name": "test"},
+        "findings": [{
+            "id": "00000000-0000-0000-0000-000000000000",
+            "rule_id": "VECTASEC.TEST", "title": "Test notification from VectaSec",
+            "severity": "info", "detail": "If you can read this, the integration works.",
+            "resource_name": "test", "resource_kind": "test", "resource_ext_id": "test",
+        }],
+        "error": None,
+    }
+    try:
+        deliver(type_, merged, event)
+        result: dict = {"ok": True}
+    except Exception as e:
+        result = {"ok": False, "error": f"{type(e).__name__}: {e}"[:500]}
+
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                """insert into notification_deliveries
+                     (tenant_id, integration_id, event, findings_count, status, error)
+                   values (%s,%s,'test',1,%s,%s)""",
+                (p.tenant_id, str(integration_id),
+                 "sent" if result["ok"] else "error", result.get("error")),
+            )
+            _audit(cur, p, "integration.tested", str(integration_id),
+                   {"type": type_, "name": name, **result})
+        conn.commit()
+
+    return {"integration_id": str(integration_id), "type": type_, "name": name, **result}
+
+
+# ── Routing rules (which findings go to which destination) ───────────────────
+ROUTING_MATCH_KEYS = {"min_severity", "connector_types", "rule_prefixes", "notify_on"}
+_SEVERITIES = ("info", "low", "medium", "high", "critical")
+
+
+class RoutingRuleRequest(BaseModel):
+    integration_id: uuid.UUID
+    match: dict = Field(default_factory=dict)     # {} routes everything
+    name: Optional[str] = None
+    enabled: bool = True
+
+    @field_validator("match")
+    @classmethod
+    def _known_match(cls, v: dict) -> dict:
+        unknown = set(v) - ROUTING_MATCH_KEYS
+        if unknown:
+            raise ValueError(f"unsupported match keys {sorted(unknown)}; the router evaluates "
+                             f"{sorted(ROUTING_MATCH_KEYS)} (or {{}} to route everything)")
+        sev = v.get("min_severity")
+        if sev is not None and sev not in _SEVERITIES:
+            raise ValueError(f"min_severity must be one of {_SEVERITIES}")
+        for key in ("connector_types", "rule_prefixes", "notify_on"):
+            if key in v and not (isinstance(v[key], list)
+                                 and all(isinstance(x, str) for x in v[key])):
+                raise ValueError(f"{key} must be a list of strings")
+        bad = set(v.get("notify_on") or []) - {"new_findings", "scan_failed"}
+        if bad:
+            raise ValueError(f"notify_on entries {sorted(bad)} unknown; "
+                             "use new_findings and/or scan_failed")
+        return v
+
+
+@app.get("/routing-rules")
+def list_routing_rules(p: Principal = Depends(principal)) -> dict:
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select r.id::text, r.name, r.match, r.enabled, r.created_at,
+                      r.integration_id::text, i.type, i.name
+               from routing_rules r left join integrations i on i.id = r.integration_id
+               where r.tenant_id = %s order by r.created_at""",
+            (p.tenant_id,),
+        )
+        rows = cur.fetchall()
+    return {"routing_rules": [
+        {"id": r[0], "name": r[1], "match": r[2] or {}, "enabled": r[3], "created_at": r[4],
+         "integration": {"id": r[5], "type": r[6], "name": r[7]}}
+        for r in rows]}
+
+
+@app.post("/routing-rules", status_code=201)
+def create_routing_rule(req: RoutingRuleRequest, p: Principal = Depends(admin)) -> dict:
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            # The destination must be THIS tenant's — a rule pointing at another tenant's
+            # integration would exfiltrate findings across the boundary.
+            cur.execute("select type, name from integrations where id=%s and tenant_id=%s",
+                        (str(req.integration_id), p.tenant_id))
+            dest = cur.fetchone()
+            if not dest:
+                raise HTTPException(404, "no such integration for this tenant")
+            cur.execute(
+                """insert into routing_rules (tenant_id, integration_id, match, name, enabled)
+                   values (%s,%s,%s,%s,%s) returning id::text""",
+                (p.tenant_id, str(req.integration_id), json.dumps(req.match),
+                 req.name, req.enabled),
+            )
+            rule_id = cur.fetchone()[0]
+            _audit(cur, p, "routing_rule.created", rule_id,
+                   {"integration_id": str(req.integration_id),
+                    "integration": f"{dest[0]}/{dest[1]}", "match": req.match,
+                    "name": req.name, "enabled": req.enabled})
+        conn.commit()
+    return {"routing_rule_id": rule_id,
+            "integration": {"id": str(req.integration_id), "type": dest[0], "name": dest[1]}}
+
+
+@app.delete("/routing-rules/{rule_id}")
+def delete_routing_rule(rule_id: uuid.UUID, p: Principal = Depends(admin)) -> dict:
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                "select match, integration_id::text from routing_rules where id=%s and tenant_id=%s",
+                (str(rule_id), p.tenant_id),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "no such routing rule")
+            _audit(cur, p, "routing_rule.deleted", str(rule_id),
+                   {"match": row[0], "integration_id": row[1]})
+            cur.execute("delete from routing_rules where id=%s and tenant_id=%s",
+                        (str(rule_id), p.tenant_id))
+        conn.commit()
+    return {"deleted": True, "routing_rule_id": str(rule_id)}
+
+
+# ── Members ──────────────────────────────────────────────────────────────────
+VALID_ROLES = tuple(sorted(ROLE_RANK))    # analyst|admin|editor|owner|viewer
+
+
+class MemberAddRequest(BaseModel):
+    email: str = Field(min_length=3)
+    role: str = "viewer"
+
+    @field_validator("role")
+    @classmethod
+    def _known_role(cls, v: str) -> str:
+        if v not in ROLE_RANK:
+            raise ValueError(f"role must be one of {VALID_ROLES}")
+        return v
+
+    @field_validator("email")
+    @classmethod
+    def _email_shaped(cls, v: str) -> str:
+        v = v.strip().lower()
+        if "@" not in v:
+            raise ValueError("email must be an email address")
+        return v
+
+
+class MemberPatchRequest(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def _known_role(cls, v: str) -> str:
+        if v not in ROLE_RANK:
+            raise ValueError(f"role must be one of {VALID_ROLES}")
+        return v
+
+
+@app.get("/members")
+def list_members(p: Principal = Depends(principal)) -> dict:
+    """Who belongs to the tenant. Readable by any member (the browser's RLS only shows a user
+    their OWN membership row, so the console needs the engine for the team list)."""
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select m.user_id::text, u.email, m.role, m.created_at
+               from tenant_members m left join auth.users u on u.id = m.user_id
+               where m.tenant_id = %s order by m.created_at""",
+            (p.tenant_id,),
+        )
+        rows = cur.fetchall()
+    return {"members": [{"user_id": r[0], "email": r[1], "role": r[2], "created_at": r[3]}
+                        for r in rows]}
+
+
+def _invite_user(email: str) -> Optional[str]:
+    """Create the auth user via GoTrue's admin invite (sends the invite email). Returns the
+    new user id, or None when the engine has no service-role key to do it with."""
+    service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    if not service_key or not base:
+        return None
+    import httpx
+    res = httpx.post(f"{base}/auth/v1/invite", json={"email": email}, timeout=10.0,
+                     headers={"apikey": service_key, "Authorization": f"Bearer {service_key}"})
+    if res.status_code >= 300:
+        raise HTTPException(502, f"invite failed: GoTrue HTTP {res.status_code}: {res.text[:200]}")
+    user_id = (res.json() or {}).get("id")
+    if not user_id:
+        raise HTTPException(502, "invite failed: GoTrue returned no user id")
+    return str(user_id)
+
+
+@app.post("/members", status_code=201)
+def add_member(req: MemberAddRequest, p: Principal = Depends(admin)) -> dict:
+    """Add an existing auth user to the tenant by email. If no auth user exists and the engine
+    holds SUPABASE_SERVICE_ROLE_KEY, the user is invited via GoTrue admin (they get an email);
+    otherwise the caller is told the user must sign up first."""
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("select id::text from auth.users where lower(email) = %s", (req.email,))
+            row = cur.fetchone()
+            invited = False
+            if row:
+                user_id = row[0]
+            else:
+                user_id = _invite_user(req.email)
+                if user_id is None:
+                    raise HTTPException(
+                        404, f"no user with email {req.email!r}: the user must sign up first "
+                             "(or set SUPABASE_SERVICE_ROLE_KEY on the engine to enable invites)")
+                invited = True
+
+            cur.execute("select 1 from tenant_members where tenant_id=%s and user_id=%s",
+                        (p.tenant_id, user_id))
+            if cur.fetchone():
+                raise HTTPException(409, "already a member of this tenant (use PATCH to change the role)")
+
+            cur.execute(
+                "insert into tenant_members (tenant_id, user_id, role) values (%s,%s,%s)",
+                (p.tenant_id, user_id, req.role),
+            )
+            _audit(cur, p, "member.added", user_id,
+                   {"email": req.email, "role": req.role, "invited": invited})
+        conn.commit()
+
+    return {"user_id": user_id, "email": req.email, "role": req.role, "invited": invited}
+
+
+@app.patch("/members/{user_id}")
+def change_member_role(user_id: uuid.UUID, req: MemberPatchRequest,
+                       p: Principal = Depends(admin)) -> dict:
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            # The whole membership, locked: the last-admin decision must see a consistent set.
+            cur.execute(
+                "select user_id::text, role from tenant_members where tenant_id=%s for update",
+                (p.tenant_id,),
+            )
+            members = cur.fetchall()
+            current = {u: r for u, r in members}
+            if str(user_id) not in current:
+                raise HTTPException(404, "no such member")
+            if would_drop_last_admin(members, str(user_id), req.role):
+                raise HTTPException(400, "cannot demote the last admin: a tenant nobody can "
+                                         "administer is locked; promote someone else first")
+            previous = current[str(user_id)]
+            cur.execute(
+                "update tenant_members set role=%s where tenant_id=%s and user_id=%s",
+                (req.role, p.tenant_id, str(user_id)),
+            )
+            _audit(cur, p, "member.role_changed", str(user_id),
+                   {"from": previous, "to": req.role})
+        conn.commit()
+    return {"user_id": str(user_id), "role": req.role, "previous": previous}
+
+
+@app.delete("/members/{user_id}")
+def remove_member(user_id: uuid.UUID, p: Principal = Depends(admin)) -> dict:
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                "select user_id::text, role from tenant_members where tenant_id=%s for update",
+                (p.tenant_id,),
+            )
+            members = cur.fetchall()
+            current = {u: r for u, r in members}
+            if str(user_id) not in current:
+                raise HTTPException(404, "no such member")
+            if would_drop_last_admin(members, str(user_id), None):
+                raise HTTPException(400, "cannot remove the last admin: promote someone else first")
+            cur.execute("delete from tenant_members where tenant_id=%s and user_id=%s",
+                        (p.tenant_id, str(user_id)))
+            _audit(cur, p, "member.removed", str(user_id), {"role": current[str(user_id)]})
+        conn.commit()
+    return {"removed": True, "user_id": str(user_id), "role": current[str(user_id)]}
 
 
 # ── Collector control plane ─────────────────────────────────────────────────
@@ -962,9 +1607,9 @@ def main() -> None:
     # collector, which reads its own security posture out of os.environ. See config.py.
     load_env()
 
-    # localhost by default: this process holds a BYPASSRLS database connection and its auth is
-    # a self-asserted header (see `principal`), so it must not be reachable off-box until both
-    # of those change. Containers set ENGINE_HOST=0.0.0.0 deliberately.
+    # localhost by default: this process holds a BYPASSRLS database connection, so a small
+    # attack surface is still the right default even now that every request requires a verified
+    # token (see `principal`). Containers set ENGINE_HOST=0.0.0.0 deliberately.
     uvicorn.run(app, host=os.environ.get("ENGINE_HOST", "127.0.0.1"), port=settings.engine_port)
 
 

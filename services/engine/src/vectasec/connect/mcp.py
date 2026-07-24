@@ -1,18 +1,22 @@
 """MCP connector — read-only introspection of a Streamable HTTP MCP server.
 
-Collects only `initialize` + `tools/list` (both read-only RPCs) and unauthenticated
-OAuth-discovery GETs. `tools/call` is never issued: invoking a tool is a side effect on a
-customer system, and `readOnlyHint` is self-asserted ("clients MUST consider tool annotations
-to be untrusted"), so it can never license one.
+Speaks BOTH protocol generations. It first tries the 2026-07-28 stateless discovery RPC
+`server/discover`; if the server does not answer it (older revisions), it falls back to the
+`initialize` handshake used by <= 2025-11-25. Which generation the server actually speaks is
+recorded on the resource (`spec_generation`, `discovery_method`) as both raw and a label — the
+product covers both, so scanning older servers must never break.
 
-`initialize` does allocate server-side session state on spec 2025-11-25, so every session
-opened here is closed with an HTTP DELETE. Probes beyond that baseline — an intentionally
-invalid protocol version, a forged Origin, N sessions for the session-entropy rules, a TLS
-downgrade handshake — only run when config["active_probes"] is set.
+Collects only discovery + `tools/list` (both read-only RPCs) and unauthenticated OAuth-discovery
+GETs. `tools/call` is never issued: invoking a tool is a side effect on a customer system, and
+`readOnlyHint` is self-asserted ("clients MUST consider tool annotations to be untrusted"), so it
+can never license one.
 
-Handshake assumptions are confined to _initialize/_list_tools: the 2026-07-28 revision removes
-`initialize` and `MCP-Session-Id` in favour of `server/discover`, and only those two functions
-should need to change.
+`initialize` allocates server-side session state on spec 2025-11-25, so every legacy session
+opened here is closed with an HTTP DELETE. The 2026-07-28 stateless path mints no `Mcp-Session-Id`
+and owes no DELETE: protocol version and client identity ride in `_meta`, and load-balancer
+routing headers `Mcp-Method`/`Mcp-Name` accompany each POST. Probes beyond the read-only baseline
+— an intentionally invalid protocol version, a forged Origin, N sessions for the session-entropy
+rules, a TLS downgrade handshake — only run when config["active_probes"] is set.
 
 config: url (required), token, active_probes, source_zone, timeout,
         public_allowlist (read by detectors via ScanContext.config).
@@ -31,18 +35,32 @@ import httpx
 from ..registry import ConnectorField, connector
 from ..contracts import Resource, Edge, Collected
 
-SPEC_VERSION = "2025-11-25"          # what we offer; the negotiated value from InitializeResult wins
+MCP_SPEC_CURRENT = "2026-07-28"      # the pinned revision we prefer: the stateless server/discover
+                                     # generation. Offered first; a server that speaks it wins.
+MCP_SPEC_LEGACY_FALLBACK = "2025-11-25"   # what we offer on the initialize handshake fallback
+SPEC_VERSION = MCP_SPEC_LEGACY_FALLBACK   # back-compat alias for the legacy handshake path; the
+                                          # negotiated protocolVersion from the server always wins
 CLIENT_INFO = {"name": "vectasec-scanner", "version": "0.1.0"}
 ACCEPT = "application/json, text/event-stream"   # a MUST for clients on POST; a JSON-only
                                                  # Accept silently misses SSE-mode servers
 SESSION_SAMPLES = 10                 # 8-12 per the session rules; 32 buys nothing and leaks sessions
 MAX_PAGES = 50                       # a server looping on nextCursor must not hang the scan
 
+# 2026-07-28 _meta keys (SEP-2575): protocol version and client identity travel per-request.
+_META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
+_META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
+_META_CLIENT_CAPS = "io.modelcontextprotocol/clientCapabilities"
+_META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+_TRACE_KEYS = ("traceparent", "tracestate", "baggage")   # W3C/OTel propagation in _meta (SEP-414)
+# A fixed, obviously-synthetic W3C traceparent, sent so a server that propagates trace context
+# echoes something we can recognise. Sampled flag 00 (do-not-record) keeps it inert.
+_TRACEPARENT = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00"
+
 _WWW_PARAM_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"([^"]*)"')
 
 
 # ── wire ──────────────────────────────────────────────────────────────────
-def _headers(token, version, *, sid=None, origin=None) -> dict:
+def _headers(token, version, *, sid=None, origin=None, method=None, name=None) -> dict:
     h = {"Content-Type": "application/json", "Accept": ACCEPT, "MCP-Protocol-Version": version}
     if token:
         h["Authorization"] = f"Bearer {token}"
@@ -50,6 +68,10 @@ def _headers(token, version, *, sid=None, origin=None) -> dict:
         h["MCP-Session-Id"] = sid            # servers requiring a session answer 400 without it
     if origin:
         h["Origin"] = origin
+    if method:
+        h["Mcp-Method"] = method             # 2026-07-28 routing header (SEP-2243): lets gateways
+    if name:                                 # route on the operation without reading the body
+        h["Mcp-Name"] = name
     return h
 
 
@@ -85,6 +107,41 @@ def _initialize(client, url, token, *, version=SPEC_VERSION, origin=None):
     return r, _parse_rpc(r), r.headers.get("mcp-session-id")
 
 
+def _discover(client, url, token, *, version=MCP_SPEC_CURRENT, origin=None):
+    """2026-07-28 stateless discovery (SEP-2575): the `server/discover` RPC. Protocol version and
+    client identity ride in `_meta`; no session is minted, so no DELETE is owed. A sacrificial
+    traceparent is sent so a trace-propagating server echoes something recognisable."""
+    meta = {_META_PROTOCOL_VERSION: version, _META_CLIENT_INFO: CLIENT_INFO,
+            _META_CLIENT_CAPS: {}, "traceparent": _TRACEPARENT}
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "server/discover",
+               "params": {"_meta": meta}}
+    r = client.post(url, json=payload,
+                    headers=_headers(token, version, origin=origin, method="server/discover"))
+    return r, _parse_rpc(r)
+
+
+def _extract_discovery(result: dict) -> dict:
+    """Normalise a server/discover result. The RC schema places identity either at the top level
+    or in result `_meta`; we read both and keep whatever is present without trusting its shape."""
+    meta = result.get("_meta")
+    meta = meta if isinstance(meta, dict) else {}
+    si = result.get("serverInfo")
+    if not isinstance(si, dict):
+        si = meta.get(_META_SERVER_INFO) if isinstance(meta.get(_META_SERVER_INFO), dict) else None
+    pv = result.get("protocolVersion") or meta.get(_META_PROTOCOL_VERSION)
+    versions = result.get("protocolVersions")
+    if not pv and isinstance(versions, list):
+        dates = [v for v in versions if isinstance(v, str)]
+        pv = max(dates) if dates else None      # advertise-list form: the highest revision offered
+    caps = result.get("capabilities")
+    instr = result.get("instructions")
+    return {"server_info": si, "protocol_version": pv,
+            "protocol_versions": versions if isinstance(versions, list) else None,
+            "capabilities": caps if isinstance(caps, dict) else None,
+            "instructions": instr if isinstance(instr, str) else None,
+            "trace_echoed": any(k in meta for k in _TRACE_KEYS)}
+
+
 def _delete_session(client, url, token, sid, version) -> None:
     if not sid:
         return
@@ -94,13 +151,16 @@ def _delete_session(client, url, token, sid, version) -> None:
         pass   # cleanup is best-effort — the server MAY legitimately answer 405
 
 
-def _list_tools(client, url, token, version, sid):
+def _list_tools(client, url, token, version, sid=None, *, stateless=False):
     tools, cursor, pages = [], None, 0
     while pages < MAX_PAGES:
         params = {"cursor": cursor} if cursor else {}
+        if stateless:       # 2026-07-28: version rides in _meta, routing header names the method
+            params["_meta"] = {_META_PROTOCOL_VERSION: version}
+        headers = _headers(token, version, sid=sid,
+                           method="tools/list" if stateless else None)
         r = client.post(url, json={"jsonrpc": "2.0", "id": 2 + pages, "method": "tools/list",
-                                   "params": params},
-                        headers=_headers(token, version, sid=sid))
+                                   "params": params}, headers=headers)
         res = (_parse_rpc(r) or {}).get("result")
         if not isinstance(res, dict):
             return tools, pages, False
@@ -113,34 +173,75 @@ def _list_tools(client, url, token, version, sid):
 
 
 def _introspect(client, url, token) -> dict:
-    """One full read-only handshake: initialize -> notifications/initialized -> tools/list -> DELETE."""
+    """One read-only discovery pass across BOTH generations: try the 2026-07-28 stateless
+    `server/discover` first; on no result fall back to the legacy `initialize` handshake
+    (-> notifications/initialized -> tools/list -> DELETE). Records which generation answered."""
     out = {"status": None, "error": None, "www_authenticate": None, "session_id": None,
            "has_result": False, "protocol_version": None, "server_info": None,
            "capabilities": None, "instructions": None, "rpc_error": None,
-           "tools": [], "pages": 0, "cursor_drained": False, "authenticated": bool(token)}
+           "tools": [], "pages": 0, "cursor_drained": False, "authenticated": bool(token),
+           "spec_generation": "unknown", "discovery_method": None,
+           "protocol_versions": None, "trace_echoed": False}
+
+    # ── 2026-07-28 stateless: server/discover (no session, no DELETE) ──
     try:
-        r, body, sid = _initialize(client, url, token)
+        r, body = _discover(client, url, token)
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
         return out
-
     out["status"] = r.status_code
     out["www_authenticate"] = _parse_www_authenticate(r.headers.get("www-authenticate"))
-    out["session_id"] = sid
-    out["rpc_error"] = (body or {}).get("error")
-    result = (body or {}).get("result")
-    if not isinstance(result, dict):
+    disc_err = (body or {}).get("error")
+    disc_result = (body or {}).get("result")
+
+    if isinstance(disc_result, dict):
+        out["discovery_method"] = "server/discover"
+        out["spec_generation"] = "stateless"
+        info = _extract_discovery(disc_result)
+        out.update(has_result=True, protocol_version=info["protocol_version"],
+                   server_info=info["server_info"], capabilities=info["capabilities"],
+                   instructions=info["instructions"], protocol_versions=info["protocol_versions"],
+                   trace_echoed=info["trace_echoed"])
+        neg = out["protocol_version"] or MCP_SPEC_CURRENT
+        try:
+            out["tools"], out["pages"], out["cursor_drained"] = _list_tools(
+                client, url, token, neg, sid=None, stateless=True)
+        except Exception as e:
+            out["error"] = f"{type(e).__name__}: {e}"
         return out
 
-    out.update(has_result=True, protocol_version=result.get("protocolVersion"),
-               server_info=result.get("serverInfo"), capabilities=result.get("capabilities"),
-               instructions=result.get("instructions"))
-    neg = out["protocol_version"] or SPEC_VERSION   # echo what was negotiated, never a hardcoded value
+    # ── fall back to the legacy initialize handshake (<= 2025-11-25) ──
+    try:
+        r2, body2, sid = _initialize(client, url, token)
+    except Exception as e:
+        out["rpc_error"] = disc_err     # keep the discover-layer JSON-RPC error as context
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    init_result = (body2 or {}).get("result")
+    # Prefer the initialize response's status/header once we commit to the legacy path.
+    out["status"] = r2.status_code
+    out["www_authenticate"] = (_parse_www_authenticate(r2.headers.get("www-authenticate"))
+                               or out["www_authenticate"])
+    out["session_id"] = sid
+    out["rpc_error"] = (body2 or {}).get("error") or disc_err
+
+    if not isinstance(init_result, dict):
+        return out       # neither generation produced a result — status/error recorded above
+
+    out["discovery_method"] = "initialize"
+    out["spec_generation"] = "legacy"
+    out["rpc_error"] = (body2 or {}).get("error")
+    out.update(has_result=True, protocol_version=init_result.get("protocolVersion"),
+               server_info=init_result.get("serverInfo"),
+               capabilities=init_result.get("capabilities"),
+               instructions=init_result.get("instructions"))
+    neg = out["protocol_version"] or SPEC_VERSION   # echo what was negotiated, never hardcoded
     try:
         client.post(url, json={"jsonrpc": "2.0", "method": "notifications/initialized"},
                     headers=_headers(token, neg, sid=sid))
         out["tools"], out["pages"], out["cursor_drained"] = _list_tools(
-            client, url, token, neg, sid)
+            client, url, token, neg, sid=sid)
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
     finally:
@@ -365,32 +466,50 @@ def _legacy_sse_probe(client, url, intro, timeout) -> dict:
     modern = f"{s.scheme}://{s.netloc}/mcp"
     if modern.rstrip("/") != url.rstrip("/"):
         out["modern_endpoint"] = modern
-        try:
-            _, body, sid = _initialize(client, modern, None)
-            out["modern_detected"] = isinstance((body or {}).get("result"), dict)
-            _delete_session(client, modern, None, sid, SPEC_VERSION)
+        try:    # a modern endpoint may speak either generation — try stateless discover first
+            _, dbody = _discover(client, modern, None)
+            if isinstance((dbody or {}).get("result"), dict):
+                out["modern_detected"] = True
+            else:
+                _, body, sid = _initialize(client, modern, None)
+                out["modern_detected"] = isinstance((body or {}).get("result"), dict)
+                _delete_session(client, modern, None, sid, SPEC_VERSION)
         except Exception:
             out["modern_detected"] = False
     return out
 
 
 # ── active probes (consent-gated) ─────────────────────────────────────────
-def _active_probes(client, url, token, negotiated) -> dict:
+def _probe_handshake(client, url, token, gen, *, version=None, origin=None):
+    """One discovery round-trip in whichever generation the server speaks, for the active probes.
+    Returns (response, has_result, sid). Stateless servers mint no session, so sid is None."""
+    if gen == "stateless":
+        r, body = _discover(client, url, token, version=version or MCP_SPEC_CURRENT, origin=origin)
+        return r, isinstance((body or {}).get("result"), dict), None
+    r, body, sid = _initialize(client, url, token, version=version or SPEC_VERSION, origin=origin)
+    return r, isinstance((body or {}).get("result"), dict), sid
+
+
+def _active_probes(client, url, token, negotiated, gen) -> dict:
     out = {"invalid_version": None, "origin": None, "sessions": None, "session_auth": None}
 
-    # Spec: an invalid/unsupported MCP-Protocol-Version MUST get 400 Bad Request.
-    try:
-        r, _, sid = _initialize(client, url, token, version="9999-99-99")
-        out["invalid_version"] = {"sent": "9999-99-99", "status": r.status_code}
-        _delete_session(client, url, token, sid, negotiated)
-    except Exception as e:
-        out["invalid_version"] = {"sent": "9999-99-99", "error": f"{type(e).__name__}: {e}"}
+    # Legacy-transport concern only: an invalid/unsupported MCP-Protocol-Version header MUST get
+    # 400. On the 2026-07-28 stateless core the version rides in _meta and a mismatch returns
+    # UnsupportedProtocolVersionError instead, so the header probe is not the applicable mechanism.
+    if gen != "stateless":
+        try:
+            r, _, sid = _initialize(client, url, token, version="9999-99-99")
+            out["invalid_version"] = {"sent": "9999-99-99", "status": r.status_code}
+            _delete_session(client, url, token, sid, negotiated)
+        except Exception as e:
+            out["invalid_version"] = {"sent": "9999-99-99", "error": f"{type(e).__name__}: {e}"}
 
-    # Otherwise spec-conforming request carrying an attacker Origin.
+    # Otherwise spec-conforming request carrying an attacker Origin — applies to both generations.
     try:
-        r, body, sid = _initialize(client, url, token, origin="https://attacker.example")
+        r, has_result, sid = _probe_handshake(client, url, token, gen,
+                                              origin="https://attacker.example")
         out["origin"] = {"sent": "https://attacker.example", "status": r.status_code,
-                         "has_result": isinstance((body or {}).get("result"), dict)}
+                         "has_result": has_result}
         _delete_session(client, url, token, sid, negotiated)
     except Exception as e:
         out["origin"] = {"sent": "https://attacker.example", "error": f"{type(e).__name__}: {e}"}
@@ -507,7 +626,8 @@ def collect(config: dict) -> Collected:
         legacy = _legacy_sse_probe(client, url, unauth, timeout)
         tls = _tls_probe(host, port, timeout, active) if s.scheme == "https" else {
             "negotiated": None, "cert_status": None, "cert_error": None, "floor": "UNTESTED"}
-        probes = (_active_probes(client, url, token, main.get("protocol_version") or SPEC_VERSION)
+        probes = (_active_probes(client, url, token, main.get("protocol_version") or SPEC_VERSION,
+                                 main.get("spec_generation"))
                   if active else None)
 
     tools = main.get("tools") or []
@@ -518,12 +638,21 @@ def collect(config: dict) -> Collected:
         "resolved_ip": resolved_ip, "ip_class": ip_class, "source_zone": source_zone,
         "client_name": CLIENT_INFO["name"],   # the session-derivability test rehashes it
         "protocol_version": main.get("protocol_version"),
+        # Which generation the server actually spoke — the product covers both, and the lifecycle
+        # rules key on this. session_id is the top-level protocol session (legacy only).
+        "spec_generation": main.get("spec_generation"),
+        "discovery_method": main.get("discovery_method"),
+        "session_id": main.get("session_id"),
+        "protocol_versions": main.get("protocol_versions"),
+        "trace_context": {"echoed": bool(main.get("trace_echoed")),
+                          "generation": main.get("spec_generation")},
         "server_info": main.get("server_info"), "capabilities": main.get("capabilities"),
         "instructions": main.get("instructions"),
         "authenticated_scan": bool(token), "active_probes": active,
         "unauth_probe": {k: unauth.get(k) for k in
                          ("status", "error", "www_authenticate", "has_result", "rpc_error",
-                          "session_id", "protocol_version", "server_info")}
+                          "session_id", "protocol_version", "server_info",
+                          "discovery_method", "spec_generation")}
                         | {"tool_count": len(unauth.get("tools") or [])},
         "auth_probe": ({k: auth.get(k) for k in ("status", "error", "has_result", "rpc_error")}
                        | {"tool_count": len(auth.get("tools") or [])}) if auth else None,
@@ -544,7 +673,9 @@ def collect(config: dict) -> Collected:
         namespace=host,
         labels={"scheme": s.scheme, "ip_class": ip_class,
                 "protocol_version": main.get("protocol_version") or "",
-                "server_version": si.get("version") or ""},
+                "server_version": si.get("version") or "",
+                "spec_generation": main.get("spec_generation") or "",
+                "discovery_method": main.get("discovery_method") or ""},
         raw=server_raw,
     )]
     edges = []

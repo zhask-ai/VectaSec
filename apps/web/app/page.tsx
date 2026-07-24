@@ -55,7 +55,8 @@ export default async function OverviewPage() {
   }
 
   // Everything below is aggregate reads or exact head-counts — cap-safe by construction.
-  const [facetsRes, notAssessableRes, identitiesRes, wildcardRes, sensitiveRes, topRes, controlsRes] = await Promise.all([
+  // The trend read is bounded (.limit(30)) so it can never hit PostgREST Max Rows.
+  const [facetsRes, notAssessableRes, identitiesRes, wildcardRes, sensitiveRes, topRes, controlsRes, trendRes] = await Promise.all([
     supabase.from('findings_facets').select('severity, n').eq('status', 'open'),
     supabase.from('findings').select('id', { count: 'exact', head: true }).eq('status', 'open').eq('assessment', 'not_assessable'),
     supabase.from('resources').select('id', { count: 'exact', head: true }).eq('kind', 'identity'),
@@ -63,6 +64,7 @@ export default async function OverviewPage() {
     supabase.from('resources').select('id', { count: 'exact', head: true }).eq('labels->>data_sensitivity', 'high'),
     supabase.from('findings').select('severity, rule_id, title, resources(kind, name)').eq('status', 'open').limit(400),
     supabase.from('controls').select('framework, status'),
+    supabase.from('posture_snapshots').select('taken_at, score').order('taken_at', { ascending: false }).limit(30),
   ]);
 
   const counts = Object.fromEntries(SEVERITIES.map((s) => [s, 0])) as SeverityCounts;
@@ -73,6 +75,9 @@ export default async function OverviewPage() {
   }
   const posture = postureScore(counts);
   const notAssessable = notAssessableRes.count ?? 0;
+
+  // Oldest → newest for the sparkline (the query is newest-first so LIMIT keeps the recent 30).
+  const trend = (((trendRes.data ?? []) as { taken_at: string; score: number }[])).slice().reverse();
 
   const top = ((topRes.data ?? []) as unknown as TopRisk[])
     .filter((f) => f.severity !== 'info')
@@ -106,6 +111,7 @@ export default async function OverviewPage() {
             <div style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)', marginTop: 'var(--space-2)', lineHeight: 'var(--leading-2xs)' }}>
               From {total} open finding{total === 1 ? '' : 's'}, weighted by severity. Fix criticals first to move it most.
             </div>
+            <PostureTrend points={trend} />
           </CardBody>
         </Card>
 
@@ -188,6 +194,53 @@ export default async function OverviewPage() {
         </Card>
       )}
     </Shell>
+  );
+}
+
+/** Posture over time — one snapshot per completed scan (posture_snapshots, written by the
+ * scans_posture_snapshot trigger using the SAME formula as postureScore above, so this line
+ * and the big number can never disagree). A single-series sparkline: neutral ink (identity is
+ * carried by the card, not by color), 2px line, end-dot on the latest point, and the delta
+ * stated in text beside it so the movement is readable without the plot. The y-domain spans
+ * the observed scores (not 0–100) so remediation progress is visible; the text carries the
+ * absolute numbers, which keeps the zoomed domain honest. */
+function PostureTrend({ points }: { points: { taken_at: string; score: number }[] }) {
+  if (points.length < 2) {
+    return (
+      <p style={{ margin: 'var(--space-2) 0 0', fontSize: 'var(--text-2xs)', color: 'var(--text-muted)', lineHeight: 'var(--leading-2xs)' }}>
+        No history yet — the trend appears after a couple of completed scans.
+      </p>
+    );
+  }
+  const w = 220;
+  const h = 36;
+  const pad = 4;
+  const scores = points.map((p) => p.score);
+  const min = Math.min(...scores);
+  const max = Math.max(...scores);
+  const x = (i: number) => pad + (i * (w - 2 * pad)) / (points.length - 1);
+  const y = (s: number) => (max === min ? h / 2 : pad + (h - 2 * pad) * (1 - (s - min) / (max - min)));
+  const d = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)} ${y(p.score).toFixed(1)}`).join(' ');
+  const first = points[0];
+  const last = points[points.length - 1];
+  const delta = last.score - first.score;
+  return (
+    <div style={{ marginTop: 'var(--space-2)', display: 'grid', gap: 2 }}>
+      <svg
+        width={w}
+        height={h}
+        viewBox={`0 0 ${w} ${h}`}
+        role="img"
+        aria-label={`Posture trend: score ${first.score} to ${last.score} across ${points.length} snapshots`}
+        style={{ maxWidth: '100%' }}
+      >
+        <path d={d} fill="none" stroke="var(--text-secondary)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        <circle cx={x(points.length - 1)} cy={y(last.score)} r="3" fill="var(--text-primary)" />
+      </svg>
+      <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }} data-numeric>
+        {delta === 0 ? 'unchanged' : delta > 0 ? `+${delta}` : String(delta)} over {points.length} snapshots · since {relative(first.taken_at)}
+      </span>
+    </div>
   );
 }
 

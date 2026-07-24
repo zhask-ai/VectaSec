@@ -173,6 +173,21 @@ def _safe_archive(conn, msg_id: int) -> bool:
         return False
 
 
+def _notify_scan_failed(conn, job: "Job") -> None:
+    """Route a TERMINAL scan failure to the tenant's scan-failed rules (notify.py).
+
+    Called only when the worker gives up on a message (poison) — run_scan's _mark_scan_error
+    has already committed the scans row as 'error', which is what notify_scan reads. Not
+    called on retryable failures: a scan that fails 4 times then succeeds should notify once,
+    about the success. Never raises — queue hygiene must not depend on the outside world.
+    """
+    try:
+        from .notify import notify_scan
+        notify_scan(conn, job.tenant_id, job.scan_id)
+    except Exception:
+        log.exception("scan %s: failure notification errored (ignored)", job.scan_id)
+
+
 def reap_stuck_scans(conn) -> int:
     """Age out scans stuck in 'running' past the lease window (gap 0). Returns the count reaped.
 
@@ -216,6 +231,7 @@ def process_message(conn, msg: ClaimedMessage, max_reads: int = MAX_READS) -> st
             log.error("msg %s scan %s: failed %d time(s), archiving as poison: %s",
                       msg.msg_id, job.scan_id, msg.read_ct, e)
             _safe_archive(conn, msg.msg_id)
+            _notify_scan_failed(conn, job)   # terminal failure → scan-failed routing rules
             return "poison"
         log.warning("msg %s scan %s: failed (attempt %d/%d), leaving for redelivery: %s",
                     msg.msg_id, job.scan_id, msg.read_ct, max_reads, e)

@@ -15,9 +15,11 @@ import 'server-only';
  * tenant_members row), and the actor is the id from a server-confirmed getUser(). The browser
  * cannot reach this file, cannot see this URL, and cannot influence either header.
  *
- * When the engine grows real JWT verification (its own TODO(auth)), this indirection stops
- * being load-bearing — but it should stay anyway: it is also what keeps the engine off the
- * public network.
+ * The engine now verifies callers (VECTASEC_ENGINE_TOKEN bearer for this server-to-server
+ * path; Supabase JWTs for end users; header trust is dev-only opt-in). The tenant/actor
+ * headers remain as the authenticated service's assertion — the engine scopes them to the
+ * token's configured tenant when VECTASEC_ENGINE_TOKEN_TENANT is set. This indirection also
+ * keeps the engine off the public network.
  */
 
 const ENGINE_URL = process.env.VECTASEC_ENGINE_URL ?? 'http://127.0.0.1:8000';
@@ -33,7 +35,7 @@ const DEFAULT_TIMEOUT_MS = 8_000;
 export type EngineResult<T> = { ok: true; data: T } | { ok: false; message: string };
 
 async function engineRequest<T>(
-  method: 'POST' | 'DELETE',
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   path: string,
   body: unknown,
   auth: { tenantId: string; actor: string },
@@ -44,6 +46,7 @@ async function engineRequest<T>(
       method,
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.VECTASEC_ENGINE_TOKEN ?? ''}`,
         'X-VectaSec-Tenant': auth.tenantId,
         'X-VectaSec-Actor': auth.actor,
       },
@@ -77,6 +80,27 @@ export async function engineDelete<T>(
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<EngineResult<T>> {
   return engineRequest<T>('DELETE', path, undefined, auth, timeoutMs);
+}
+
+/** Engine reads that have no Supabase mirror (members, integrations, routing rules — the
+ * engine is their write path AND their read path). Same auth posture as the writes: the
+ * tenant/actor headers are this server's assertion, never the browser's. Callers must treat
+ * `ok:false` as "this panel is unavailable", not as an empty list. */
+export async function engineGet<T>(
+  path: string,
+  auth: { tenantId: string; actor: string },
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<EngineResult<T>> {
+  return engineRequest<T>('GET', path, undefined, auth, timeoutMs);
+}
+
+export async function enginePatch<T>(
+  path: string,
+  body: unknown,
+  auth: { tenantId: string; actor: string },
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<EngineResult<T>> {
+  return engineRequest<T>('PATCH', path, body, auth, timeoutMs);
 }
 
 /** FastAPI reports validation failures as `{detail: [...]}` and deliberate refusals as

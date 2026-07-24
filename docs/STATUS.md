@@ -1,18 +1,41 @@
 # VectaSec — Status
 
-**As of 2026-07-17.** Verified by reading the code, running the tests, and running `vectasec doctor` against the live database. Every claim below points at a file. If a file isn't named, treat the claim as unsupported.
+**As of 2026-07-23.** Verified by reading the code, running both unit suites, and printing the
+live registry (`uv run vectasec rules`). Every claim below points at a file. If a file isn't
+named, treat the claim as unsupported.
 
-Phases refer to [vectasec-build-plan.md](vectasec-build-plan.md) §18.
+Two scoping notes for this revision, stated up front because the contract demands them:
 
-**One-line summary:** the deterministic core is real and provable, and the connect→scan→findings loop now closes from **both surfaces** — console and CLI. Phase 0 is substantially done, the Phase 1 *rulepacks* ran far ahead into Phase 2/3 territory, and the remaining Phase 1 plumbing gaps are integrations, SSO/RBAC, and a proven collector round trip. No phase is "done" by its own **Done when** bar.
+- **This snapshot was taken while work was landing.** At read time the tree contained in-flight,
+  partially-landed work (an action/notification layer, an RBAC surface, Azure/GCP connectors were
+  all being built concurrently). In-flight pieces are **deliberately not assessed here** — this
+  document describes only what could be verified in the tree at read time, and says so where the
+  edge was visibly moving.
+- **"In the tree" and "on GitHub" are no longer the same thing.** The repo is pushed
+  (`github.com/zhask-ai/VectaSec`; local `main` = `origin/main` at commit `1161ab3`), but a large
+  part of what this document describes — the AWS and K8s connectors, Vault credentials
+  (`creds.py`), the `20260723*` migrations, the MCP dual-generation migration, the header-trust
+  default-OFF change — was **uncommitted working-tree state** at read time (`git status`: ~19
+  modified + ~17 untracked files, ~1,700 diff lines). Where it matters, each claim below says
+  which side of that line it sits on.
+
+Phases refer to [vectasec-build-plan.md](vectasec-build-plan.md) §18; the forward plan is
+[vectasec-v4-blueprint.md](vectasec-v4-blueprint.md).
+
+**One-line summary:** the deterministic core is real, provable, and now *broad* — 7 connectors /
+129 detectors including an agentless AWS path and a Kubernetes/mesh connector — with verified-token
+API auth, Vault-held credentials, DB-side continuous scheduling, a hash-chained evidence ledger,
+and compliance evaluation actually wired in. What is still unproven: the collector round trip,
+the on-prem stack, CI on GitHub, and everything involving a second human (SSO/SAML/SCIM, a design
+partner, SOC 2).
 
 ---
 
 ## What actually works, end to end
 
-This is the honest floor. It runs on a laptop and does what it says.
-
-**The console path** (observed working 2026-07-17, against the live Supabase project):
+**The console path** (observed working 2026-07-17 against the live Supabase project; the engine
+suite covering the same endpoints passed locally 2026-07-23 — the flow itself was not re-driven
+for this revision):
 
 ```
 uv run python -m vectasec.api.main     # engine API
@@ -20,9 +43,14 @@ uv run vectasec worker                 # queue consumer
 pnpm -C apps/web dev                   # console
 ```
 
-Sign in → Connections → **+ Connect a system** → pick RabbitMQ, fill URL + credentials → submit. The engine validates the config against the connector's declared fields, writes the connection, enqueues the first scan on `pgmq`; the worker adopts the queued row, scans the target, and commits findings + cited observations in one transaction; the Connections page (polling while anything is in flight) re-renders with resource and finding counts, `/scans` shows the run with its duration and stats, and the findings queue shows both systems' findings faceted by rulepack. Per-row **Scan now** (queue a rescan), **Test** (live reachability via the real collect path), and **Remove** (audited cascade delete) all verified. The same flow was exercised through the CLI: `vectasec connections add` / `scan --connection` / `scans` / `connections test` / dry-run `rm`.
+Sign in → Connections → **+ Connect a system** → pick a connector, fill its declared fields →
+submit. The engine validates the config, splits declared-secret fields into Supabase Vault
+(working tree — see DONE), writes the connection, enqueues the first scan on `pgmq`; the worker
+adopts the queued row, scans, and commits findings + cited observations in one transaction;
+Connections re-renders with counts, `/scans` shows the run, the findings queue facets by rulepack.
+Per-row **Scan now**, **Test**, **Remove** verified 2026-07-17.
 
-**The CLI-only path** (the original floor):
+**The CLI-only path:**
 
 ```
 docker compose -f deploy/dev/docker-compose.yml up -d
@@ -30,7 +58,14 @@ cd services/engine && uv run vectasec scan --type kafka --bootstrap localhost:90
 uv run vectasec findings
 ```
 
-A deliberately misconfigured Kafka, RabbitMQ and Redis → read-only collection → 85 deterministic detectors (incl. cross-cutting NHI + data-classification packs) → findings and cited observations committed to Postgres in **one transaction**, deduped by fingerprint, listed back with their evidence counts. Re-running is idempotent. That path is not a demo mock.
+Misconfigured Kafka, RabbitMQ, Redis → read-only collection → deterministic detectors → findings
+and cited observations in one transaction, deduped by fingerprint, idempotent on re-run.
+
+**Verified today (2026-07-23):** `uv run vectasec rules` → **129 rules across 9 packs, 7
+connectors** (AWS 21, MCP 24, KAFKA 20, K8S 18, RABBITMQ 18, KONG 16, REDIS 6, NHI 4, DATA 2).
+`uv run pytest`: **914 passed** in `services/engine`, **55 passed** in `services/collector`. (The
+counts will drift; run them yourself. They are recorded here as *observed on this date*, not as a
+contract.)
 
 Nothing else in this document reaches that bar.
 
@@ -38,188 +73,178 @@ Nothing else in this document reaches that bar.
 
 ## DONE
 
+Rows added or materially changed since the 07-17 revision are marked **new**. "Pushed" /
+"working tree" states where each sits relative to `origin/main` at read time.
+
 | Thing | Where | Notes |
 |---|---|---|
-| Core schema | `supabase/migrations/20260717000001_core_schema.sql` | Applied to the live DB. Tenancy, inventory, graph, scans, findings, evidence. Seeds the Demo tenant. |
-| Platform schema | `supabase/migrations/20260717000002_platform_schema.sql` | Applied. 18 tenant tables + `schema_migrations` (the 19 `vectasec doctor` reports); `pgmq` + `pg_cron` present. Verified against the live DB. |
-| **Citation gate** | migration 002 + **005**, `enforce_citation_gate()` / `enforce_citation_gate_evidence()` | Deferred constraint triggers on both `ai_outputs` and `ai_output_evidence`. An `ai_output` cannot commit uncited, cannot be *left* uncited by an evidence or observation DELETE, cannot slip through the engine's own `ON CONFLICT DO UPDATE` path, and cannot cite another tenant's observation. As shipped in 002 the gate only fired on INSERT and the other three all committed — 005 is the fix, and all four are now attacked in CI. |
-| **Append-only evidence ledger** | migration 002, `reject_update()` | UPDATE rejected on `observations` and `audit_log`. DELETE deliberately allowed (offboarding / FK cascade) — which means **delete + re-insert at the same id rewrites a claim without an UPDATE**. Gap #15. |
-| RLS hardening | migration 002 | `ENABLE` + `FORCE` on all 18 tenant tables; `authenticated` has SELECT-only policies and no write policy anywhere. `app_tenant_ids()` is SECURITY DEFINER with a pinned search_path; `tenant_members_select` is non-recursive by construction. |
-| Contracts + registry | `contracts.py`, `registry.py` | `@connector` / `@detector` auto-registration. Drop a file in `detect/`, done. No central list. |
-| Scan loop | `scan.py` | collect → detect → persist, one transaction, fingerprint dedup, stale-marking, per-detector error isolation, suppression application. |
-| Connectors (5) | `connect/{kafka,kong,rabbitmq,redis,mcp}.py` | Read-only. Kafka is the reference. Redis reads INFO/CONFIG/ACL; `requirepass` value is dropped, never stored. |
-| Detectors (85) | `detect/{kafka,kong,rabbitmq,redis,mcp,identity,data}.py` | KAFKA 20, MCP 19, RABBITMQ 18, KONG 16, REDIS 6, + cross-cutting NHI (4) and DATA (2). `uv run vectasec rules`. |
-| **NHI / identity model** | `identity.py`, `detect/identity.py`, `apps/web/app/identities/`, `vectasec identities` | Derivation layer normalizing `identity`/`credential`/`grant` resources + edges from every connector (Kafka ACL principals, Kong consumers+cred counts, RabbitMQ users+perms, Redis ACL users, MCP OAuth). Cross-system `/identities` inventory. OWASP-NHI-Top-10 detectors. Credentials = metadata only; no secret value ever stored. **Observed live** across Kafka/RabbitMQ/Redis 2026-07-17. |
-| **Data classification (DSPM)** | `classify.py`, `detect/data.py`, `components/ui/data-class.tsx` | Deterministic sensitivity tagging (PCI/PHI/PII/secrets) from naming, in `labels`, honest "named like" wording. `DATA.EXPOSURE.SENSITIVE_PLAINTEXT` is the toxic-combination rule: a PCI topic on a plaintext+no-authorizer broker fires **critical** (proven on the dev Kafka). |
-| **Posture score + dashboard** | `lib/posture.ts`, `apps/web/app/page.tsx`, `vectasec posture` | Documented severity-weighted score shown beside its raw counts; Overview = score + breakdown + coverage honesty + NHI/data lenses + do-this-now + compliance strip. Console and CLI share the formula. |
-| Redis dev target | `deploy/dev/docker-compose.yml` (redis 7.2.4) | No password, protected-mode off, bind-all, no TLS, RediShell-vulnerable version — fires all 6 Redis rules + NHI. |
-| Grounded AI triage | `ai.py` | Structured-output citations, range-checked, deterministic fallback, fingerprint cache, refusal handling. Works with no API key. |
-| Engine API (actions) | `api/main.py` | health, scans, finding status/assign/triage, suppressions, compliance read, blast-radius, collector control plane, **connection lifecycle** (`GET /connectors` catalogue from the registry, `POST /connections` with declared-field validation, `POST /connections/{id}/test` via the real collect, `POST /connections/{id}/scan` from stored config — collector-mode rows skip pgmq so the cloud worker never gets a job it cannot reach, `DELETE /connections/{id}` with counts in the audit row). Audit row per mutation, in-transaction; config **keys** only in audit detail, never values. |
-| Queue worker | `worker.py`, `vectasec worker` | Drains `pgmq.vectasec_scans`, adopts the queued scans row (no orphans), poison-message cap via `read_ct`, and the stuck-`running` reaper. Observed executing console-queued scans live. |
-| Connector field specs | `registry.py` `ConnectorField`, declared per-connector in `connect/*.py` | Each connector declares what a human must supply; drives the console form, `GET /connectors`, CLI validation. `validate_config()` is the one shared gate. |
-| CLI | `cli.py` | `scan` (`--connection <name>` rescans from stored config, or ad-hoc `--type`), `connections` (`list`/`add`/`test`/`rm` with dry-run default), `scans`, `rules`, `findings`, `doctor` (incl. queue depth), `worker`. |
-| Console connect-and-scan | `apps/web/app/connections/*`, `app/scans/*`, `components/{AutoRefresh,ScanStrip}.tsx`, `lib/{engine,tenant}.ts` | Add-connection form (per-connector fields, secrets as password inputs, never echoed), per-row Scan now / Test / Remove, `/scans` history with error strings, ambient scan strip, poll-while-in-flight refresh. Every mutation re-verifies the user (revocation-checked) and derives the tenant from an RLS-read row — never from the form. |
-| Dev scan targets | `deploy/dev/docker-compose.yml` | Misconfigured Kafka **and RabbitMQ** (guest remote login deliberately enabled), each bad value annotated with the rule it should trigger. |
-| Console pages | `apps/web/app/**` | Server-rendered findings queue + detail, assets + blast radius, connections, compliance. Reads under RLS; mutations forwarded to the engine. |
-| Collector code | `services/collector/src/collector/**` | Outbound-only design, local credentials, `redact()` boundary, `preview` for security review. **The code. Not a working deployment** — see PARTIAL. |
-| Tests | `services/engine/tests/`, `services/collector/tests/` | **Run `uv run pytest` in each — this document deliberately states no count.** A hardcoded total was wrong here, in the README twice, and in ARCHITECTURE.md for exactly as long as it took someone to add a detector, and a stale number in a document whose only asset is being checkable is worse than no number. What the suite is: offline unit tests over detectors, redaction, `scan.py`'s pure logic, `ai.py`'s citation gate, and `compliance/map.py`'s no-pass contract. What it is not: see gap #8. |
-| Research | `docs/research/**` | Sourced rulepack, compliance-mapping, threat-landscape, platform-API, console-UX notes. |
+| **Repo pushed** (new) | `github.com/zhask-ai/VectaSec` | 8 commits; local `main` == `origin/main` (`1161ab3`). The 07-17 "3 commits, most of the tree untracked" state is over. **But**: the 2026-07-23 work described below was still uncommitted at read time — GitHub's `main` does not yet contain it. |
+| **Engine API auth: verified tokens** (new) | `api/auth.py`, `api/main.py::principal()` | Three paths — see the auth matrix in [ARCHITECTURE.md](ARCHITECTURE.md). (1) Engine service token (`VECTASEC_ENGINE_TOKEN`, constant-time compare, optional tenant pinning) for the console's server side; (2) Supabase user JWT verified against the project's public JWKS (ES256/RS256, `aud`+`exp`+`sub` enforced), tenant resolved from `tenant_members`, never from the request; (3) bare `X-VectaSec-*` headers **only** when `VECTASEC_DEV_TRUST_HEADERS` is explicitly enabled — **default OFF, no localhost carve-out**, with a loud startup warning when on. JWT verification (`api/auth.py`) is pushed; the default-OFF flip and the engine-token path were working-tree at read time — **`origin/main` still defaults header trust ON**. Tested in `tests/test_api_auth.py`, `tests/test_auth.py`. |
+| **Credentials in Supabase Vault** (new) | `creds.py`, `supabase/migrations/20260723000002_vault_creds.sql`, `scan.py::ensure_connection_with_creds` | Gap #11b closed in the tree: fields a connector declares `secret=True` are split out of `config` at write time (API, CLI, scan), stored as one Vault secret per connection, referenced by `connections.creds_ref` (now a real uuid), merged back **in memory only** at collect time. Empty re-submitted secret = "unchanged", not "empty password". Secret deleted in the same transaction as its connection. The migration backfills pre-existing plaintext rows and documents the pgmq-archive purge (`delete from pgmq.a_vectasec_scans`) — the backfill and purge are reported executed against the live project on 2026-07-23, which this document **cannot verify from the tree**. Working tree, not pushed. Tests: `tests/test_creds.py`. |
+| **Compliance actually evaluates** (new) | `scan.py` (both persist paths), `compliance/map.py::evaluate()`, migrations `006`/`007` | The 07-17 "nothing calls it" gap is closed and **pushed**: `evaluate()` runs inside the same transaction as every completed scan (inline/worker and collector-push paths both), so `controls` can never lag findings. The no-pass contract survived intact and got its missing halves: `control_attestations` (006) lets a human attestation turn a clean control into `pass` (a live failing finding always beats it), and `controls.unknown_finding_ids` (007) keeps not-assessable findings as coverage gaps, never fails. `POST /compliance/{framework}/{control_id}/attest` is the API surface. |
+| **Assessability is a state, not prose** (new) | migration 006 (`findings.assessment`), `contracts.py` `Hit.assessable`, used throughout `detect/aws.py`, `detect/k8s.py`, `detect/rabbitmq.py` | Gap #19 closed and pushed: a rule that cannot read its evidence files a `not_assessable` finding with a reason — a first-class coverage gap the console renders distinctly and `evaluate()` maps to `unknown`. AccessDenied on an AWS service, a 403 on a K8s resource type, a redacted Kafka config — all land as this state, never as silence or a pass. |
+| **Hash-chained evidence ledger** (new) | migrations 006 (`prev_hash`/`row_hash`, `verify_ledger()`), 008 (FK housekeeping) | Gap #15's chosen option landed and is pushed: each observation hashes over its predecessor per finding; delete, reinsert, or reorder breaks the chain and `verify_ledger()` reports where. Honest limits: rows written before 006 carry no hash (excluded, stated in the migration); `verify_ledger()` is a SQL function **nothing schedules or exposes** — no CLI/API surface calls it, so tamper-evidence exists but tamper-*checking* is a manual query; and the chain detects rewrites, it does not prevent them — an external WORM mirror remains undone. 008 fixes the trigger blocking `ON DELETE SET NULL` on `resource_id` (resource churn used to abort), narrowing append-only to the evidence fields, which is what the guarantee was always about. |
+| **Realtime wired in the schema** (new) | migration 006 §3 | Gap #7 closed and pushed: `findings` and `scans` added to the `supabase_realtime` publication (guarded, idempotent). RLS still governs what a subscriber receives. `LiveFindings.tsx` was written for this; live delivery **observed working is not claimed here** — the DB prerequisite exists now, the end-to-end observation is still owed. |
+| **Kafka emits edges** (new) | `connect/kafka.py` (`broker --hosts--> topic`), `tests/test_connect_kafka_edges.py` | Gap #9 closed, pushed. The end-to-end target no longer produces an empty graph. |
+| **One blast-radius implementation** (new) | `graph.py`, `api/main.py::blast_radius` | Gap #6 closed, pushed: the endpoint now delegates to `graph.blast_radius` (per-path cycle guard, shortest-path, `depth_bounded` truncation flag, undirected default) and only enriches with open-finding counts and edges. The divergent inline walk is gone. `tests/test_graph.py`. |
+| **Continuous scheduling, DB-side** (new) | `supabase/migrations/20260723000001_scheduler_trend.sql` | `connections.scan_interval_minutes` (NULL = point-in-time), `queue_due_scans()` run by pg_cron every minute: inserts the same `queued` scans row and pgmq payload as `POST /scans` (shape mirrored from `api/main.py::_enqueue_scan`, validated by `worker.py::parse_job`); collector-mode connections get only the row, for `GET /collector/jobs`. Double-queue guarded (`FOR UPDATE SKIP LOCKED` + skip while queued/running). Working tree, not pushed; **cron execution on the live project is not verified from the tree.** The console shows the cadence (`connections/page.tsx`) and has a whitelist-only set-cadence action (`connections/actions.ts`) — but at the moment this snapshot was read, the `PATCH /connections/{id}` route that action calls was **not present** in `api/main.py` (concurrent work was landing; re-verify before relying on the setter). |
+| **Posture history + trend** (new) | same migration (`posture_snapshots` + `snapshot_posture()` trigger), `apps/web/app/page.tsx::PostureTrend` | One snapshot per scan reaching `done`, throttled to one per tenant per 5 minutes. **The trigger duplicates the score formula of `apps/web/lib/posture.ts` digit-for-digit — they must change in lockstep** (see ARCHITECTURE.md, which now carries the warning). Overview renders a 30-point sparkline. Working tree, not pushed. |
+| **AWS connector — the agentless path, made real** (new) | `connect/aws.py` (21 rules in `detect/aws.py`) | One connection → SQS, SNS, EventBridge, MSK, API Gateway v1+v2, per region, strictly List*/Get*/Describe*. Cross-account `AssumeRole` + ExternalId is a declared field — the README's agentless claim is now true **for AWS specifically** and still false for everything else. Per-service error isolation; AccessDenied → not-assessable findings. Pure parse layer tested against golden fixtures (`tests/fixtures/aws_responses.json`) — boto3 and live accounts stay out of the suite, which also means **no live AWS account has been scanned in CI**. Working tree, not pushed. |
+| **Kubernetes/mesh connector** (new) | `connect/k8s.py` (18 rules in `detect/k8s.py`) | One cluster read → Istio, Linkerd, Gateway API, Ingress, Service exposure, RBAC, ServiceAccounts + token secrets. LIST/GET only; token values never leave the metadata snapshot; 404 = CRDs absent, 403 = recorded and not-assessable. Pure `_build_resources` tested offline. Working tree, not pushed; **no live cluster scan is claimed.** |
+| **MCP dual-generation migration** (new) | `connect/mcp.py`, `detect/mcp.py` (24 rules) | The 07-17 pack was pinned to spec `2025-11-25` — a revision superseded on 2026-07-28. The connector now tries the stateless `server/discover` generation first and falls back to the legacy `initialize` handshake, recording which generation the server speaks; the pack grew lifecycle rules (legacy revision, deprecated features, session dependency, Trace Context) and RFC 9207 `iss` checking. Working tree, not pushed. |
+| **Coverage matrix** (new) | [docs/coverage-matrix.md](coverage-matrix.md) | The public, falsifiable per-connector statement: reads, kinds, edges, NHI, rule counts, and — the point — what is *not* covered. |
+| Core + platform schema | migrations `20260717000001`–`002` | As before. 18 tenant tables, FORCE RLS, `pgmq` + `pg_cron`. |
+| Citation gate | migrations 002 + 005 | Unchanged: deferred constraint triggers on `ai_outputs` + `ai_output_evidence`, all four bypasses attacked in CI. |
+| Contracts + registry | `contracts.py`, `registry.py` | Unchanged: `@connector`/`@detector` auto-registration; `Hit` grew `assessable`/`assessment_reason`. |
+| Scan loop | `scan.py` | collect → detect → persist, one transaction, fingerprint dedup, stale-marking, per-detector error isolation, suppressions, and now compliance recompute + Vault merge. |
+| Connectors (7) / Detectors (129) | `connect/`, `detect/` | Counted from the registry 2026-07-23 (`uv run vectasec rules`). Per-pack breakdown and caveats: [coverage-matrix.md](coverage-matrix.md). |
+| NHI / identity model | `identity.py`, `detect/identity.py`, `/identities` | All 7 connectors now feed it — `@identity_extractor` for kafka/rabbitmq/kong/redis/mcp in `identity.py`, aws/k8s inline in their connectors. Credentials remain metadata-only. |
+| Data classification (DSPM) | `classify.py`, `detect/data.py` | Unchanged; "named like" honesty intact. |
+| Posture score + dashboard | `lib/posture.ts`, `app/page.tsx`, `vectasec posture` | Unchanged formula — now duplicated in the snapshot trigger (see the lockstep warning above). |
+| Grounded AI triage | `ai.py` | Citation-gated as before. Gap #14 (single pinned model) is closed: a model *chain* (`MODELS`, primary overridable via `VECTASEC_AI_MODEL`) hands off on unavailability before falling back to deterministic. |
+| Engine API (actions) | `api/main.py` | Connection lifecycle, scans, finding status/assign/triage, suppressions, compliance read + attest, blast radius, collector control plane. Audit row per mutation, in-transaction; config keys only in audit detail. |
+| Queue worker | `worker.py`, `vectasec worker` | Unchanged: drains `pgmq.vectasec_scans`, adopts rows, poison-message cap, stuck-`running` reaper. |
+| CLI | `cli.py` | As before, plus Vault-aware `connections add`/`test`/`rm` (secrets split to Vault, merged in memory, deleted with the connection). |
+| Console | `apps/web/app/**` | Routes: `/`, `/findings(/[id])`, `/assets(/[id])`, `/identities`, `/connections`, `/scans`, `/compliance`, `/login`. **Gap #6b (JS row-count cap) is closed and pushed**: `assets/page.tsx` and `connections/page.tsx` now use `LIST_LIMIT` pages + `count: 'exact'` head-counts with visible truncation, never an unbounded select tallied in JS. |
+| Collector code | `services/collector/**` | Outbound-only design, local credentials, `redact()` boundary, `preview`. The code, and both endpoint ends. **Not an observed round trip** — see Known gaps. |
+| Tests | `services/engine/tests/`, `services/collector/tests/` | Offline unit suites (see "Verified today" for the observed pass on this date; this document still refuses to hardcode a count as a claim). New since 07-17: auth (JWT + collector token + engine token), creds/Vault, AWS/K8s connectors + packs from golden fixtures, kafka edges, graph, MCP dual-generation. Still absent: anything integration-level against a real DB — see Known gaps. |
+| CI definition | `.github/workflows/ci.yml` | Engine+collector units, web build, live dev-Kafka detectors, migrations-from-empty, adversarial cross-tenant RLS + integrity triggers. **Green on GitHub: still never observed** — and the 2026-07-23 work was uncommitted at read time, so CI has, at best, run against a tree that predates most of this document. |
 
 ---
 
 ## PARTIAL
 
 ### Phase 0 — Foundation
-**Verdict: substantially done. Fails its own "Done when" on two counts.**
+**Verdict: done in substance, with two proofs still owed.**
 
-The bar was: *"connect a real (managed) Kafka, scan, see a cited finding update live; the same stack runs against self-hosted Supabase."*
-
-- ✅ Schema, hardened RLS, `pgmq`, `pg_cron`, engine skeleton, evidence ledger + citation gate, one connector end to end.
-- ⚠️ **Kafka is scanned via Docker, not a real managed cluster.** No MSK, no cross-account role, no agentless path (see NOT BUILT).
-- ⚠️ **"Update live in the console" is not reachable.** `LiveFindings.tsx` is written and correct, but (a) sign-in doesn't exist so you can't get to the page, and (b) the two DB-side prerequisites are in no migration: `alter publication supabase_realtime add table findings;` and a Realtime authorization policy on `realtime.messages`. The component fails silently by design — which means this has never actually been observed working.
-- ✅ **CI exists.** `.github/workflows/ci.yml`: engine + collector unit tests, web typecheck/build, the detectors against a live dev Kafka, and — the one that matters — adversarial cross-tenant RLS queries and the two integrity guarantees (citation gate, append-only ledger) against the real migrations applied to an empty database. Aggregate `ci` job for branch protection. **Never observed green on GitHub** — the repo has 3 commits and most of the tree is untracked, so nothing has pushed.
-- ⚠️ **On-prem path exists on paper only.** `deploy/onprem/` — Compose, Caddyfile, engine/web Dockerfiles, and a Helm chart (11 templates: engine/web/worker deployments, services, ingress, networkpolicy, secret, configmap, serviceaccount). Per [deploy/onprem/README.md](../deploy/onprem/README.md) §Validation status: `docker compose config`, `caddy validate`, `helm lint` and `kubeconform -strict` all pass — **and the stack has never been started.** Syntax and schema are verified; runtime is not. Nothing proves an image builds, a migration applies, or a container reaches its neighbour. It also inherits gap #5 below: containerising the engine necessarily overrides its `127.0.0.1` bind, so the self-asserted-header cross-tenant hole is exposed to whatever can reach it, with a Caddy CIDR gate standing in for the authentication that does not exist. **Do not deploy it without reading its README.** On-prem parity is unproven.
+- ✅ Schema (10 migrations), hardened RLS, integrity triggers + hash chain, engine, worker,
+  connect→scan→findings from both surfaces, sign-in.
+- ✅ Realtime prerequisites now in the schema (006) — the *live console update* itself still
+  unobserved.
+- ⚠️ **CI has never been seen green on GitHub.** The workflow is real and ran locally; the repo
+  is pushed; nothing here verifies an Actions run. Push the working tree, open a PR, look.
+- ⚠️ **On-prem exists on paper only.** `deploy/onprem/` (Compose, Caddy, Helm) validates
+  (`compose config`, `helm lint`, `kubeconform`) and **has never been booted**. It predates the
+  auth changes — its README and Caddy CIDR gate were written for the header-trust engine; re-read
+  both before any deploy. On-prem parity is unproven.
 
 ### Phase 1 — Core product + first sale
-**Verdict: the rulepacks are ahead of plan; the plumbing is missing. Not close to its "Done when".**
+**Verdict: the technical spine is nearly done; everything involving a second party is not started.**
 
-| Phase 1 item | State |
+| Item | State |
 |---|---|
-| The Collector, end to end | ⚠️ **Both ends exist; the round trip is unproven.** `collector/main.py` enrolls and polls `/collector/enroll`, `/collector/heartbeat`, `/collector/jobs`, `/collector/results` — and all four now exist in `api/main.py` (HMAC service tokens, tenant-scoped job claiming with `skip locked`, persist-only results path that never receives `Resource.raw`). `POST /connections/{id}/scan` on a collector-mode connection leaves the queued row for `/collector/jobs` rather than pgmq. What has NOT happened: a real collector process completing enroll → poll → scan → push against them. Until that is observed, treat the loop as untested integration, not a working feature. |
-| Kafka connector + rulepack | ✅ 20 rules. |
-| Kong connector + rulepack | ✅ 16 rules. |
-| One iPaaS | ❌ Not started. |
-| Asset graph | ⚠️ `resources` + `edges` persist; Kong/RabbitMQ/MCP emit edges. **The Kafka connector emits none** (`Collected(resources=..., edges=[])`) — so the only end-to-end target produces an empty graph and a blast radius of one node. `graph.py` exists and is unreferenced (see Known gaps). |
-| Findings workflow (assignee, suppression-with-expiry, dedup) | ✅ Via the engine API. Suppressions apply at next scan, and the API says so. |
-| Compliance: PCI 6.4.2 + DORA + OSCAL | ⚠️ **Mapping written, never evaluated.** `compliance/map.py` is 1000+ lines of sourced PCI/DORA/HIPAA/MCP-spec mapping with a working `evaluate()`. **Nothing calls it.** The `controls` table is never populated, so `GET /compliance/{framework}` always returns `count: 0` and the console's compliance page always renders empty. No OSCAL export. |
-| Grounded-AI triage v1, fingerprint-cached | ✅ `ai.py`. |
-| Slack + Jira out | ❌ `integrations` / `routing_rules` tables exist. No code. |
-| SSO + RBAC | ❌ `tenant_members.role` column exists and is read by nothing. No RBAC anywhere. No SSO. |
-| Audit log | ✅ Written on every mutation, in-transaction, append-only. |
-| SOC 2 observation window | ❌ Not started. **Do not claim SOC 2 anywhere.** |
-| Open-source benchmark + free Collector | ❌ Not published. Repo has 3 commits and most of the tree is untracked. |
-| <10-min cloud / <30-min Collector onboarding | ❌ No onboarding flow exists. |
+| Collector round trip | ⚠️ Both ends exist (`collector/main.py` ↔ `/collector/*` in `api/main.py`, HMAC service tokens, tenant-scoped job claiming, raw-free results path). **A real collector completing enroll → poll → scan → push against a live engine has still not been observed.** (Migration 008's header mentions a "collector round-trip's cleanup" surfacing a bug — evidence someone exercised parts of it; the tree contains no artifact proving the full loop, so the claim stays: unproven.) |
+| Compliance | ✅ Evaluated per scan; attestation flow exists (006 + `/attest`). No OSCAL export, no Article 28 register, no evidence bundle export. |
+| Findings workflow | ✅ Status/assign/suppress-with-expiry/triage via the engine API. |
+| Continuous scanning | ✅ DB-side (working tree); cron execution on the live project + the console setter route not verified at read time (see DONE). |
+| Alerting / Slack / Jira | **In flight at snapshot time** (an action-layer migration and `notify.py` were landing mid-read). Not assessed here; do not claim it either way until it lands and is verified. |
+| SSO + RBAC | ❌ No SSO/SAML/SCIM anywhere. An RBAC surface was **in flight** at snapshot time (`apps/web/lib/role.ts` existed, untracked); not assessed here. |
+| SOC 2, design partner, customer | ❌ None. Do not claim any of them anywhere. |
+| Onboarding (<10-min cloud) | ⚠️ The console flow is close in practice; nothing measures or guides it. |
 
-### Phase 2 — Breadth + identity
-**Verdict: one connector landed early. Everything else absent.**
-
-- ✅ **RabbitMQ** connector + 18 rules (Phase 2 work done during Phase 1).
-- ❌ Istio, Apigee, Boomi/Workato/n8n.
-- ❌ **Identity / NHI**: no inventory, no OAuth-grant blast radius, no workload-identity audit. This is the *positioning wedge* in the README and there is no code for it.
-- ❌ **Supply chain**: no `iac-scan`, no GitHub Action, no SBOM, no CVE scan. (Some RabbitMQ rules read a version string and flag known-CVE series — that is a version check, not a CVE scan.)
-- ❌ DORA Article 28 register generator; Vanta/Drata push.
-- ❌ Billing/metering (the `usage` table exists and nothing writes to it), SCIM, SIEM/webhook, read API, US+EU regions.
-
-### Phase 3 — MCP + runtime + enterprise
-**Verdict: the MCP rulepack landed very early. Nothing else.**
-
-- ✅ **MCP** connector + **19 rules**: tool-poisoning (hidden instructions, invisible chars, schema poisoning), auth-spec violations (PRM, PKCE, scope, AS metadata), transport (plaintext, deprecated SSE, origin validation), session handling. The spec revision is pinned (`MCP_SPEC_2025_11_25`) because MCP moves fast enough to invalidate detectors.
-- ❌ Registry/allowlist with rug-pull detection.
-- ❌ MCP tool blast radius traced through the middleware it wraps — needs the graph, and Kafka emits no edges.
-- ❌ Runtime sensor (Tetragon/Pixie), egress anomalies, cross-layer attack paths.
-- ❌ Enterprise: dedicated tenant, hardened/air-gapped on-prem, offline licensing, BYO-KMS, Terraform provider, **SOC 2 Type II**.
+### Phases 2–3 — Breadth + identity, MCP + enterprise
+The 07-17 verdicts are mostly obsolete in the good direction: mesh posture (via K8s), an
+agentless cloud path (AWS), MCP current-spec coverage, and cross-connector NHI all exist now.
+Still absent from those phase lists: iPaaS connectors (any), supply chain (SBOM/CVE/IaC — the
+version rules are floors, not a scanner), NHI usage/staleness telemetry, registry/rug-pull
+detection, runtime sensor, enterprise on-prem hardening, billing/metering (`usage` table still
+written by nothing), SIEM export, public read API.
 
 ---
 
 ## NOT BUILT (claimed somewhere, exists nowhere)
 
-Things the README, the plan, or the schema imply that have **zero code**:
-
-- **Agentless cloud path via cross-account read-only role.** The README says managed middleware "can optionally be reached agentlessly via a cross-account read-only role — no install". There is no AWS SDK, no IAM, no `AssumeRole`, no MSK-specific code anywhere. What exists as the "cloud path" is `run_scan()` dialing a host with a config dict. That is not agentless — it is the same connector run from a different machine.
-- **Vault.** `connections.creds_ref` is commented "Vault ref (cloud path)". No Vault integration exists. Credentials for the cloud path live in `connections.config` as plain JSONB.
-- **Supabase Storage.** Named in the architecture. Unused.
-- **Edge Functions.** `supabase/functions/` does not exist.
-- **`packages/`.** `pnpm-workspace.yaml` globs `packages/ui` and `packages/contracts-ts`. **The directory does not exist.** No shared UI library, no generated TS contracts (`apps/web/lib/types.ts` is hand-maintained and can drift from `contracts.py` with nothing to catch it).
-- **Most of the plan's §16 repo layout.** `identity/`, `supplychain/`, `mcp/`, `evidence/`, `graph/`, `scan/`, `ai/` as packages; `packages/iac-scan`, `packages/benchmark`; `deploy/saas`. None exist. `graph.py`/`scan.py`/`ai.py` are flat modules. Treat §16 as a wish list, not a map. (`deploy/onprem` **does** exist — see Phase 0 above. It is the one §16 path that landed.)
-- **SSO / SAML / SCIM.** Sign-in itself now exists (`apps/web/app/login/page.tsx` — email+password via `signInWithPassword`, verified end to end against the live project), but it is *only* that. No SSO, no SAML, no SCIM, no invite flow, no password reset, no user directory — which is also why "assign a finding to a colleague" is a dead end (see Known gaps).
-- **SOC 2 (any type), on-prem validation, a design partner, a customer.** None. Do not imply otherwise in any doc, deck, or commit message.
+- **Agentless for anything but AWS.** The README's cross-account claim is now true for AWS only.
+  There is no Azure/GCP code in the tree at read time (in flight — not assessed), and no managed
+  path for any broker outside MSK-via-AWS.
+- **SSO / SAML / SCIM, invites, password reset, user directory.** Sign-in is email+password only.
+- **Supabase Storage, Edge Functions, `packages/`** (`pnpm-workspace.yaml` still globs two
+  directories that don't exist; `apps/web/lib/types.ts` is still hand-maintained — gap #13 lives).
+- **SBOM / CVE scanning / IaC static analysis.**
+- **Runtime sensor.**
+- **SOC 2 (any type), a validated on-prem deploy, a design partner, a customer.**
 
 ---
 
 ## Known gaps — the specific list
 
-Ranked by how much they'd hurt.
+Ranked by hurt. Items from 07-17 that closed are gone from this list (see DONE for #4 compliance,
+#5 header trust, #6 blast radius, #6b row caps, #7 realtime, #9 kafka edges, #11b/Vault, #14
+model pin, #15 hash chain, #19 assessability); their history is in git.
 
-0. ~~**A scan that dies mid-collect leaves a stuck `running` row, and nothing reaps it.**~~ **FIXED** — the worker exists now and owns the reaper it asked for: `worker.reap_stuck_scans` runs every loop iteration (and via `vectasec worker --reap-only`), ageing `running` rows older than the lease window to `error` with a `reaped:` marker merged into stats. The original entry, for the record:
+1. **The 2026-07-23 work is uncommitted, so nothing gates it.** At read time `git status` showed
+   the AWS/K8s connectors, Vault creds, scheduler migrations, MCP migration, and the auth
+   default-flip all outside `origin/main`. Until committed and pushed, CI covers none of it, and
+   **GitHub's `main` still ships header-trust default-ON** (`origin/main`'s `api/main.py` reads
+   `VECTASEC_DEV_TRUST_HEADERS` defaulting truthy). Committing and pushing is the single cheapest
+   risk reduction available.
 
-   **A scan that dies mid-collect leaves a stuck `running` row, and nothing reaps it.** Introduced deliberately by `20260717000003` + the `scan.py` transaction fix, and recorded here rather than papered over. `run_scan` now COMMITs the `connections` + `scans('running')` rows *before* collecting, because holding them uncommitted took an exclusive lock on the `connections` row for the entire collect — a 5-minute Kafka connect blocked every concurrent scan of that connection, and `running` was a status no reader could ever observe (the row was invisible outside the open transaction). The trade is real and is the right way round: a *crash* (SIGKILL, OOM, pod eviction) during collect now leaves a durable `running` row that nothing transitions, where before it left no row at all. An in-process exception is still recorded — both the connector and the persist phase now write `status='error'` on their own transaction. **There is no reaper**: nothing ages out a `running` scan, so the console would show it as in-flight forever. Wants a sweeper (`update scans set status='error' where status='running' and started_at < now() - interval '1 hour'`), which is naturally the queue worker's job (gap 2) — a worker owns a scan's lifecycle and is the right place for a heartbeat/lease. Not built here: inventing a reaper without the worker that leases the scan is guesswork about a component that does not exist yet.
+2. **The engine still trusts the console-asserted actor (and tenant) under the service token.**
+   `principal()` path 1: a caller holding `VECTASEC_ENGINE_TOKEN` asserts `X-VectaSec-Tenant`
+   (unless pinned via `VECTASEC_ENGINE_TOKEN_TENANT`) and `X-VectaSec-Actor` freely. That is
+   authentication of the *service*, not the user — the console verifies the user before calling,
+   but the engine cannot distinguish that from a compromised token-holder forging any actor into
+   the audit trail. Transitional by design; the end state is per-user JWTs on every console call.
 
-0b. **Findings with no resource are not re-fingerprinted.** `20260717000003` rewrites `findings.fingerprint` to include `connection_id`, joining through `resources` to get it. A finding whose `resource_id` is NULL (or whose resource has a NULL `connection_id`) has no connection to hash, so no correct new value exists and the row keeps its old fingerprint. It becomes unreachable: the next scan inserts a fresh row under the new key, and the old one keeps its triage state and ages in place. This should be rare — `findings.resource_id` cascades on resource delete, so it is only NULL when `_persist_resources` did not return an id for the ext_id. The migration deliberately does **not** delete those rows: deleting a security finding is not a migration's call. Worth a query before the next release to confirm the count is zero.
+3. **Collector round trip unobserved; on-prem never booted; CI never seen green on GitHub.**
+   Three standing "exists but unproven" items — each is one session of running things, not code.
 
-1. ~~**The console is unreachable.**~~ **FIXED** — `/login` is a real email+password sign-in (`app/login/page.tsx`), verified end to end: the whole connect→scan→findings console flow above was driven through it as an authenticated user with a `tenant_members` row. Still absent: SSO/SAML/SCIM, invites, password reset (§NOT BUILT).
+4. **`verify_ledger()` is never called.** The hash chain is only as good as someone checking it:
+   no CLI command, endpoint, or cron invokes it. Add `vectasec doctor --verify-ledger` or a
+   scheduled check before telling an auditor the word "tamper-evident".
 
-2. ~~**No queue worker.**~~ **FIXED** — `vectasec worker` (worker.py) reads the queue with a visibility timeout, `run_scan` accepts the `scan_id` to adopt (no orphan placeholder), poison messages are archived after `read_ct` exhausts, and a failed archive only costs a redundant idempotent re-run. Observed draining console-queued scans live on 2026-07-17.
+5. **The model still owns `priority`, and observation text is attacker-controlled.** Unchanged
+   from 07-17, and the surface *grew*: MCP scans quote hostile servers, and now AWS policy
+   documents and K8s annotations are also attacker-influencable text that lands in observations
+   and therefore in the AI prompt. The mitigations hold (observation fencing, char caps,
+   tamper-note warning in `SYSTEM`; `findings/data.ts` sorts on deterministic severity, never AI
+   priority — a steered finding is misdescribed, not hidden). The product decision — take
+   `priority` from the model, or refuse downgrades of critical/high — remains deliberately
+   unmade. Decide it **before** anything routes, alerts, or SLAs on `priority`; the in-flight
+   action layer is exactly such a surface, so this gap is about to stop being theoretical.
 
-3. ~~**The Collector has no other end.**~~ **PARTIALLY FIXED** — the four `/collector/*` endpoints exist (§PARTIAL, updated). What remains open is observing a real collector complete the round trip; until then the loop is still not deployable-with-confidence.
+6. **The posture formula now exists in two places that must change together.**
+   `snapshot_posture()` (migration `20260723000001`) mirrors `apps/web/lib/posture.ts`
+   weight-for-weight. Nothing enforces the lockstep. A drift means the sparkline and the live
+   score silently disagree — in the one product whose pitch is that its numbers are checkable.
+   A shared-fixture test (same counts → same score, JS and SQL) would close this cheaply.
 
-4. **Compliance never runs, and when it does it can only ever say `fail` or `unknown`.** `compliance/map.py::evaluate()` is dead code — nothing calls it, so the `controls` table is permanently empty and the console's compliance page — the budget-holder's view — renders empty. One call from the scan loop fixes that, and it is the cheapest high-value gap on the list.
+7. **Scheduler correctness is asserted by mirror, not by contract.** `queue_due_scans()`
+   reproduces `_enqueue_scan`'s payload shape by hand; `worker.py::parse_job` archives anything
+   else as poison. A payload-shape change in Python that forgets the SQL twin turns every
+   scheduled scan into archived poison, silently. Same fix shape as #6: one test that feeds the
+   SQL-built payload to `parse_job`.
 
-   **Know what that call buys before you sell it.** `evaluate()` has no path to `pass` — the `allow_pass` flag that used to provide one was removed, deliberately, because the `controls` table has no provenance column and a scan-derived pass would have been indistinguishable from a human attestation while `apps/web/app/compliance/frameworks.ts` promises the buyer every pass is attested. So wiring the call yields a page of `fail` and `unknown`, a score of "Not scored" (0/0 renders as null, not 100%), and a coverage number. That is the honest output and it is **not** a compliance score.
+8. **Test coverage is offline-only where it is not absent.** Everything runs against fixtures,
+   fakes, and `MockTransport`. Not covered by any test: `scan.py`'s transactional spine against a
+   real DB, `api/main.py` tenant scoping, the collector against a real engine, the scheduler
+   against real pg_cron, any live AWS account or K8s cluster. The integrity/RLS guarantees are
+   exercised only by the CI SQL jobs (never yet observed on GitHub).
 
-   **The gap this leaves is a product decision, not a bug, and it is not made.** A real "pass" needs an attestation mechanism that does not exist: no attestation table, no column, no writer, no UI (`grep -rni attest` over the repo returns only the three prose sites making the promise). Until someone builds it, VectaSec cannot tell a customer a control is met — only that it is failing or unproven. Whether that is a defensible product or an unsellable one is the open question; do not close it by re-adding a flag that writes `pass` from silence.
+9. **Stale env/config examples.** `.env.example` and `apps/web/.env.example` predate the auth
+   change: neither mentions `VECTASEC_ENGINE_TOKEN` (which the console's `engine.ts` now sends)
+   or `VECTASEC_DEV_TRUST_HEADERS`, and the web example still claims the console has exactly two
+   variables. A new operator following them gets a 401 from the engine with no hint why.
 
-5. **Engine API auth is self-asserted.** `X-VectaSec-Tenant` / `X-VectaSec-Actor` headers, no verification: any caller can name any tenant and any actor, giving cross-tenant writes and a forgeable audit trail. Mitigated only by binding `127.0.0.1` and by the console being the sole caller (`engine.ts` is `server-only`, URL not `NEXT_PUBLIC_`). **The engine must not be exposed to any untrusted network until it verifies a Supabase JWT.** `TODO(auth)` in `api/main.py`.
-
-6. **Two blast-radius implementations that disagree.** `graph.py` is entirely unreferenced — `neighbours`, `blast_radius`, `exposure_paths`, `summary`, all with careful cycle guards, shortest-path selection, and a `depth_bounded` truncation flag. `api/main.py::blast_radius` reimplements a *different* walk inline: directed-only, depth-guard only, **no per-path cycle guard**. On a cyclic graph (broker → topic → mirrors → back to broker — the docstring's own example) the API version can report the root as its own blast radius. One of the two must go.
-
-6b. **The Assets and Connections pages still count rows in JavaScript over an unbounded select, and hosted PostgREST caps that at 1000.** The Findings facets and the Overview counts were moved onto the `findings_facets` aggregate view (`20260717000004`) precisely because an unbounded `.select()` is silently truncated at Supabase's Max Rows while the `count: 'exact'` total beside it is not — two numbers, two mechanisms, disagreeing by construction past the cap. `apps/web/app/assets/page.tsx` (the `resources` + per-resource open-finding tallies) and `apps/web/app/connections/page.tsx` (per-connection resource and finding counts) have the same shape and were **not** fixed here. **Only the hosted/SaaS path is affected**: `deploy/onprem/docker-compose.yml` sets no `PGRST_DB_MAX_ROWS`, and PostgREST's own default is unlimited. The cap value is also unverified — the project's Max Rows setting was not readable, so 1000 is Supabase's documented default, not an observed number; the mismatch is a defect at whatever cap is configured.
-
-   **Not fixed because the honest fix is a product decision, not a one-line query change.** An aggregate view cannot rescue these pages the way it rescued the facets: both *render every row*, so the list itself is capped, not just the counts — a `resource_open_findings` view would be O(resources) rows and truncate at exactly the same place. Making these correct at scale means paginating the asset inventory (or adopting the Findings page's `LIST_LIMIT` + visible truncation footer), and how a security team should page through an estate they are trying to see whole is a question for whoever owns the inventory view. A silently capped count in a posture tool is worse than a visibly capped one, and both are worse than a page that admits what it is not showing. Until then: **treat asset and connection counts as unreliable above ~1000 resources or findings on hosted.** Note `connections` is bounded in practice by connections a human created, so that page's exposure is via its `resources`/`findings` reads, not its own list.
-
-   One trap for whoever takes this: the reflexive fix is a `SECURITY DEFINER` aggregate RPC. Do not. These tables are `FORCE RLS` and the view added in `20260717000004` is `security_invoker = true` for this reason — a definer-rights aggregate runs as `postgres` (BYPASSRLS) and would return every tenant's counts to every caller, turning a wrong-number bug into a cross-tenant leak.
-
-7. **Realtime is not enabled in the schema.** `LiveFindings.tsx` needs the `supabase_realtime` publication entry and a `realtime.messages` policy. Neither is in a migration. The component fails silent by design, so this looks like nothing rather than like a bug.
-
-8. **Test coverage is shallow where it is not absent.** Every test is offline and in-process. What is covered: detector logic, redaction, `scan.py`'s two pure functions (`fingerprint`, `_is_suppressed`), `ai.py`'s citation range-check against a stubbed client, `compliance/map.py`'s no-pass contract against a fake cursor. What is **not** covered by any test: `scan.py`'s actual spine (transactionality, dedup against a real DB, stale-marking), `api/main.py` (tenant scoping, audit-in-transaction, locking), `graph.py` — nothing at all. The two integrity guarantees and cross-tenant RLS are exercised **only** by the `rls-cross-tenant` CI job's raw SQL against real migrations, never by the Python suite — and that job has never run on GitHub (nothing is pushed), so it has only ever passed locally, if at all.
-
-9. **The Kafka connector emits no edges.** The graph, the blast radius, and every "what does this touch" story are empty for the only target we can scan end to end. Kafka should at minimum emit `broker → topic` (hosts) edges.
-
-10. ~~**Duplicate/conflicting resource constraints.**~~ **FIXED** by `20260717000003_pipeline_fixes.sql`, and it was worse than this entry said. Migration 001's `unique (connection_id, kind, name)` and 002's `resources_conn_extid_uniq on (connection_id, ext_id)` were both live while `scan.py` upserted `on conflict (connection_id, ext_id)` — which arbitrates only the *ext_id* constraint. The break needed no rename: **two distinct resources that legitimately share `(kind, name)`** miss the ON CONFLICT target entirely, take the INSERT path, and raise `unique_violation` on the legacy constraint. Kong reaches this on any ordinary deployment — `connect/kong.py` sets `name = instance_name or name`, and `instance_name` is null by default, so `key-auth` on two routes yields two `kind='plugin', name='key-auth'` rows with distinct ext_ids. The exception aborted the **whole scan**, and (until the `_mark_scan_error` fix landed alongside) rolled the `scans` row back with it, so it failed silently and permanently on every re-run. `ext_id` is the documented identity; the 001 unique is dropped.
-
-11. ~~**`connections.mode` is hardcoded.**~~ **FIXED** — `_ensure_connection` takes `mode` (applied on CREATE only; a rescan never flips an existing connection's mode), `POST /connections` and `vectasec connections add --mode` accept it, and `POST /connections/{id}/scan` routes collector-mode scans to the collector job path instead of pgmq. The console form creates cloud connections only, deliberately: a UI-created collector connection would have no `collector_id` and would sit unclaimed forever — the collector's own enrollment is the honest way to create those rows.
-
-11b. **Connection credentials are now reachable from a browser form, and still land in plain JSONB.** The add-connection form (and `connections add`) accepts passwords/tokens and stores them in `connections.config`, as the cloud path always has (§NOT BUILT → Vault). What bounds the exposure: secrets travel browser → Server Action → engine over the app origin; no console query ever SELECTs `config`; audit rows record config *keys* only; the browser role has no write path. What does not: anyone holding the engine's DB credential reads every stored secret. Vault/`creds_ref` remains the real fix before any multi-tenant deployment.
-
-12. **CI is written but has never run.** `.github/workflows/ci.yml` covers the unit tests (it runs `pytest` without asserting a count, deliberately), the web build, live-Kafka detectors, migrations against an empty database, cross-tenant RLS, and the two integrity triggers. None of it has ever executed: the repo has 3 commits and `apps/`, `services/`, `supabase/`, `deploy/`, `docs/research/`, `.github/` are all **untracked**, so nothing has been pushed and no branch protection exists. An unpushed workflow is a plan, not a gate — treat every CI-derived assurance in this document as unobserved until it is green on a real PR.
-
-13. **Hand-maintained type duplication.** `apps/web/lib/types.ts` mirrors `contracts.py` and the schema by hand. `packages/contracts-ts` was the plan's answer; it doesn't exist.
-
-14. **`ai.py` pins a model string.** `MODEL = "claude-opus-4-8"` with an env override. Fine, but there is no fallback model chain — an unavailable model drops straight to the rule-based path, which is safe but silently degrades quality.
-
-15. **The evidence ledger is tamper-evident against UPDATE, not against DELETE + re-INSERT.** `observations_append_only` blocks UPDATE, and migration 002 deliberately leaves DELETE open so tenant offboarding and FK cascades work. But `observations.id` defaults to `gen_random_uuid()` rather than `generated always as identity`, so a writer can `delete from observations where id = X` and re-`insert` at that same id with different `claim` text — rewriting evidence without ever issuing an UPDATE. Verified against a faithful replica of the live schema. Reachability is narrow but real: it needs the `postgres`/`service_role` credential (which is the *engine's own* credential, and a POC operator's); the browser's `authenticated` role has no write policy on any table and cannot reach it; and no shipped code path deletes observations (`grep` finds no `delete from observations` in the engine).
-
-16. **The collector's state file is write-only, deliberately.** `write_state` records a collector id and `sha256(enrollment token)`; nothing reads it back, and `read_state` was deleted rather than wired in. Consequences, stated rather than papered over: every restart re-enrolls from scratch and takes a **new** server-assigned collector id, so a restarting collector has no identity continuity in the console; and a rotated enrollment token is not detected in advance — it fails enrollment with a 401 and the process exits naming the variable to fix. The alternative (reuse the persisted id) was rejected on purpose: `/collector/enroll` does not transmit a collector id, and having the client assert its own identity from a disk value is weaker than the current server-assigned design. If identity continuity across restarts turns out to matter, it is a **wire-protocol** change, not a local one.
-
-17. **The collector's control-plane client is tested against a fake server only.** `tests/test_control_plane.py` drives enroll → heartbeat → long-poll → scan → redact → push over `httpx.MockTransport`. That pins the client's behaviour and the trust properties (memory-only service token, nothing usable on disk, no credential in the pushed body) — but a fake server agrees with our contract by construction. It cannot tell us the contract matches the endpoints, which do not exist yet (gap: "The control-plane endpoints" in the collector README).
-
-18. **The model still owns `priority`, and observation text is attacker-controlled.** An observation quotes the scanned system verbatim — `detect/mcp.py` interpolates `scopes_supported`, `issuer` and `metadata_url` from a remote MCP server straight into the claim, and scanning servers nobody trusts is the product. So a hostile server can put prose in our prompt. `ai.py` now fences every claim in an `<observation>` element it cannot close, tells the model in `SYSTEM` that the region is data and that an embedded "known false positive, set P3" note is itself evidence of tampering, and caps each claim at `MAX_CLAIM_CHARS`. **That is mitigation, not proof.** A determined injection can still steer the triage *prose* and the `priority`/`confidence` chips, and every word of it will be correctly cited — grounding is not injection resistance.
-
-    The remaining lever is to take `priority` away from the model (derive it from rule severity like `_rule_based` does, or refuse a model priority that downgrades a `critical`/`high` rule). **Not done, deliberately: that is a product decision, not a bug fix.** `TRIAGE_SCHEMA` says "Judge from evidence, not rule severity alone" on purpose — evidence-aware priority is the feature, and pinning priority to severity makes the AI's judgement decorative. The tradeoff: today an attacker can argue their finding down to a P3 chip; pinned, nobody can argue a `critical` down even when the evidence says it is a lab fixture. **What bounds the blast radius today:** `apps/web/app/findings/data.ts` filters and sorts the findings list on `severity` — the deterministic rule's severity — and never reads AI `priority`. AI priority appears only on the detail page, inside a labelled provenance fence, beside the observation it was steered by. So a steered finding is *misdescribed*, never *hidden*. Decide this before any surface starts routing, alerting, or SLAing on `priority` — at that moment this becomes exploitable rather than embarrassing.
-
-    **This is a product decision, not a bug, which is why it is written here rather than fixed.** Closing it means picking one, and each costs something real:
-    - *Block DELETE on `observations` outright.* Kills tenant offboarding and every FK cascade from `tenants`/`findings`. Not viable without a full soft-delete/retention design.
-    - *Allow DELETE only via a retention path* (e.g. a session GUC the retention job sets, checked by a BEFORE DELETE trigger). Cheap, but it is a speed bump against exactly the actor — someone holding the DB credential — who can also just `set` the GUC. Security theatre unless the retention job is the only thing with the credential, which today it is not.
-    - *Make the ledger externally verifiable* — hash-chain each observation over its predecessor, or ship an append-only mirror off-box (WORM storage / a second DB the engine can only INSERT to). This is the only option that actually survives a hostile credential-holder, and it is the one worth doing before anyone claims tamper-evidence to an auditor. It is a design task, not a trigger.
-
-    Until one of those lands, the honest claim is **"an observation cannot be UPDATEd"** and nothing stronger. ARCHITECTURE.md §2 and the README now say exactly that, and the CI integrity job carries a comment marking this as deliberately unasserted so its green is not misread as covering it.
+10. **Old structural items, still true:** hand-maintained `types.ts` (no `packages/contracts-ts`);
+    collector state file is write-only (restart = re-enroll, new id — a wire-protocol decision if
+    continuity ever matters); collector client tested against a fake server only; `usage` table
+    written by nothing; assets/connections pagination is honest now but the inventory still has
+    no way to *page through* beyond the first `LIST_LIMIT` rows.
 
 ---
 
-
-19. **A rule that cannot read its evidence has nowhere to say so except prose.** `docs/research/README.md` requires an evidence gap to be reported as NOT-ASSESSABLE and never as a pass. There is no such concept in the schema: a finding has a `severity` and a triage `status` (`open`/`suppressed`/`resolved`/…), and a rule that *cannot determine* its answer has exactly two options — stay silent, or fire and explain the gap in `detail` prose that no filter, count, or compliance mapping can read.
-
-    This bit `KAFKA.TOPIC.AUTO_CREATE_ENABLED`. The broker types `allow.everyone.if.no.acl.found` as PASSWORD and *always* redacts it to null, and `_is_true(None)` is `False`, so the rule's escalation gate read "unreadable" as "false" and then wrote the customer a conclusion it had not established: *"an authorizer is configured, so … no security boundary is crossed."* Absence of evidence, sold as evidence of absence, in the append-only ledger. **Fixed** (the redacted-but-explicitly-configured case now states that the question was not settled by this scan, and still does not escalate — escalating on an unknown would be a false positive). But the fix is a sentence in `detail`, not a state. The console still renders that finding as a plain `low`, and a buyer filtering by severity cannot distinguish "we checked, it's fine" from "we could not check".
-
-    **The decision is open and deliberately not made here.** A real fix is a third axis — an assessability state on `findings` (`assessed` / `not_assessable`) with a reason, written by the detector, surfaced in the console and consumed by `compliance/map.py::evaluate()` (which already refuses to emit `pass`, and would then have a principled source for `unknown` instead of inferring it from silence). That is a migration, a contract change to `Hit`, a console change, and a rulepack-wide audit of every `continue`-on-unknown branch — too large to land inside a detector fix, and it interacts directly with gap #4's attestation question. Until it exists, treat any VectaSec `low` on a redaction-prone key as "unproven", not "clean".
-
 ## What to do next (opinionated)
 
-In order, cheapest-first among the things that unblock the most (items about compliance wiring, sign-in, the worker, and Kafka edges from earlier revisions are done — see DONE):
-
-1. **Push, so CI actually runs.** The integrity and cross-tenant jobs exist and pass locally against a replica; until the tree is committed and pushed they gate nothing (gap #12).
-2. **Run the collector round trip.** Both ends exist; one observed enroll → poll → scan → push closes the most trust-critical open loop in the product (gap #3).
-3. **Verify a JWT in the engine.** The connect/scan/delete surface grew; the self-asserted-header window should close before anything binds off-localhost (gap #5).
-4. **Vault the connection credentials.** The UI now feeds `connections.config`; `creds_ref` should exist before any second tenant does (gap #11b).
-5. **Then gap #15** — a hash-chained or externally mirrored ledger — before anyone shows an auditor the word "tamper-evident".
-6. **Make `run_scan` adopt a `scan_id`, then write the worker.** Unblocks queued scans and, after it, the collector bridge.
-7. **JWT verification in `api/main.py`.** Required before the engine is reachable from anywhere but localhost.
+1. **Commit and push the tree, and watch CI go green on GitHub** (gap #1, and the standing
+   Phase-0 proof). Everything else in this list assumes the work survives.
+2. **Run the collector round trip once, for real** (gap #3). Both ends exist; observe
+   enroll → poll → scan → push and write down what broke.
+3. **Verify the scheduler end-to-end on the live project**: set a cadence (via SQL if the PATCH
+   route hasn't landed), watch `queue_due_scans()` fire on the cron tick, watch the worker drain
+   it, watch a `posture_snapshots` row appear.
+4. **Add the two lockstep tests** (gaps #6, #7) — cheap, and they guard the only two places where
+   SQL silently mirrors application code.
+5. **Wire `verify_ledger()` to a surface** (gap #4) before using "tamper-evident" with anyone.
+6. **Boot on-prem once.** Its README predates JWT auth and Vault; booting it will surface the
+   config drift now rather than in a customer's network.

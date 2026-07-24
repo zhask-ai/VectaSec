@@ -2,9 +2,9 @@
 
 import { revalidatePath } from 'next/cache';
 
-import { engineDelete, enginePost } from '@/lib/engine';
+import { engineDelete, enginePatch, enginePost } from '@/lib/engine';
+import { canEdit, getOwnMembership, getRoleInTenant } from '@/lib/role';
 import { createClient, getVerifiedUser } from '@/lib/supabase/server';
-import { getOwnTenantId } from '@/lib/tenant';
 import { specFor } from './connector-fields';
 
 /* Connection mutations: connect a system, test it, scan it, remove it.
@@ -27,7 +27,8 @@ import { specFor } from './connector-fields';
 
 export type ActionState = { ok: boolean; message: string } | null;
 
-const DENIED = 'You are not signed in, or this connection is not yours to change. Nothing was sent.';
+const DENIED =
+  'You are not signed in, this connection is not yours to change, or your role is view-only. Nothing was sent.';
 
 function isUuid(v: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
@@ -39,7 +40,10 @@ function str(form: FormData, key: string): string {
 }
 
 /** Authorize an action on an EXISTING connection: the row read under RLS is the proof this
- * user may act on it, and the row's tenant_id is the only tenant the engine is told. */
+ * user may act on it, and the row's tenant_id is the only tenant the engine is told. The
+ * caller's role in THAT tenant must allow mutation — viewers read this page; they do not get
+ * to scan, test, retime or delete from it, and hiding the buttons is not the check (a Server
+ * Action is directly POSTable). The engine enforces roles too; this is defense in depth. */
 async function authorizeConnection(connectionId: string) {
   if (!isUuid(connectionId)) return null;
 
@@ -54,9 +58,13 @@ async function authorizeConnection(connectionId: string) {
     .maybeSingle();
   if (error || !data) return null;
 
+  const tenantId = (data as { tenant_id: string }).tenant_id;
+  const role = await getRoleInTenant(tenantId);
+  if (!canEdit(role)) return null;
+
   return {
     actor: user.id,
-    tenantId: (data as { tenant_id: string }).tenant_id,
+    tenantId,
     type: (data as { type: string }).type,
     name: (data as { name: string }).name,
   };
@@ -90,10 +98,12 @@ export async function addConnectionAction(_prev: ActionState, form: FormData): P
 
   const user = await getVerifiedUser();
   if (!user) return { ok: false, message: DENIED };
-  const tenantId = await getOwnTenantId();
-  if (!tenantId) return { ok: false, message: DENIED };
+  // Membership supplies both the tenant (same refusal semantics as lib/tenant.ts — a
+  // multi-tenant user gets no create-actions until a switcher exists) and the role gate.
+  const membership = await getOwnMembership();
+  if (!membership || !canEdit(membership.role)) return { ok: false, message: DENIED };
 
-  const auth = { tenantId, actor: user.id };
+  const auth = { tenantId: membership.tenantId, actor: user.id };
   const created = await enginePost<{ connection_id: string; created: boolean }>(
     '/connections',
     { type, name, config, mode: 'cloud' },
@@ -177,6 +187,63 @@ export async function testConnectionAction(_prev: ActionState, form: FormData): 
     ok: true,
     message: `“${auth.name}” is reachable — a scan would see ${res.data.resources} resource${res.data.resources === 1 ? '' : 's'}${kinds ? ` (${kinds})` : ''}.`,
   };
+}
+
+/* ── Cadence ──────────────────────────────────────────────────────────────── */
+/** The recurring-scan interval (connections.scan_interval_minutes, consumed by the DB
+ * scheduler's queue_due_scans()). Whitelisted values only — a crafted POST must not schedule
+ * a 1-minute hammer against someone's production broker. 'off' clears it: absence means
+ * point-in-time only, which is a meaningful state, not a default. */
+const INTERVAL_CHOICES = [30, 60, 360, 1440, 10080] as const;
+
+export async function setCadenceAction(_prev: ActionState, form: FormData): Promise<ActionState> {
+  const connectionId = str(form, 'connectionId');
+  const raw = str(form, 'interval');
+
+  let interval: number | null;
+  if (raw === 'off') {
+    interval = null;
+  } else {
+    const n = Number(raw);
+    if (!(INTERVAL_CHOICES as readonly number[]).includes(n)) {
+      return { ok: false, message: 'Pick a cadence from the list.' };
+    }
+    interval = n;
+  }
+
+  const auth = await authorizeConnection(connectionId);
+  if (!auth) return { ok: false, message: DENIED };
+
+  // Engine response: {connection_id, type, name, scan_interval_minutes, previous}. The applied
+  // value is echoed back; use it (not the submitted one) so the message reports what is stored.
+  const res = await enginePatch<{
+    connection_id: string;
+    type: string;
+    name: string;
+    scan_interval_minutes: number | null;
+    previous: number | null;
+  }>(
+    `/connections/${connectionId}`,
+    { scan_interval_minutes: interval },
+    { tenantId: auth.tenantId, actor: auth.actor },
+  );
+  if (!res.ok) return { ok: false, message: res.message };
+
+  revalidatePath('/connections');
+  const applied = res.data.scan_interval_minutes;
+  return {
+    ok: true,
+    message:
+      applied === null
+        ? `Recurring scans turned off for “${auth.name}” — it now scans only when asked.`
+        : `“${auth.name}” now rescans automatically ${cadenceLabel(applied)}.`,
+  };
+}
+
+function cadenceLabel(minutes: number): string {
+  if (minutes % 1440 === 0) return `every ${minutes / 1440 === 1 ? 'day' : `${minutes / 1440} days`}`;
+  if (minutes % 60 === 0) return `every ${minutes / 60 === 1 ? 'hour' : `${minutes / 60} hours`}`;
+  return `every ${minutes} minutes`;
 }
 
 /* ── Delete ───────────────────────────────────────────────────────────────── */

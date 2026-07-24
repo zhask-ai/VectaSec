@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 
+import { canEdit, getRoleInTenant } from '@/lib/role';
 import { createClient, getVerifiedUser } from '@/lib/supabase/server';
 import { enginePost } from '@/lib/engine';
 
@@ -27,7 +28,8 @@ import { enginePost } from '@/lib/engine';
 
 export type AttestState = { ok: boolean; message: string } | null;
 
-const DENIED = 'You are not signed in, or this control is not yours to attest. Nothing was sent.';
+const DENIED =
+  'You are not signed in, this control is not yours to attest, or your role is view-only. Nothing was sent.';
 
 function str(form: FormData, key: string): string {
   const v = form.get(key);
@@ -65,6 +67,11 @@ export async function attestControlAction(_prev: AttestState, form: FormData): P
 
   if (error || !data) return { ok: false, message: DENIED };
   const control = data as { tenant_id: string; framework: string; control_id: string; status: string };
+
+  // An attestation is an accountable sign-off; a view-only member cannot make one. Checked
+  // here as well as in the engine — the button being hidden is not the check.
+  const role = await getRoleInTenant(control.tenant_id);
+  if (!canEdit(role)) return { ok: false, message: DENIED };
 
   // Fail beats attestation — refuse here too, not only in the engine, so the reason lands at the
   // button. You cannot sign away a control the scanner can currently prove is broken.

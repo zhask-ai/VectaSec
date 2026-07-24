@@ -3,9 +3,10 @@ import { notFound } from 'next/navigation';
 
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { SeverityBadge } from '@/components/ui/severity';
+import { canEdit, getOwnMembership, getRoleInTenant } from '@/lib/role';
 import { getClaims } from '@/lib/supabase/server';
 import { NotAssessedBadge } from '../assessment';
-import { getFinding, type EvidenceItem, type FindingDetail, type TriageView } from '../data';
+import { getActionContext, getFinding, type EvidenceItem, type FindingDetail, type TriageView } from '../data';
 import { shortId } from '../format';
 import { systemHref, systemOf } from '../query';
 import { StatusPill } from '../status';
@@ -48,6 +49,17 @@ export default async function FindingPage({ params }: PageProps<'/findings/[id]'
   const claims = await getClaims();
   const currentUserId = typeof claims?.sub === 'string' ? claims.sub : null;
 
+  // Role decides which controls render. This is courtesy, not the check — the Server Actions
+  // re-derive the role from tenant_members before touching the engine. The tenant comes from
+  // getActionContext (an RLS-scoped read of this finding), because FindingDetail deliberately
+  // does not carry tenant_id; falling back to the caller's sole membership covers the odd
+  // orphaned row.
+  const ctx = await getActionContext(id);
+  const role = ctx
+    ? await getRoleInTenant(ctx.tenantId)
+    : ((await getOwnMembership())?.role ?? null);
+  const editable = canEdit(role);
+
   return (
     <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1200 }}>
       <Link href="/findings" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
@@ -59,7 +71,7 @@ export default async function FindingPage({ params }: PageProps<'/findings/[id]'
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(240px, 300px)', gap: 'var(--space-4)', alignItems: 'start' }}>
         <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
           <Evidence items={finding.evidence} finding={finding} />
-          <Triage finding={finding} />
+          <Triage finding={finding} editable={editable} />
           <Remediation finding={finding} />
         </div>
 
@@ -68,15 +80,24 @@ export default async function FindingPage({ params }: PageProps<'/findings/[id]'
             <CardTitle>Actions</CardTitle>
           </CardHeader>
           <CardBody>
-            <ActionsPanel
-              findingId={finding.id}
-              status={finding.uiStatus}
-              assignee={finding.assignee}
-              currentUserId={currentUserId}
-              resourceKind={finding.resource?.kind ?? null}
-              resourceName={finding.resource?.name ?? null}
-              ruleId={finding.ruleId}
-            />
+            {editable ? (
+              <ActionsPanel
+                findingId={finding.id}
+                status={finding.uiStatus}
+                assignee={finding.assignee}
+                currentUserId={currentUserId}
+                resourceKind={finding.resource?.kind ?? null}
+                resourceName={finding.resource?.name ?? null}
+                ruleId={finding.ruleId}
+              />
+            ) : (
+              // Absent, not disabled: the honest statement of why, instead of a rail of dead
+              // controls that answer every click with a refusal.
+              <p style={{ margin: 0, fontSize: 'var(--text-xs)', lineHeight: 'var(--leading-sm)', color: 'var(--text-secondary)' }}>
+                Your role is view-only. Changing status, assignment or suppressions needs an
+                editor or admin role — ask a tenant admin.
+              </p>
+            )}
           </CardBody>
         </Card>
       </div>
@@ -323,7 +344,7 @@ function Observation({ item, n, cited }: { item: EvidenceItem; n: number; cited:
  * Fenced and labelled. The user must always know which pixels are deterministic (the finding,
  * the evidence above) and which are generated — that boundary IS the product's integrity made
  * visible, so it gets a border and a chip rather than a footnote. */
-function Triage({ finding }: { finding: FindingDetail }) {
+function Triage({ finding, editable }: { finding: FindingDetail; editable: boolean }) {
   const t = finding.triage;
 
   if (!t) {
@@ -338,9 +359,11 @@ function Triage({ finding }: { finding: FindingDetail }) {
             <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--text-secondary)', maxWidth: '64ch' }}>
               {finding.evidence.length === 0
                 ? 'This finding has no observations, so it cannot be triaged. The engine refuses to generate a rationale it cannot ground in evidence.'
-                : 'Generate a grounded explanation of this finding. Every claim it makes must cite one of the observations above, or the database rejects it.'}
+                : editable
+                  ? 'Generate a grounded explanation of this finding. Every claim it makes must cite one of the observations above, or the database rejects it.'
+                  : 'No triage has been generated. Generating one needs an editor or admin role.'}
             </p>
-            <TriageButton findingId={finding.id} disabled={finding.evidence.length === 0} />
+            {editable && <TriageButton findingId={finding.id} disabled={finding.evidence.length === 0} />}
           </div>
         </CardBody>
       </Card>

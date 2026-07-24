@@ -1,0 +1,138 @@
+{
+  "project": "acme-prod",
+  "topics": [
+    {
+      "name": "projects/acme-prod/topics/orders",
+      "labels": {"team": "commerce"}
+    },
+    {
+      "name": "projects/acme-prod/topics/payments",
+      "kmsKeyName": "projects/acme-prod/locations/global/keyRings/kr-1/cryptoKeys/pubsub-cmek",
+      "messageRetentionDuration": "604800s"
+    }
+  ],
+  "topic_policies": {
+    "orders": {
+      "version": 1,
+      "etag": "BwXhqDVUAAA=",
+      "bindings": [
+        {"role": "roles/pubsub.publisher", "members": ["allUsers"]},
+        {"role": "roles/editor", "members": ["serviceAccount:legacy-app@acme-prod.iam.gserviceaccount.com"]}
+      ]
+    },
+    "payments": {
+      "version": 1,
+      "etag": "BwXhqDVUBBB=",
+      "bindings": [
+        {"role": "roles/pubsub.publisher", "members": ["serviceAccount:billing@acme-prod.iam.gserviceaccount.com"]},
+        {"role": "roles/pubsub.subscriber", "members": ["serviceAccount:ledger@acme-prod.iam.gserviceaccount.com"]}
+      ]
+    }
+  },
+  "subscriptions": [
+    {
+      "name": "projects/acme-prod/subscriptions/orders-push",
+      "topic": "projects/acme-prod/topics/orders",
+      "pushConfig": {"pushEndpoint": "http://hooks.example.com/ingest"},
+      "ackDeadlineSeconds": 10,
+      "messageRetentionDuration": "604800s"
+    },
+    {
+      "name": "projects/acme-prod/subscriptions/orders-push-secure",
+      "topic": "projects/acme-prod/topics/orders",
+      "pushConfig": {
+        "pushEndpoint": "https://svc.example.com/ingest",
+        "oidcToken": {"serviceAccountEmail": "push-auth@acme-prod.iam.gserviceaccount.com"}
+      },
+      "deadLetterPolicy": {
+        "deadLetterTopic": "projects/acme-prod/topics/orders-dead",
+        "maxDeliveryAttempts": 5
+      },
+      "ackDeadlineSeconds": 30
+    },
+    {
+      "name": "projects/acme-prod/subscriptions/payments-pull",
+      "topic": "projects/acme-prod/topics/payments",
+      "pushConfig": {},
+      "deadLetterPolicy": {
+        "deadLetterTopic": "projects/acme-prod/topics/payments-dead",
+        "maxDeliveryAttempts": 5
+      },
+      "ackDeadlineSeconds": 60
+    }
+  ],
+  "subscription_policies": {
+    "orders-push": {
+      "version": 1,
+      "etag": "BwXhqDVUCCC=",
+      "bindings": [
+        {"role": "roles/pubsub.subscriber", "members": ["allAuthenticatedUsers"]}
+      ]
+    },
+    "orders-push-secure": {
+      "version": 1,
+      "etag": "BwXhqDVUDDD=",
+      "bindings": [
+        {"role": "roles/pubsub.subscriber", "members": ["serviceAccount:consumer@acme-prod.iam.gserviceaccount.com"]}
+      ]
+    },
+    "payments-pull": {
+      "version": 1,
+      "etag": "BwXhqDVUEEE=",
+      "bindings": []
+    }
+  },
+  "project_policy": {
+    "version": 1,
+    "etag": "BwXhqDVUFFF=",
+    "bindings": [
+      {"role": "roles/editor", "members": ["serviceAccount:legacy-app@acme-prod.iam.gserviceaccount.com"]},
+      {"role": "roles/pubsub.viewer", "members": ["serviceAccount:vectasec-scan@acme-prod.iam.gserviceaccount.com"]}
+    ],
+    "auditConfigs": []
+  },
+  "project_policy_audited": {
+    "version": 1,
+    "etag": "BwXhqDVUGGG=",
+    "bindings": [
+      {"role": "roles/pubsub.viewer", "members": ["serviceAccount:vectasec-scan@acme-prod.iam.gserviceaccount.com"]}
+    ],
+    "auditConfigs": [
+      {
+        "service": "pubsub.googleapis.com",
+        "auditLogConfigs": [{"logType": "DATA_READ"}, {"logType": "DATA_WRITE"}]
+      }
+    ]
+  },
+  "apigee": {
+    "org": {"name": "organizations/acme-prod", "runtimeType": "CLOUD"},
+    "envgroups": [
+      {"name": "default-group", "hostnames": ["api.acme.example.com"]}
+    ],
+    "proxies": [
+      {"name": "orders-proxy"},
+      {"name": "secure-proxy"},
+      {"name": "parked-proxy"}
+    ],
+    "deployments": [
+      {"environment": "prod", "apiProxy": "orders-proxy", "revision": "3"},
+      {"environment": "prod", "apiProxy": "secure-proxy", "revision": "7"}
+    ],
+    "targets": {
+      "orders-proxy": [
+        {
+          "name": "default",
+          "connection": {"connectionType": "httpConnection", "uRL": "http://internal-api.example.com"},
+          "sSLInfo": {"enabled": "false", "protocols": []}
+        }
+      ],
+      "secure-proxy": [
+        {
+          "name": "default",
+          "connection": {"connectionType": "httpConnection", "uRL": "https://backend.example.com"},
+          "sSLInfo": {"enabled": "true", "protocols": ["TLSv1.1", "TLSv1.2"]}
+        }
+      ]
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import Link from 'next/link';
 
+import { canEdit, getOwnMembership } from '@/lib/role';
 import { createClient } from '@/lib/supabase/server';
 import { SEVERITY_RANK, type Severity } from '@/lib/types';
 import { AutoRefresh } from '@/components/AutoRefresh';
@@ -8,6 +9,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { SeverityBadge } from '@/components/ui/severity';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 import { AddConnection } from './add-connection';
+import { CadenceSelect } from './cadence-select';
 import { RowActions } from './row-actions';
 
 /* Connected systems — the coverage view AND the connect-and-scan surface. "What are we NOT
@@ -42,6 +44,7 @@ type ConnectionRow = {
   status: string;
   last_scanned_at: string | null;
   created_at: string;
+  scan_interval_minutes: number | null;
   collector_id: string | null;
   collectors: { id: string; name: string; status: string; last_heartbeat: string | null } | null;
 };
@@ -65,13 +68,26 @@ function absolute(iso: string): string {
   return new Date(iso).toISOString().replace('T', ' ').replace(/\.\d+Z$/, 'Z');
 }
 
+/** "every 30m / every 6h / every 2d" — the recurring-scan cadence, human units. */
+function cadence(minutes: number): string {
+  if (minutes % 1440 === 0) return `every ${minutes / 1440}d`;
+  if (minutes % 60 === 0) return `every ${minutes / 60}h`;
+  return `every ${minutes}m`;
+}
+
 export default async function ConnectionsPage() {
   const supabase = await createClient();
+
+  // Role gates the mutation UI only — every read below is RLS-scoped regardless. Viewers see
+  // the same coverage truth; they just get no buttons (and the Server Actions re-check the
+  // role anyway, because a hidden button is not an authorization boundary).
+  const membership = await getOwnMembership();
+  const editable = canEdit(membership?.role);
 
   const connectionsRes = await supabase
     .from('connections')
     .select(
-      'id, type, name, mode, status, last_scanned_at, created_at, collector_id, collectors(id, name, status, last_heartbeat)',
+      'id, type, name, mode, status, last_scanned_at, created_at, scan_interval_minutes, collector_id, collectors(id, name, status, last_heartbeat)',
     )
     .order('name');
 
@@ -89,7 +105,7 @@ export default async function ConnectionsPage() {
 
   const connections = (connectionsRes.data ?? []) as unknown as ConnectionRow[];
 
-  if (connections.length === 0) return <Page><SetupState /></Page>;
+  if (connections.length === 0) return <Page><SetupState editable={editable} /></Page>;
 
   // Everything per-connection in one pass. N is the number of systems a human connected, so it
   // stays small — small enough that N bounded queries beat two tenant-wide unbounded fetches that
@@ -263,6 +279,26 @@ export default async function ConnectionsPage() {
                         scan {r.scan.status} · {relative(r.scan.started_at)}
                       </span>
                     )}
+                    {/* Recurring cadence (connections.scan_interval_minutes, consumed by the
+                        DB scheduler queue_due_scans()). Absence means point-in-time only —
+                        say nothing rather than invent a default. */}
+                    {r.scan_interval_minutes != null && (
+                      <span
+                        style={{
+                          display: 'block',
+                          fontSize: 'var(--text-2xs)',
+                          color: 'var(--text-secondary)',
+                        }}
+                        title="Rescanned automatically on this cadence"
+                      >
+                        rescans {cadence(r.scan_interval_minutes)}
+                      </span>
+                    )}
+                    {/* Editors change the cadence right where it is displayed; viewers see
+                        the display alone. */}
+                    {editable && (
+                      <CadenceSelect connectionId={r.id} current={r.scan_interval_minutes} />
+                    )}
                   </TD>
                   <TD numeric>
                     {r.counts.total === 0 ? (
@@ -286,11 +322,19 @@ export default async function ConnectionsPage() {
                     )}
                   </TD>
                   <TD>
-                    <RowActions
-                      connectionId={r.id}
-                      name={r.name}
-                      scanActive={r.scan?.status === 'queued' || r.scan?.status === 'running'}
-                    />
+                    {editable ? (
+                      <RowActions
+                        connectionId={r.id}
+                        name={r.name}
+                        scanActive={r.scan?.status === 'queued' || r.scan?.status === 'running'}
+                      />
+                    ) : (
+                      // Absent, not disabled: a row of dead buttons begs to be clicked and
+                      // answered with a refusal. Say why there is nothing here instead.
+                      <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
+                        view only
+                      </span>
+                    )}
                   </TD>
                 </TR>
               ))}
@@ -299,7 +343,7 @@ export default async function ConnectionsPage() {
         </CardBody>
       </Card>
 
-      <ConnectHelp />
+      {editable && <ConnectHelp />}
     </Page>
   );
 }
@@ -315,7 +359,22 @@ function Page({ children }: { children: React.ReactNode }) {
   );
 }
 
-function SetupState() {
+function SetupState({ editable }: { editable: boolean }) {
+  if (!editable) {
+    return (
+      <Card>
+        <CardBody>
+          <EmptyState
+            tone="setup"
+            title="No systems connected"
+            description="VectaSec scans the integration layer — the brokers, gateways and MCP servers between your services. Connecting one needs an editor or admin role; ask an admin to connect a system or to change your role."
+            meta={`connectors available: ${CONNECTOR_TYPES.join(', ')}`}
+          />
+        </CardBody>
+      </Card>
+    );
+  }
+
   return (
     <Card>
       <CardBody>

@@ -115,6 +115,31 @@ def _ensure_connection(cur, tenant_id: str, type_: str, name: str, config: dict,
     return cur.fetchone()[0]
 
 
+def ensure_connection_with_creds(cur, tenant_id: str, type_: str, name: str, config: dict,
+                                 mode: str = "cloud") -> tuple[str, dict, Optional[str]]:
+    """_ensure_connection plus the credential split (STATUS.md gap #11b).
+
+    The connector's declared-secret fields never land in connections.config: they are split
+    out and stored as ONE Supabase Vault secret, and only its id is kept on
+    connections.creds_ref. Same transaction as the connection row — a row and its Vault
+    secret commit or fail together. Returns (connection_id, public_config, creds_ref).
+    """
+    from .creds import split_config, store_secrets
+
+    public, secrets = split_config(type_, config)
+    connection_id = _ensure_connection(cur, tenant_id, type_, name, public, mode=mode)
+    cur.execute("select creds_ref from connections where id=%s", (connection_id,))
+    row = cur.fetchone()
+    ref = str(row[0]) if row and row[0] else None
+    if secrets:
+        new_ref = store_secrets(cur, str(connection_id), secrets, ref)
+        if new_ref != ref:
+            cur.execute("update connections set creds_ref=%s where id=%s",
+                        (new_ref, connection_id))
+        ref = new_ref
+    return connection_id, public, ref
+
+
 def _persist_resources(cur, tenant_id: str, connection_id: str, collected: Collected) -> dict:
     """Upsert resources, mark vanished ones stale, return ext_id -> resource uuid."""
     ext_to_id: dict[str, str] = {}
@@ -270,7 +295,14 @@ def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
     with connect() as conn:
         conn.autocommit = False
         with conn.cursor() as cur:
-            connection_id = _ensure_connection(cur, tenant_id, type_, name, config)
+            # The split is the ONLY route stored config takes (gap #11b): whatever secret
+            # fields the caller passed go to Vault here, and whatever the connection already
+            # vaulted is resolved back — so the merged config exists only in this process.
+            connection_id, public_config, creds_ref = ensure_connection_with_creds(
+                cur, tenant_id, type_, name, config)
+            if creds_ref:
+                from .creds import resolve_secrets, runtime_config
+                config = runtime_config(public_config, resolve_secrets(cur, creds_ref))
             if scan_id is not None:
                 # Adopt the queued row. Scope the UPDATE by tenant_id too — a worker must never
                 # move another tenant's scan even if handed a wrong id.
@@ -318,6 +350,15 @@ def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
             # that scanning had stopped. Only the connector was ever recorded as an error.
             _mark_scan_error(conn, scan_id, e)
             raise
+
+        # Post-scan action routing (notify.py): the ONE hook every run_scan caller (worker,
+        # CLI, inline API) shares. notify_scan never raises, and the belt-and-braces except
+        # exists because a notification failure must NEVER fail a completed scan.
+        try:
+            from .notify import notify_scan
+            notify_scan(conn, tenant_id, str(scan_id))
+        except Exception:  # pragma: no cover - defensive
+            pass
 
     stats["scan_id"] = str(scan_id)
     stats["connection_id"] = str(connection_id)

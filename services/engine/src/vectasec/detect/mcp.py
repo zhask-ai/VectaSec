@@ -21,7 +21,16 @@ from ..registry import detector
 from ..contracts import Hit
 
 _ABSENT = object()
-SESSION_SUNSET = "2026-07-28"   # this revision removes MCP-Session-Id and the initialize handshake
+CURRENT_SPEC_REVISION = "2026-07-28"   # the pinned revision this rulepack targets: stateless core,
+                                       # server/discover replaces initialize, MCP-Session-Id removed
+SESSION_SUNSET = CURRENT_SPEC_REVISION  # the revision that removes MCP-Session-Id + the handshake
+
+
+def _cap(s, n=96):
+    """Quote a remote, attacker-controlled string for evidence: repr (so control chars show) with a
+    length cap (so a hostile server cannot pad an observation into the ledger)."""
+    s = str(s)
+    return repr(s[:n] + "…") if len(s) > n else repr(s)
 
 
 # ── injection patterns ────────────────────────────────────────────────────
@@ -244,6 +253,24 @@ def _sessions_removed(protocol_version) -> bool:
     return bool(_SPEC_REVISION.match(v)) and v >= SESSION_SUNSET
 
 
+def _parsed_revision(protocol_version):
+    """The protocolVersion iff it PARSES as a YYYY-MM-DD spec revision, else None. Same discipline
+    as _sessions_removed: a string the target chose ("latest", "v1") is UNKNOWN, not a revision."""
+    v = str(protocol_version or "").strip()
+    return v if _SPEC_REVISION.match(v) else None
+
+
+def _server_reachable(raw) -> bool:
+    """Did we get a live discovery result off this server at all? Lifecycle rules must stay silent
+    on an unreachable target — a timeout is the connection layer's finding, not theirs."""
+    if raw.get("protocol_version"):
+        return True
+    for p in ("unauth_probe", "auth_probe"):
+        if (raw.get(p) or {}).get("has_result"):
+            return True
+    return False
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # AUTH
 # ══════════════════════════════════════════════════════════════════════════
@@ -261,9 +288,10 @@ def unauthenticated_endpoint(resource, ctx) -> list:
         return []
 
     si = probe.get("server_info") or {}
+    method = probe.get("discovery_method") or "initialize"   # server/discover on 2026-07-28
     return [Hit(
         observation=(
-            f"Unauthenticated POST initialize to {url} returned HTTP 200 with an InitializeResult "
+            f"Unauthenticated POST {method} to {url} returned HTTP 200 with a discovery result "
             f"(serverInfo.name={si.get('name')!r}, protocolVersion={probe.get('protocol_version')!r}); "
             f"unauthenticated tools/list returned {probe.get('tool_count')} tool definitions. "
             f"No 401 challenge issued. Probed from {raw.get('source_zone')} to resolved IP "
@@ -291,7 +319,7 @@ def unauthenticated_endpoint(resource, ctx) -> list:
             "gateway, mTLS, VPN or IP allowlist in front of this server is invisible from inside "
             "the trust boundary."
         ),
-        source_ref={"api": f"POST {url} (JSON-RPC initialize, no Authorization header)"},
+        source_ref={"api": f"POST {url} ({method}, no Authorization header)"},
     )]
 
 
@@ -654,6 +682,12 @@ def deprecated_http_sse(resource, ctx) -> list:
 @detector(kinds=["mcp_server"], rule_id="MCP.TRANSPORT.PROTOCOL_VERSION_UNVALIDATED",
           severity="low", title="Server does not reject an unsupported MCP-Protocol-Version")
 def protocol_version_unvalidated(resource, ctx) -> list:
+    # Era-gated: the MCP-Protocol-Version *header* is the 2025-11-25 validation mechanism. On the
+    # 2026-07-28 stateless core the version rides in _meta and a mismatch returns
+    # UnsupportedProtocolVersionError, so the header probe is not applicable — the connector does
+    # not even run it there (probes.invalid_version stays None), but gate explicitly for safety.
+    if _sessions_removed(resource.raw.get("protocol_version")):
+        return []
     iv = ((resource.raw.get("probes") or {}).get("invalid_version")) or {}
     status = iv.get("status")
     if status is None or status == 400:
@@ -925,10 +959,16 @@ def instructions_injection(resource, ctx) -> list:
     raw = resource.raw
     si = raw.get("server_info") or {}
     url, pv = raw.get("url"), raw.get("protocol_version")
+    # The instructions field arrives in the discovery result of whichever generation answered:
+    # DiscoverResult on 2026-07-28, InitializeResult on the legacy handshake. Either way it lands
+    # in the model's context before any consent gate — the finding is identical.
+    method = raw.get("discovery_method") or "initialize"
+    res_label = "DiscoverResult" if method == "server/discover" else "InitializeResult"
+    api = f"POST {url} ({method})"
 
     fields = []
     if isinstance(raw.get("instructions"), str):
-        fields.append(("InitializeResult.instructions", raw["instructions"]))
+        fields.append((f"{res_label}.instructions", raw["instructions"]))
     # serverInfo.description only exists from 2025-11-25 — its absence on a 2025-06-18 server is
     # not a finding and must not error.
     if isinstance(si.get("description"), str):
@@ -942,7 +982,7 @@ def instructions_injection(resource, ctx) -> list:
                              f"injection pattern class {h['class']} at raw offset {h['offset']}: "
                              f"{h['excerpt']!r}."),
                 remediation=_UNTRUSTED_METADATA_REMEDIATION,
-                source_ref={"api": f"POST {url} (JSON-RPC initialize)", "config_key": path},
+                source_ref={"api": api, "config_key": path},
             ))
         for h in _tier1_hits(text):
             hits.append(Hit(
@@ -950,7 +990,7 @@ def instructions_injection(resource, ctx) -> list:
                              f"class {h['class']}: codepoint {h['codepoint']} at offset "
                              f"{h['offset']} of {len(text)}."),
                 remediation=_UNTRUSTED_METADATA_REMEDIATION,
-                source_ref={"api": f"POST {url} (JSON-RPC initialize)", "config_key": path},
+                source_ref={"api": api, "config_key": path},
             ))
     return hits
 
@@ -1202,4 +1242,198 @@ def tool_inputschema_invalid(resource, ctx) -> list:
                      '{"type": "object", "properties": {}}.'),
         detail="A conformance bug, not an attack.",
         source_ref={"api": f"POST {endpoint} (JSON-RPC tools/list)", "config_key": "inputSchema"},
+    )]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# LIFECYCLE — the 2026-07-28 spec migration (stateless core, server/discover,
+# feature deprecations). These are hygiene/posture rules, not exploit findings:
+# a legacy revision is spec-legal for a 12-month deprecation window, so the
+# wording is a migration signal and severities stay low/info unless a server
+# contradicts the revision it claims.
+# ══════════════════════════════════════════════════════════════════════════
+_LIFECYCLE_REVISION_REMEDIATION = (
+    "Track the MCP specification lifecycle: revision 2026-07-28 supersedes 2025-11-25 and makes "
+    "the core stateless — `server/discover` replaces the `initialize` handshake, the "
+    "`Mcp-Session-Id` header is removed, per-request protocol version and client identity move to "
+    "`_meta`, and gateways route on `Mcp-Method`/`Mcp-Name`. Legacy revisions enter a 12-month "
+    "deprecation window under the feature-lifecycle policy (SEP-2596). Plan the server's upgrade to "
+    "the stateless core; new clients should target 2026-07-28."
+)
+
+
+@detector(kinds=["mcp_server"], rule_id="MCP.LIFECYCLE.LEGACY_SPEC_REVISION", severity="low",
+          title="MCP server speaks a spec revision superseded by 2026-07-28")
+def legacy_spec_revision(resource, ctx) -> list:
+    raw = resource.raw
+    if not _server_reachable(raw):
+        return []      # unreachable target — the connection layer owns that finding, not this rule
+    pv = raw.get("protocol_version")
+    gen = raw.get("spec_generation")
+    method = raw.get("discovery_method") or "initialize"
+    rev = _parsed_revision(pv)
+
+    if rev is None:
+        # The connector positively identified the stateless generation via server/discover, so the
+        # server IS on 2026-07-28 regardless of an odd version string — clean.
+        if gen == "stateless" and method == "server/discover":
+            return []
+        # Reachable, but the revision could not be read. Honest coverage gap, not a clean pass.
+        return [Hit(
+            observation=(f"MCP server {raw.get('url')} answered {method} (generation {gen!r}) but "
+                         f"reported protocolVersion={pv!r}, which does not parse as a spec revision "
+                         f"date; the revision in use could not be determined."),
+            remediation=_LIFECYCLE_REVISION_REMEDIATION,
+            assessable=False,
+            assessment_reason="protocolVersion is absent or not a parseable YYYY-MM-DD spec revision",
+            source_ref={"api": f"POST {raw.get('url')} ({method})", "config_key": "protocolVersion"},
+        )]
+
+    if rev >= CURRENT_SPEC_REVISION:
+        return []      # current or newer — clean
+    return [Hit(
+        observation=(f"MCP server {raw.get('url')} speaks spec revision {rev!r} via {method} "
+                     f"(generation {gen!r}), superseded by {CURRENT_SPEC_REVISION}."),
+        # The immediately-prior revision is barely legacy (info); anything older is low.
+        severity="info" if rev == "2025-11-25" else None,
+        remediation=_LIFECYCLE_REVISION_REMEDIATION,
+        detail=("Lifecycle/hygiene: legacy revisions remain functional during a 12-month "
+                "deprecation window; this is a migration signal, not an exploitable defect."),
+        source_ref={"api": f"POST {raw.get('url')} ({method})", "config_key": "protocolVersion"},
+    )]
+
+
+_DEPRECATED_CAPS = {
+    "logging": "log to stderr (stdio) or emit OpenTelemetry instead of the Logging feature",
+    "roots": "pass directories/files via tool parameters, resource URIs, or server configuration "
+             "instead of Roots",
+    "sampling": "integrate directly with an LLM provider API instead of Sampling",
+}
+
+
+@detector(kinds=["mcp_server"], rule_id="MCP.LIFECYCLE.DEPRECATED_FEATURE_ADVERTISED",
+          severity="low", title="Server advertises a feature deprecated in the 2026-07-28 revision")
+def deprecated_feature_advertised(resource, ctx) -> list:
+    raw = resource.raw
+    caps = raw.get("capabilities")
+    if not isinstance(caps, dict):
+        return []      # no capabilities declared (or unreadable) — nothing advertised to flag
+    hits = []
+    for key, migration in _DEPRECATED_CAPS.items():
+        if key not in caps:
+            continue
+        hits.append(Hit(
+            observation=(f"MCP server {raw.get('url')} (spec {raw.get('protocol_version')!r}) "
+                         f"advertises the {key!r} capability, deprecated under SEP-2577 in the "
+                         f"2026-07-28 revision."),
+            remediation=(f"Migrate off the {key} feature: {migration}. Roots, Sampling and Logging "
+                         "were deprecated in revision 2026-07-28 and remain functional only during "
+                         "the 12-month deprecation window; new implementations should not adopt them."),
+            detail="Lifecycle/hygiene: a Deprecated (not Removed) feature; no exploit primitive.",
+            source_ref={"api": f"POST {raw.get('url')}", "config_key": f"capabilities.{key}"},
+        ))
+    return hits
+
+
+@detector(kinds=["mcp_server"], rule_id="MCP.LIFECYCLE.SESSION_DEPENDENCY", severity="low",
+          title="Server operates a protocol-level Mcp-Session-Id session")
+def session_dependency(resource, ctx) -> list:
+    raw = resource.raw
+    sid = raw.get("session_id")
+    if not sid:
+        return []      # no protocol-level session minted — already stateless-friendly
+    pv = raw.get("protocol_version")
+    rev = _parsed_revision(pv)
+    # A server that mints a session yet claims the stateless revision is self-contradictory.
+    contradiction = rev is not None and rev >= CURRENT_SPEC_REVISION
+    method = raw.get("discovery_method") or "initialize"
+
+    sa = (raw.get("probes") or {}).get("session_auth") or {}
+    control = sa.get("control_status")
+    requires = isinstance(control, int) and control == 400   # a request without the sid is rejected
+
+    obs = (f"MCP server {raw.get('url')} minted an Mcp-Session-Id ({_cap(sid)}) during {method} "
+           f"(spec {pv!r}); protocol-level sessions and the Mcp-Session-Id header are removed in "
+           f"the 2026-07-28 revision.")
+    if requires:
+        obs += (f" A control request carrying no session id returned HTTP {control} (Bad Request), "
+                f"indicating the session is required.")
+    if contradiction:
+        obs += (f" The server nonetheless reports revision {rev!r}, which defines no protocol-level "
+                f"session.")
+    return [Hit(
+        observation=obs,
+        severity="medium" if contradiction else None,
+        remediation=("Adopt the 2026-07-28 stateless core: implement `server/discover`, stop "
+                     "minting `Mcp-Session-Id`, and carry any cross-call state in explicit "
+                     "server-minted handles passed as ordinary tool arguments (SEP-2567) rather "
+                     "than a transport session."),
+        detail=("Lifecycle/migration signal. A session-bound server needs sticky routing and a "
+                "shared session store that the stateless core removes."),
+        source_ref={"api": f"POST {raw.get('url')}", "config_key": "Mcp-Session-Id"},
+    )]
+
+
+@detector(kinds=["mcp_server"], rule_id="MCP.AUTH.ISS_PARAMETER_UNSUPPORTED", severity="medium",
+          title="Authorization server does not signal RFC 9207 iss support")
+def iss_parameter_unsupported(resource, ctx) -> list:
+    """2026-07-28 (SEP-2468) makes clients validate the RFC 9207 `iss` authorization-response
+    parameter against the recorded issuer — an authorization-server mix-up defense. What is
+    readable server-side is whether the AS metadata SIGNALS iss support. Absence is a hardening
+    gap, not a proven bypass. Undiscoverable metadata is AS_METADATA_UNDISCOVERABLE's finding, so
+    entries with no document are skipped here rather than double-reported."""
+    _FIELD = "authorization_response_iss_parameter_supported"
+    hits = []
+    for m in resource.raw.get("as_metadata") or []:
+        doc = m.get("document")
+        if not doc:
+            continue
+        supported = doc.get(_FIELD)
+        if supported is True:
+            continue   # AS advertises RFC 9207 iss — clients can validate it
+        observed = "ABSENT" if _FIELD not in doc else repr(supported)
+        hits.append(Hit(
+            observation=(
+                f"AS metadata at {m.get('metadata_url')} for issuer {m.get('issuer')} declares "
+                f"{_FIELD}={observed}. Revision 2026-07-28 (SEP-2468) has clients validate the "
+                f"RFC 9207 `iss` authorization-response parameter against the recorded issuer; "
+                f"without the AS signalling support, the mix-up-attack defense a client would "
+                f"otherwise enforce is unconfirmed."
+            ),
+            remediation=(f"Advertise {_FIELD}: true in authorization server metadata and return the "
+                         "`iss` parameter in authorization responses per RFC 9207, so MCP clients "
+                         "can validate the issuer before redeeming the authorization code "
+                         "(mitigates authorization-server mix-up). Additionally bind persisted "
+                         "client credentials to the issuer identifier and re-register on issuer "
+                         "change (SEP-2352)."),
+            detail=("Interop/hardening signal, not a proven bypass: absence does not prove the AS "
+                    "omits `iss`, and token audience validation still occurs server-side. RFC 9207 "
+                    "marks the metadata field OPTIONAL; the 2026-07-28 client obligation is what "
+                    "raises it here."),
+            source_ref={"api": m.get("metadata_url"), "config_key": _FIELD},
+        ))
+    return hits
+
+
+@detector(kinds=["mcp_server"], rule_id="MCP.LIFECYCLE.TRACE_CONTEXT_SUPPORT", severity="info",
+          title="Server propagates W3C Trace Context (2026-07-28 posture signal)")
+def trace_context_support(resource, ctx) -> list:
+    """Informational posture datapoint, not a vulnerability. 2026-07-28 (SEP-414) documents W3C /
+    OpenTelemetry trace-context propagation via `_meta` (`traceparent`/`tracestate`/`baggage`). The
+    connector sends a sacrificial traceparent on server/discover and records whether the server
+    reflected trace context; absence is not a finding, so this fires only on positive evidence."""
+    raw = resource.raw
+    tc = raw.get("trace_context") or {}
+    if not tc.get("echoed"):
+        return []
+    return [Hit(
+        observation=(f"MCP server {raw.get('url')} (spec {raw.get('protocol_version')!r}) reflected "
+                     f"W3C Trace Context keys (traceparent/tracestate/baggage) in the discovery "
+                     f"result `_meta`, indicating distributed-tracing propagation per the 2026-07-28 "
+                     f"conventions (SEP-414)."),
+        remediation=("Informational: no action required. Confirm trace propagation is intended and "
+                     "that trace `baggage` does not carry sensitive values across trust boundaries."),
+        detail="Positive posture datapoint recorded for observability coverage; not a vulnerability.",
+        source_ref={"api": f"POST {raw.get('url')} (server/discover)",
+                    "config_key": "_meta.traceparent"},
     )]

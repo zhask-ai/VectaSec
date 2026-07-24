@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 
+import { canEdit, getRoleInTenant } from '@/lib/role';
 import { getVerifiedUser } from '@/lib/supabase/server';
 import { getActionContext } from './data';
 import { enginePost } from '@/lib/engine';
@@ -30,9 +31,10 @@ import { enginePost } from '@/lib/engine';
 
 export type ActionState = { ok: boolean; message: string } | null;
 
-const DENIED = 'You are not signed in, or this finding is not yours to change. Nothing was sent.';
+const DENIED =
+  'You are not signed in, this finding is not yours to change, or your role is view-only. Nothing was sent.';
 
-/** Resolve identity + authorization for one action. Returns null when either check fails —
+/** Resolve identity + authorization for one action. Returns null when any check fails —
  * callers must treat that as a refusal, never as a reason to continue with defaults. */
 async function authorize(findingId: string) {
   if (!isUuid(findingId)) return null;
@@ -42,6 +44,12 @@ async function authorize(findingId: string) {
 
   const ctx = await getActionContext(findingId);
   if (!ctx) return null;
+
+  // Role check, scoped to the tenant the RLS-read row named (so it works for multi-tenant
+  // users too). Viewers read findings; changing status, assignment, suppressions or triage is
+  // editor+. Hidden buttons are not the check — this is, and the engine checks again.
+  const role = await getRoleInTenant(ctx.tenantId);
+  if (!canEdit(role)) return null;
 
   // The actor is the verified user's id — never a form field. The engine writes it verbatim to
   // the audit log, so a client-supplied actor would be a forged signature on a real action.
