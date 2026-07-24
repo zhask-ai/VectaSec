@@ -71,6 +71,16 @@ declare
   ref      uuid;
   migrated int := 0;
 begin
+  -- Guard: on a stock Postgres without supabase_vault (the CI rls-cross-tenant harness, or any
+  -- fresh non-Supabase DB) there is nothing to migrate — no code ever wrote a plaintext secret
+  -- before this migration ran. Skip cleanly rather than reference a `vault` schema that is absent
+  -- (a fresh DB has zero connection rows, so the loop is empty anyway; this makes that explicit
+  -- and survives a future demo-connection seed).
+  if not exists (select 1 from pg_namespace where nspname = 'vault') then
+    raise notice 'vault_creds backfill: supabase_vault absent — nothing to migrate';
+    return;
+  end if;
+
   for rec in
     select id, type, config, creds_ref
       from connections

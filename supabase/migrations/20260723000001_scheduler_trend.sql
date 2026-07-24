@@ -106,7 +106,17 @@ do $do$ begin
   perform cron.unschedule('vectasec-queue-due-scans');
 exception when others then null; end $do$;
 
-select cron.schedule('vectasec-queue-due-scans', '* * * * *', $job$select queue_due_scans()$job$);
+-- Guarded so a FRESH apply on a stock Postgres (the CI rls-cross-tenant harness strips the
+-- `create extension pg_cron` line, and any non-Supabase/self-hosted DB may lack it) is a clean
+-- no-op instead of aborting on a missing `cron` schema under ON_ERROR_STOP. On Supabase pg_cron
+-- is present so this schedules exactly as before — and unlike a blanket `exception when others`,
+-- a real scheduling error still surfaces. The queue_due_scans() body's pgmq.send is never a
+-- problem at apply time: plpgsql resolves it lazily and CI never calls the function.
+do $do$ begin
+  if exists (select 1 from pg_namespace where nspname = 'cron') then
+    perform cron.schedule('vectasec-queue-due-scans', '* * * * *', $job$select queue_due_scans()$job$);
+  end if;
+end $do$;
 
 -- ── Posture history ───────────────────────────────────────────────────────
 create table if not exists posture_snapshots (
