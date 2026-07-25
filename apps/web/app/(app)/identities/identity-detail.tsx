@@ -71,7 +71,7 @@ const SCOPE_LABEL: Record<IdentityDetail['scope'], string> = {
 };
 
 function leaf(name: string): string {
-  return (name || '').split(':').pop() || name;
+  return String(name ?? '').split(':').pop() || String(name ?? '');
 }
 
 type Reached = { resource: string; wildcard: boolean; dataClasses: string[]; sensitivity: string };

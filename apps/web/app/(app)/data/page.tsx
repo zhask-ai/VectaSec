@@ -55,11 +55,11 @@ function lbl(r: { labels: Record<string, string> | null }, k: string): string {
 
 function lblList(r: { labels: Record<string, string> | null }, k: string): string[] {
   const v = lbl(r, k);
-  return v ? v.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  return v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : [];
 }
 
 function leaf(name: string): string {
-  return (name || '').split(':').pop() || name;
+  return String(name ?? '').split(':').pop() || String(name ?? '');
 }
 
 function one(v: string | string[] | undefined): string {
@@ -86,7 +86,7 @@ type DataRow = {
 };
 
 function prettyExposure(ruleId: string): string {
-  const suffix = (ruleId || '').split('.').pop() || ruleId;
+  const suffix = String(ruleId ?? '').split('.').pop() || String(ruleId ?? '');
   return suffix.replace(/_/g, ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase());
 }
 
@@ -451,7 +451,7 @@ export default async function DataPage({ searchParams }: { searchParams: SearchP
                     <TD>
                       {r.signals ? (
                         <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                          {r.signals
+                          {String(r.signals)
                             .split(',')
                             .map((s) => s.trim())
                             .filter(Boolean)

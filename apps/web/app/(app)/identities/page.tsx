@@ -56,11 +56,11 @@ function lbl(r: { labels: Record<string, string> | null }, k: string): string {
 
 function lblList(r: { labels: Record<string, string> | null }, k: string): string[] {
   const v = lbl(r, k);
-  return v ? v.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  return v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : [];
 }
 
 function leaf(name: string): string {
-  return (name || '').split(':').pop() || name;
+  return String(name ?? '').split(':').pop() || String(name ?? '');
 }
 
 function one(v: string | string[] | undefined): string {
@@ -91,7 +91,7 @@ const LIFECYCLE_LABEL: Record<string, string> = {
   ORPHANED: 'Orphaned — no owner',
 };
 function ruleSuffix(ruleId: string): string {
-  return (ruleId || '').split('.').pop() || ruleId;
+  return String(ruleId ?? '').split('.').pop() || String(ruleId ?? '');
 }
 function prettyLifecycle(ruleId: string): string {
   const s = ruleSuffix(ruleId).toUpperCase();

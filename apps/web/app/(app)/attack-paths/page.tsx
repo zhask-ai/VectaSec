@@ -144,10 +144,10 @@ function lbl(labels: Labels, k: string): string {
   return v == null ? '' : String(v);
 }
 function ruleSuffix(ruleId: string): string {
-  return (ruleId || '').split('.').pop() || ruleId;
+  return String(ruleId ?? '').split('.').pop() || String(ruleId ?? '');
 }
 function leaf(name: string): string {
-  return (name || '').split(':').pop() || name;
+  return String(name ?? '').split(':').pop() || String(name ?? '');
 }
 function normSev(s: string): Severity {
   return (SEVERITY_RANK as Record<string, number>)[s] !== undefined ? (s as Severity) : 'info';
