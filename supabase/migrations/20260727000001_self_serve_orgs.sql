@@ -14,8 +14,13 @@
 -- auth.users is not readable by `authenticated`, so anything the console shows about a user
 -- (email in the admin panel, presence) needs a public mirror. Kept by trigger; no client
 -- writes except through touch_last_seen().
+--
+-- No FK to auth.users(id) — same deliberate omission as tenant_members.user_id (migration
+-- 001): CI applies these migrations to stock postgres, where the auth schema is a shim with
+-- auth.uid() and NO users table. Everything that touches auth.users itself (the mirror
+-- trigger, the backfill, the seeds) is guarded on the table actually existing.
 create table if not exists profiles (
-  user_id      uuid primary key references auth.users(id) on delete cascade,
+  user_id      uuid primary key,                -- = auth.users(id)
   email        text not null,
   full_name    text,
   avatar_url   text,
@@ -40,23 +45,28 @@ begin
   return new;
 end $$;
 
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created
-  after insert or update of email, raw_user_meta_data on auth.users
-  for each row execute function handle_new_user();
-
--- Backfill for users that predate this migration (the demo user).
-insert into profiles (user_id, email, full_name)
-select id, coalesce(email, ''), nullif(raw_user_meta_data->>'full_name', '')
-from auth.users
-on conflict (user_id) do nothing;
+do $$ begin
+  if to_regclass('auth.users') is not null then
+    execute 'drop trigger if exists on_auth_user_created on auth.users';
+    execute 'create trigger on_auth_user_created
+               after insert or update of email, raw_user_meta_data on auth.users
+               for each row execute function handle_new_user()';
+    -- Backfill for users that predate this migration (the demo user).
+    execute $backfill$
+      insert into profiles (user_id, email, full_name)
+      select id, coalesce(email, ''), nullif(raw_user_meta_data->>'full_name', '')
+      from auth.users
+      on conflict (user_id) do nothing
+    $backfill$;
+  end if;
+end $$;
 
 -- ── Super admins: platform operators ──────────────────────────────────────
 -- A row here IS the privilege. No client path writes this table — rows are granted by the
 -- operator (SQL / engine host), which is the point: the platform's own admin surface must
 -- not be creatable from the product's browser session.
 create table if not exists super_admins (
-  user_id    uuid primary key references auth.users(id) on delete cascade,
+  user_id    uuid primary key,                  -- = auth.users(id); FK-less, see profiles
   created_at timestamptz not null default now()
 );
 
@@ -194,13 +204,21 @@ end $$;
 grant execute on function admin_org_members(uuid) to authenticated;
 
 -- ── Seed: the demo user operates the platform in dev ──────────────────────
-insert into super_admins (user_id)
-select id from auth.users where lower(email) = 'demo@vectasec.local'
-on conflict (user_id) do nothing;
-
--- The demo tenant predates created_by; attribute it so create_org's one-org rule sees it.
-update tenants t set created_by = (select id from auth.users where lower(email) = 'demo@vectasec.local')
-where t.id = '00000000-0000-0000-0000-000000000001' and t.created_by is null;
+do $$ begin
+  if to_regclass('auth.users') is not null then
+    execute $seed$
+      insert into super_admins (user_id)
+      select id from auth.users where lower(email) = 'demo@vectasec.local'
+      on conflict (user_id) do nothing
+    $seed$;
+    -- The demo tenant predates created_by; attribute it so create_org's one-org rule sees it.
+    execute $seed$
+      update tenants t
+      set created_by = (select id from auth.users where lower(email) = 'demo@vectasec.local')
+      where t.id = '00000000-0000-0000-0000-000000000001' and t.created_by is null
+    $seed$;
+  end if;
+end $$;
 
 comment on table profiles is 'Readable mirror of auth.users (trigger-kept). last_seen_at is the presence heartbeat.';
 comment on table super_admins is 'Platform operators. Row = privilege; granted by the operator, never from the browser.';
