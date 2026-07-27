@@ -45,7 +45,9 @@ export async function proxy(request: NextRequest) {
   // revalidate the Auth token".
   const { data } = await supabase.auth.getClaims();
 
-  if (!data?.claims && !request.nextUrl.pathname.startsWith('/login')) {
+  const publicPaths = ['/login', '/signup', '/auth'];
+  const isPublic = publicPaths.some((p) => request.nextUrl.pathname.startsWith(p));
+  if (!data?.claims && !isPublic) {
     const login = new URL('/login', request.url);
     return NextResponse.redirect(login);
   }
@@ -62,5 +64,5 @@ export const config = {
   //
   // Caveat: _next/data routes still run this even though they look excluded. That is
   // deliberate upstream behaviour — it stops you protecting a page but forgetting its data route.
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|login|auth).*)'],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|login|signup|auth).*)'],
 };

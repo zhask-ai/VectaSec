@@ -1,5 +1,7 @@
+import { redirect } from 'next/navigation';
+
 import { createClient, getClaims } from '@/lib/supabase/server';
-import { getOwnMembership, isAdmin } from '@/lib/role';
+import { getMemberships, getOwnMembership, isAdmin, isSuperAdmin } from '@/lib/role';
 import { postureScore } from '@/lib/posture';
 import { SEVERITIES, type Severity, type SeverityCounts } from '@/lib/types';
 import { ShellChrome } from '@/components/shell/ShellChrome';
@@ -20,15 +22,23 @@ import { ShellChrome } from '@/components/shell/ShellChrome';
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const supabase = await createClient();
 
-  const [tenantRes, facetsRes, connRes, membership, claims] = await Promise.all([
-    supabase.from('tenants').select('name').limit(1),
+  const [memberships, facetsRes, connRes, membership, claims, superAdmin] = await Promise.all([
+    getMemberships(),
     supabase.from('findings_facets').select('severity, n').eq('status', 'open'),
     supabase.from('connections').select('id', { count: 'exact', head: true }),
     getOwnMembership(),
     getClaims(),
+    isSuperAdmin(),
   ]);
 
-  const tenantName = (tenantRes.data?.[0] as { name: string } | undefined)?.name ?? 'VectaSec';
+  // A brand-new self-served user has no org yet: onboarding names one. Platform operators
+  // without a membership skip it — forcing US to create a customer org would be absurd.
+  if (memberships.length === 0 && !superAdmin) redirect('/onboarding');
+
+  const tenantName =
+    memberships.find((m) => m.tenantId === membership?.tenantId)?.tenantName ??
+    memberships[0]?.tenantName ??
+    'VectaSec';
 
   // Posture is only meaningful once something is connected; before that the console is in setup
   // and a "100 · A" chip would be a comforting lie. Null hides the chip until there is an estate.
@@ -44,7 +54,15 @@ export default async function AppLayout({ children }: { children: React.ReactNod
   const email = (claims?.email as string | undefined) ?? null;
 
   return (
-    <ShellChrome tenantName={tenantName} posture={posture} isAdmin={isAdmin(membership?.role)} userEmail={email}>
+    <ShellChrome
+      tenantName={tenantName}
+      posture={posture}
+      isAdmin={isAdmin(membership?.role)}
+      isSuperAdmin={superAdmin}
+      userEmail={email}
+      memberships={memberships.map((m) => ({ tenantId: m.tenantId, tenantName: m.tenantName }))}
+      activeTenantId={membership?.tenantId ?? null}
+    >
       {children}
     </ShellChrome>
   );

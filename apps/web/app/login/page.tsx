@@ -1,15 +1,17 @@
 'use client';
 
-/* Sign-in. Deliberately email+password only: SSO/SAML is an enterprise-tier concern and a magic-link
- * flow needs mail infrastructure we do not have yet. Keep this boring.
+/* Sign-in: email+password or Google. SSO/SAML stays an enterprise-tier concern; magic links
+ * still need mail infrastructure we do not have. Keep this boring.
  *
  * The session lands in cookies via @supabase/ssr's browser client, and proxy.ts refreshes it on
  * subsequent requests. Authorization itself is never decided here — RLS is the guarantee.
  */
 import { useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card';
+import { AuthDivider, GoogleButton } from '@/components/auth/OAuthButtons';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -56,6 +58,10 @@ export default function LoginPage() {
           <CardTitle>Sign in</CardTitle>
         </CardHeader>
         <CardBody>
+          <div style={{ display: 'grid', gap: 14, marginBottom: 14 }}>
+            <GoogleButton label="Sign in with Google" />
+            <AuthDivider />
+          </div>
           <form onSubmit={onSubmit} style={{ display: 'grid', gap: 12 }}>
             <div style={{ display: 'grid', gap: 6 }}>
               <label htmlFor="email" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
@@ -114,6 +120,12 @@ export default function LoginPage() {
               {busy ? 'Signing in…' : 'Sign in'}
             </button>
           </form>
+          <p style={{ margin: '14px 0 0', fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
+            New to VectaSec?{' '}
+            <Link href="/signup" style={{ color: 'var(--text-primary)' }}>
+              Create an account
+            </Link>
+          </p>
         </CardBody>
       </Card>
     </div>

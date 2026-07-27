@@ -30,17 +30,54 @@ function normalizeRole(raw: string): Role {
   return 'viewer';
 }
 
-/** The caller's single membership: tenant + role. Mirrors getOwnTenantId's multi-tenant
- * refusal — a user in several tenants gets null (treated as view-only in the UI) until a
- * tenant switcher exists. Per-row actions still work for them via getRoleInTenant, which is
- * scoped to the tenant the RLS-read row named. Cached: one query per render pass. */
+/** The caller's ACTIVE membership: tenant + role. One org — that org. Several orgs — the one
+ * the switcher cookie names (validated against membership: the cookie selects, membership
+ * authorizes), else the first by name — deterministic and visible, because the top-bar
+ * switcher displays exactly what is active. Cached: one query per render pass. */
 export const getOwnMembership = cache(async (): Promise<{ tenantId: string; role: Role } | null> => {
+  const memberships = await getMemberships();
+  if (memberships.length === 0) return null;
+  if (memberships.length > 1) {
+    const { cookies } = await import('next/headers');
+    const picked = (await cookies()).get(TENANT_COOKIE)?.value;
+    const match = memberships.find((m) => m.tenantId === picked);
+    if (match) return { tenantId: match.tenantId, role: match.role };
+  }
+  const first = memberships[0];
+  return { tenantId: first.tenantId, role: first.role };
+});
+
+/** Every membership the caller holds, with the tenant's name for the switcher. RLS scopes
+ * both tables to the caller, so this list can only ever name their own orgs. Sorted by name
+ * so "the first" is deterministic — and visible: the top-bar switcher shows what is active. */
+export const getMemberships = cache(
+  async (): Promise<{ tenantId: string; tenantName: string; role: Role }[]> => {
+    const supabase = await createClient();
+    const { data, error } = await supabase
+      .from('tenant_members')
+      .select('tenant_id, role, tenants(name)');
+    if (error || !data) return [];
+    const rows = data as unknown as { tenant_id: string; role: string; tenants: { name: string } | null }[];
+    return rows
+      .map((r) => ({
+        tenantId: r.tenant_id,
+        tenantName: r.tenants?.name ?? 'Unnamed',
+        role: normalizeRole(r.role),
+      }))
+      .sort((a, b) => a.tenantName.localeCompare(b.tenantName));
+  },
+);
+
+/** The tenant cookie a multi-org user picked in the switcher. Only ever honoured when it
+ * names a tenant the caller actually belongs to — the cookie selects, membership authorizes. */
+export const TENANT_COOKIE = 'vs-tenant';
+
+/** True when the caller is a platform operator (a super_admins row — readable only for
+ * yourself under RLS). Grants the /admin surface; tenant-level rights stay membership's. */
+export const isSuperAdmin = cache(async (): Promise<boolean> => {
   const supabase = await createClient();
-  const { data, error } = await supabase.from('tenant_members').select('tenant_id, role').limit(2);
-  if (error || !data || data.length === 0) return null;
-  if (data.length > 1) return null;
-  const row = data[0] as { tenant_id: string; role: string };
-  return { tenantId: row.tenant_id, role: normalizeRole(row.role) };
+  const { data, error } = await supabase.from('super_admins').select('user_id').limit(1);
+  return !error && !!data && data.length > 0;
 });
 
 /** The caller's role in ONE tenant — for actions on an existing row, whose tenant came from

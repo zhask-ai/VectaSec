@@ -1,6 +1,6 @@
 import 'server-only';
 
-import { createClient } from '@/lib/supabase/server';
+import { getOwnMembership } from '@/lib/role';
 
 /* Tenant resolution for actions that create something NEW.
  *
@@ -12,12 +12,8 @@ import { createClient } from '@/lib/supabase/server';
  * form field: it would be attacker-controlled.
  */
 export async function getOwnTenantId(): Promise<string | null> {
-  const supabase = await createClient();
-  const { data, error } = await supabase.from('tenant_members').select('tenant_id').limit(2);
-  if (error || !data || data.length === 0) return null;
-  // A user in several tenants needs a tenant switcher before create-actions are safe to
-  // offer — picking one silently would file their connection under a tenant they cannot see
-  // is wrong. Until the switcher exists, refuse rather than guess.
-  if (data.length > 1) return null;
-  return (data[0] as { tenant_id: string }).tenant_id;
+  // Delegates to the switcher-aware resolution in lib/role.ts: one org — that org; several —
+  // the validated cookie pick, else the first by name. Never a tenant the caller is not in.
+  const membership = await getOwnMembership();
+  return membership?.tenantId ?? null;
 }

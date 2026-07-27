@@ -6,6 +6,8 @@ import type { Route } from 'next';
 import { usePathname } from 'next/navigation';
 
 import { ScanStrip } from '@/components/ScanStrip';
+import { createClient } from '@/lib/supabase/client';
+import { switchTenantAction } from '@/app/(app)/tenant-actions';
 import { gradeColor, type Posture } from '@/lib/posture';
 import {
   IconOverview,
@@ -77,6 +79,13 @@ const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
 
 const SETTINGS_ITEM: NavItem = { href: '/settings', label: 'Settings', Icon: IconSettings };
 
+// The operator's view — rendered only for super admins (courtesy; every /admin page and the
+// definer functions behind it re-check server-side).
+const PLATFORM_ITEMS: NavItem[] = [
+  { href: '/admin', label: 'Organizations', Icon: IconSystems, exact: true },
+  { href: '/admin/users', label: 'Users', Icon: IconIdentities },
+];
+
 function isActive(pathname: string, item: NavItem): boolean {
   if (item.exact) return pathname === item.href;
   return pathname === item.href || pathname.startsWith(`${item.href}/`);
@@ -86,13 +95,19 @@ export function ShellChrome({
   tenantName,
   posture,
   isAdmin,
+  isSuperAdmin = false,
   userEmail,
+  memberships = [],
+  activeTenantId = null,
   children,
 }: {
   tenantName: string;
   posture: Posture | null;
   isAdmin: boolean;
+  isSuperAdmin?: boolean;
   userEmail: string | null;
+  memberships?: { tenantId: string; tenantName: string }[];
+  activeTenantId?: string | null;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
@@ -103,6 +118,22 @@ export function ShellChrome({
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
+
+  // Presence heartbeat: touch profiles.last_seen_at once a minute while a tab is open. The
+  // admin panel's "online" is this timestamp being fresh — presence by polling, like every
+  // other liveness in the console. Errors ignored on purpose (pre-migration DBs, offline).
+  useEffect(() => {
+    const supabase = createClient();
+    const beat = () => {
+      void supabase.rpc('touch_last_seen').then(
+        () => {},
+        () => {},
+      );
+    };
+    beat();
+    const t = setInterval(beat, 60_000);
+    return () => clearInterval(t);
+  }, []);
 
   const NavList = () => (
     <nav aria-label="Primary" className="vs-nav">
@@ -132,6 +163,33 @@ export function ShellChrome({
           </ul>
         </div>
       ))}
+
+      {isSuperAdmin && (
+        <div className="vs-nav-group">
+          <div className="vs-nav-group-label">Platform</div>
+          <ul className="vs-nav-list">
+            {PLATFORM_ITEMS.map((item) => {
+              const active = isActive(pathname, item);
+              return (
+                <li key={item.href}>
+                  <Link
+                    href={item.href}
+                    className="vs-navitem"
+                    data-active={active || undefined}
+                    aria-current={active ? 'page' : undefined}
+                    onClick={() => setMobileOpen(false)}
+                  >
+                    <span aria-hidden="true" className="vs-navitem-icon">
+                      <item.Icon size={18} />
+                    </span>
+                    <span className="vs-nav-label">{item.label}</span>
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
 
       {isAdmin && (
         <div className="vs-nav-group vs-nav-group-pinned">
@@ -184,9 +242,35 @@ export function ShellChrome({
           <Link href="/" className="vs-brand-link vs-brand-mobile" aria-label="VectaSec — Overview">
             <BrandMark />
           </Link>
-          <span className="vs-tenant" title={tenantName}>
-            {tenantName}
-          </span>
+          {memberships.length > 1 ? (
+            <form action={switchTenantAction}>
+              <select
+                name="tenant"
+                aria-label="Switch organization"
+                className="vs-tenant"
+                value={activeTenantId ?? memberships[0]?.tenantId}
+                onChange={(e) => e.currentTarget.form?.requestSubmit()}
+                style={{
+                  background: 'var(--surface)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border-interactive)',
+                  borderRadius: 'var(--radius-sm, 6px)',
+                  padding: '3px 6px',
+                  fontSize: 'var(--text-sm)',
+                }}
+              >
+                {memberships.map((m) => (
+                  <option key={m.tenantId} value={m.tenantId}>
+                    {m.tenantName}
+                  </option>
+                ))}
+              </select>
+            </form>
+          ) : (
+            <span className="vs-tenant" title={tenantName}>
+              {tenantName}
+            </span>
+          )}
           <div className="vs-topbar-search">
             <GlobalSearch />
           </div>

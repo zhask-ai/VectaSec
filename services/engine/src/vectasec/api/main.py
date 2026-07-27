@@ -119,12 +119,20 @@ def _tenant_for_user(user_id: str, requested: Optional[str]) -> tuple[str, Optio
         cur.execute("select tenant_id::text, role from tenant_members where user_id = %s",
                     (user_id,))
         member_of = {r[0]: r[1] for r in cur.fetchall()}
-    if not member_of:
+        cur.execute("select 1 from super_admins where user_id = %s", (user_id,))
+        is_super = cur.fetchone() is not None
+    if not member_of and not is_super:
         raise HTTPException(403, "authenticated user belongs to no tenant")
     if requested:
         if requested not in member_of:
+            # Platform operators act as admin in any tenant — the row in super_admins is the
+            # privilege (granted by the operator, never writable from the browser role).
+            if is_super:
+                return requested, "admin"
             raise HTTPException(403, "not a member of the requested tenant")
         return requested, member_of[requested]
+    if not member_of:
+        raise HTTPException(400, "super admin with no membership: specify X-VectaSec-Tenant")
     if len(member_of) > 1:
         raise HTTPException(400, "user belongs to multiple tenants; specify X-VectaSec-Tenant")
     tenant = next(iter(member_of))
@@ -242,7 +250,15 @@ def _role_for_actor(tenant_id: str, actor: str) -> Optional[str]:
         cur.execute("select role from tenant_members where tenant_id = %s and user_id = %s",
                     (tenant_id, user_id))
         row = cur.fetchone()
-    return row[0] if row else None
+        if row:
+            return row[0]
+        # Platform operators: a super_admins row grants the admin tier in ANY tenant, so the
+        # operator console can manage members / invite on a customer's behalf. Audited like
+        # any actor — the audit row names the real user id.
+        cur.execute("select 1 from super_admins where user_id = %s", (user_id,))
+        if cur.fetchone():
+            return "admin"
+    return None
 
 
 def _require_rank(p: Principal, min_rank: int) -> Principal:
