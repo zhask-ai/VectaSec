@@ -54,6 +54,20 @@ MODELS = [os.environ.get("VECTASEC_AI_MODEL", "claude-opus-4-8"), "claude-sonnet
 MODEL = MODELS[0]   # the primary model; retained as the name callers and tests reference
 EFFORT = os.environ.get("VECTASEC_AI_EFFORT", "medium")
 
+# The Gemini leg of the chain, used when GEMINI_API_KEY is set. Same shape as MODELS: strongest
+# first, a cheaper alternate behind it, head overridable per-deployment. The full triage chain is
+# assembled per-call by _provider_chain(): Anthropic entries (when keyed) before Gemini entries
+# (when keyed), so a deployment with both keys gets cross-provider availability fallback and a
+# Gemini-only deployment (no Anthropic key at all) still gets grounded AI triage.
+GEMINI_MODELS = [os.environ.get("VECTASEC_AI_GEMINI_MODEL", "gemini-2.5-pro"), "gemini-2.5-flash"]
+GEMINI_BASE_URL = os.environ.get(
+    "VECTASEC_GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
+
+# The OpenAI leg, used when OPENAI_API_KEY is set. Same shape again: strongest head,
+# cheaper fixed alternate, head overridable per-deployment.
+OPENAI_MODELS = [os.environ.get("VECTASEC_AI_OPENAI_MODEL", "gpt-5.2"), "gpt-5-mini"]
+OPENAI_BASE_URL = os.environ.get("VECTASEC_OPENAI_BASE_URL", "https://api.openai.com/v1")
+
 SYSTEM = """You are the triage analyst for VectaSec, an integration-layer security posture scanner.
 
 You will be given ONE finding from a deterministic scanner, plus the numbered observations \
@@ -207,11 +221,7 @@ def _render_observation(index: int, claim: str) -> str:
     return f'<observation index="{index}">\n{body}\n</observation>'
 
 
-def _call_model(finding: dict, observations: list[dict], n_total: int = 0, model: str = MODEL) -> Triage:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-
+def _build_prompt(finding: dict, observations: list[dict], n_total: int = 0) -> str:
     numbered = "\n".join(_render_observation(i, o["claim"]) for i, o in enumerate(observations, start=1))
     # SYSTEM tells the model these are the ONLY facts it has, so where that is not the whole
     # truth it has to be told. Silently dropping evidence from a prompt that claims completeness
@@ -219,7 +229,7 @@ def _call_model(finding: dict, observations: list[dict], n_total: int = 0, model
     elided = (f"\n\n[VectaSec: showing the {len(observations)} most recent of {n_total} distinct "
               f"observations for this finding. Older evidence exists and is not shown here.]"
               if n_total > len(observations) else "")
-    prompt = (
+    return (
         f"FINDING\n"
         f"  rule_id:     {finding['rule_id']}\n"
         f"  title:       {finding['title']}\n"
@@ -233,30 +243,13 @@ def _call_model(finding: dict, observations: list[dict], n_total: int = 0, model
         f"Triage this finding. Cite by the index attribute of each observation you used."
     )
 
-    resp = client.messages.create(
-        model=model,
-        max_tokens=8192,
-        thinking={"type": "adaptive"},
-        output_config={"effort": EFFORT, "format": {"type": "json_schema", "schema": TRIAGE_SCHEMA}},
-        system=SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-    )
 
-    # A security scanner asks about exploitation for a living; a refusal is a normal
-    # outcome to handle, not a crash. Fall back rather than surfacing nothing.
-    if resp.stop_reason == "refusal":
-        cat = getattr(resp.stop_details, "category", None) if resp.stop_details else None
-        raise UncitedOutput(f"model declined to triage (category={cat})")
-    if resp.stop_reason == "max_tokens":
-        raise UncitedOutput("model output truncated")
+def _grounded_triage(data: dict, finding: dict, observations: list[dict], model: str) -> Triage:
+    """The grounding gate every provider's output passes through — identical no matter who spoke.
 
-    text = next((b.text for b in resp.content if b.type == "text"), None)
-    if not text:
-        raise UncitedOutput("no text block in response")
-    data = json.loads(text)
-
-    # Range-check every citation. A citation outside the observations we sent means the
-    # model invented evidence — the whole output is discarded, not partially trusted.
+    Range-checks every citation: a citation outside the observations we sent means the model
+    invented evidence — the whole output is discarded, not partially trusted.
+    """
     cites = data["citations"]
     bad = [c for c in cites if not (1 <= c <= len(observations))]
     if bad:
@@ -282,6 +275,180 @@ def _call_model(finding: dict, observations: list[dict], n_total: int = 0, model
     )
 
 
+def _call_model(finding: dict, observations: list[dict], n_total: int = 0, model: str = MODEL) -> Triage:
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    prompt = _build_prompt(finding, observations, n_total)
+
+    resp = client.messages.create(
+        model=model,
+        max_tokens=8192,
+        thinking={"type": "adaptive"},
+        output_config={"effort": EFFORT, "format": {"type": "json_schema", "schema": TRIAGE_SCHEMA}},
+        system=SYSTEM,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    # A security scanner asks about exploitation for a living; a refusal is a normal
+    # outcome to handle, not a crash. Fall back rather than surfacing nothing.
+    if resp.stop_reason == "refusal":
+        cat = getattr(resp.stop_details, "category", None) if resp.stop_details else None
+        raise UncitedOutput(f"model declined to triage (category={cat})")
+    if resp.stop_reason == "max_tokens":
+        raise UncitedOutput("model output truncated")
+
+    text = next((b.text for b in resp.content if b.type == "text"), None)
+    if not text:
+        raise UncitedOutput("no text block in response")
+    return _grounded_triage(json.loads(text), finding, observations, model)
+
+
+class ModelHTTPError(Exception):
+    """A non-200 from a REST-called model API. Carries `status_code` so _is_retryable can make
+    the same unavailable-vs-recurring call it makes for the SDK's typed exceptions."""
+
+    def __init__(self, status_code: int, body: str):
+        self.status_code = status_code
+        super().__init__(f"model API returned {status_code}: {body[:300]}")
+
+
+def _gemini_schema(schema: dict) -> dict:
+    """TRIAGE_SCHEMA, minus what Gemini's responseSchema rejects.
+
+    The v1beta Schema proto has no `additionalProperties`, and an unknown field fails the whole
+    request. Everything else the contract relies on (required, enum, minItems, items) survives.
+    """
+    out = {}
+    for k, v in schema.items():
+        if k == "additionalProperties":
+            continue
+        if isinstance(v, dict):
+            out[k] = _gemini_schema(v)
+        else:
+            out[k] = v
+    return out
+
+
+def _gemini_post(url: str, api_key: str, body: dict) -> dict:
+    """The one place the Gemini REST API is actually reached — and therefore the test seam.
+
+    httpx's default 5s timeout is tuned for the connectors' config reads, not for a reasoning
+    model writing prose; generation gets the same generous ceiling the Anthropic SDK defaults to.
+    """
+    import httpx
+
+    r = httpx.post(url, headers={"x-goog-api-key": api_key}, json=body, timeout=120.0)
+    if r.status_code != 200:
+        raise ModelHTTPError(r.status_code, r.text)
+    return r.json()
+
+
+def _call_gemini(finding: dict, observations: list[dict], n_total: int = 0,
+                 model: str = GEMINI_MODELS[0]) -> Triage:
+    """The Gemini leg. Same prompt, same SYSTEM, same schema, and — the part that matters —
+    the same _grounded_triage gate: a provider is swappable, the grounding contract is not."""
+    body = {
+        "systemInstruction": {"parts": [{"text": SYSTEM}]},
+        "contents": [{"role": "user", "parts": [{"text": _build_prompt(finding, observations, n_total)}]}],
+        "generationConfig": {
+            # Gemini 2.5's internal thinking spends from this same budget, so it is set well
+            # above the Anthropic path's 8192 — a truncated JSON body here is a lost triage.
+            "maxOutputTokens": 16384,
+            "responseMimeType": "application/json",
+            "responseSchema": _gemini_schema(TRIAGE_SCHEMA),
+        },
+    }
+    resp = _gemini_post(f"{GEMINI_BASE_URL}/models/{model}:generateContent",
+                        settings.gemini_api_key, body)
+
+    # A blocked prompt or a safety stop is Gemini's refusal shape — a normal outcome for a
+    # security scanner, handled exactly like an Anthropic refusal: fall back, never crash.
+    block = (resp.get("promptFeedback") or {}).get("blockReason")
+    if block:
+        raise UncitedOutput(f"model declined to triage (blockReason={block})")
+    candidates = resp.get("candidates") or []
+    if not candidates:
+        raise UncitedOutput("no candidates in response")
+    cand = candidates[0]
+    finish = cand.get("finishReason", "STOP")
+    if finish == "MAX_TOKENS":
+        raise UncitedOutput("model output truncated")
+    if finish != "STOP":
+        raise UncitedOutput(f"model declined to triage (finishReason={finish})")
+
+    # Thought summaries come back as parts flagged `thought`; the answer is the rest.
+    parts = (cand.get("content") or {}).get("parts") or []
+    text = "".join(p["text"] for p in parts if "text" in p and not p.get("thought"))
+    if not text:
+        raise UncitedOutput("no text in response")
+    return _grounded_triage(json.loads(text), finding, observations, model)
+
+
+def _openai_schema(schema: dict) -> dict:
+    """TRIAGE_SCHEMA, minus what OpenAI's strict structured outputs reject.
+
+    Strict mode *requires* `additionalProperties: false` (already there) but has never promised
+    `minItems`; stripping it is deterministic where sending it is API-version roulette, and the
+    "no citations" gate in _grounded_triage enforces the same bound at runtime anyway.
+    """
+    out = {}
+    for k, v in schema.items():
+        if k == "minItems":
+            continue
+        if isinstance(v, dict):
+            out[k] = _openai_schema(v)
+        else:
+            out[k] = v
+    return out
+
+
+def _openai_post(url: str, api_key: str, body: dict) -> dict:
+    """The one place the OpenAI REST API is actually reached — and therefore the test seam."""
+    import httpx
+
+    r = httpx.post(url, headers={"Authorization": f"Bearer {api_key}"}, json=body, timeout=120.0)
+    if r.status_code != 200:
+        raise ModelHTTPError(r.status_code, r.text)
+    return r.json()
+
+
+def _call_openai(finding: dict, observations: list[dict], n_total: int = 0,
+                 model: str = OPENAI_MODELS[0]) -> Triage:
+    """The OpenAI leg. Chat Completions with strict structured outputs; the reply still goes
+    through the same _grounded_triage gate as every other provider's."""
+    body = {
+        "model": model,
+        "messages": [{"role": "system", "content": SYSTEM},
+                     {"role": "user", "content": _build_prompt(finding, observations, n_total)}],
+        # GPT-5's internal reasoning spends from this budget too — same generous ceiling as the
+        # Gemini leg, for the same reason: a truncated JSON body is a lost triage.
+        "max_completion_tokens": 16384,
+        "response_format": {"type": "json_schema",
+                            "json_schema": {"name": "triage", "strict": True,
+                                            "schema": _openai_schema(TRIAGE_SCHEMA)}},
+    }
+    resp = _openai_post(f"{OPENAI_BASE_URL}/chat/completions", settings.openai_api_key, body)
+
+    choices = resp.get("choices") or []
+    if not choices:
+        raise UncitedOutput("no choices in response")
+    choice = choices[0]
+    msg = choice.get("message") or {}
+    # Structured outputs surface a refusal as its own field, not as content shaped like JSON.
+    if msg.get("refusal"):
+        raise UncitedOutput("model declined to triage (refusal)")
+    finish = choice.get("finish_reason", "stop")
+    if finish == "length":
+        raise UncitedOutput("model output truncated")
+    if finish != "stop":
+        raise UncitedOutput(f"model declined to triage (finish_reason={finish})")
+    text = msg.get("content")
+    if not text:
+        raise UncitedOutput("no text in response")
+    return _grounded_triage(json.loads(text), finding, observations, model)
+
+
 def _is_retryable(exc: Exception) -> bool:
     """True when a model call failed because the model is UNAVAILABLE — overloaded (529), rate
     limited (429), a 5xx, or a transport/timeout failure — so the next model in MODELS is worth
@@ -292,6 +459,15 @@ def _is_retryable(exc: Exception) -> bool:
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and (status == 429 or status >= 500):
         return True
+    # The Gemini path speaks REST through httpx: its non-200s arrive as ModelHTTPError (caught
+    # by the status check above) and its network failures as httpx transport errors, which are
+    # exactly as transient as the SDK's APIConnectionError.
+    try:
+        import httpx
+        if isinstance(exc, httpx.TransportError):
+            return True
+    except ImportError:
+        pass
     try:
         import anthropic
     except ImportError:
@@ -308,30 +484,61 @@ def _is_retryable(exc: Exception) -> bool:
     return bool(retry_types) and isinstance(exc, retry_types)
 
 
+_PROVIDER_CALLS = {"anthropic": _call_model, "openai": _call_openai, "gemini": _call_gemini}
+
+
+def _provider_chain() -> list[tuple[str, str]]:
+    """(provider, model) entries in try-order, built from which keys are actually set.
+
+    Anthropic first when keyed (triage quality is the product and the head of MODELS is
+    deliberately the strongest model), then OpenAI, then Gemini; any one alone is a complete
+    chain. Built per-call, not at import — settings reads os.environ on access, and the tests'
+    seam is env."""
+    chain: list[tuple[str, str]] = []
+    if settings.anthropic_api_key:
+        chain += [("anthropic", m) for m in MODELS]
+    if settings.openai_api_key:
+        chain += [("openai", m) for m in OPENAI_MODELS]
+    if settings.gemini_api_key:
+        chain += [("gemini", m) for m in GEMINI_MODELS]
+    return chain
+
+
 def _triage_via_models(finding: dict, observations: list[dict], n_total: int = 0) -> Triage:
-    """Triage through the model fallback chain (MODELS), in order.
+    """Triage through the model fallback chain (_provider_chain), in order.
 
-    An UNAVAILABLE model (see _is_retryable) hands off to the next; the deterministic _rule_based
-    fallback is reached only after the whole chain is exhausted — which is what keeps a transient
-    overload of the primary model from silently degrading every triage in a scan to the fallback.
+    An UNAVAILABLE model (see _is_retryable) hands off to the next entry; the deterministic
+    _rule_based fallback is reached only after the whole chain is exhausted — which is what keeps
+    a transient overload of the primary model from silently degrading every triage in a scan.
 
-    Grounding is enforced on EVERY attempt: _call_model applies the citation range-check and the
-    refusal/truncation handling to each model in turn. A model that RESPONDS but ungrounded raises
+    A NON-retryable error (auth, bad request, unknown model) recurs identically on every model of
+    the SAME provider, so it skips the rest of that provider's entries — but it does NOT condemn
+    the other provider, whose key and endpoint are independent: an Anthropic 401 must not cost a
+    dual-keyed deployment its working Gemini triage.
+
+    Grounding is enforced on EVERY attempt: each provider call applies the citation range-check
+    and the refusal/truncation handling in turn. A model that RESPONDS but ungrounded raises
     UncitedOutput, and that is NOT retried on another model — it is a grounding failure, not an
     availability one, so it must reach the caller (and thus _rule_based), never be papered over by
     asking a different model the same question. When the chain is exhausted the last error
     propagates; triage_finding's handler turns it into _rule_based().
     """
-    for i, model in enumerate(MODELS):
+    last_exc: Optional[Exception] = None
+    dead_providers: set[str] = set()
+    for provider, model in _provider_chain():
+        if provider in dead_providers:
+            continue
         try:
-            return _call_model(finding, observations, n_total, model=model)
+            return _PROVIDER_CALLS[provider](finding, observations, n_total, model=model)
         except UncitedOutput:
             raise
         except Exception as e:
-            if _is_retryable(e) and i < len(MODELS) - 1:
-                continue                # this model is unavailable — try the next in the chain
-            raise                       # non-retryable, or the chain is exhausted
-    raise UncitedOutput("model chain is empty")   # pragma: no cover — MODELS is never empty
+            last_exc = e
+            if not _is_retryable(e):
+                dead_providers.add(provider)   # recurs on every model of THIS provider
+    if last_exc is not None:
+        raise last_exc
+    raise UncitedOutput("model chain is empty")   # pragma: no cover — callers check keys first
 
 
 def _load_observations(cur, finding_id: str) -> tuple[list[dict], int]:
@@ -441,8 +648,8 @@ def triage_finding(cur, tenant_id: str, finding_id: str, force: bool = False) ->
                                  "model": hit[2], "grounded": True})
 
     try:
-        if not settings.anthropic_api_key:
-            raise UncitedOutput("ANTHROPIC_API_KEY not set")
+        if not (settings.anthropic_api_key or settings.openai_api_key or settings.gemini_api_key):
+            raise UncitedOutput("no AI key set (ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY)")
         t = _triage_via_models(finding, observations, n_total)
     except UncitedOutput:
         t = _rule_based(finding, observations)
@@ -461,7 +668,8 @@ def triage_finding(cur, tenant_id: str, finding_id: str, force: bool = False) ->
     cur.execute(
         """insert into ai_outputs (tenant_id, finding_id, kind, content, fingerprint, model)
            values (%s,%s,'triage',%s,%s,%s)
-           on conflict (tenant_id, kind, fingerprint) do update set content = excluded.content
+           on conflict (tenant_id, kind, fingerprint) do update
+             set content = excluded.content, model = excluded.model
            returning id""",
         (tenant_id, finding["id"], content, cache_key, t.model),
     )
@@ -473,4 +681,13 @@ def triage_finding(cur, tenant_id: str, finding_id: str, force: bool = False) ->
             "insert into ai_output_evidence values (%s,%s) on conflict do nothing",
             (out_id, obs_id),
         )
+    # A regenerate (force=True, or a fallback later replaced by a model) REPLACES the text, so
+    # links from the previous text must not survive it: the ledger's promise is "the citations
+    # written when THIS text was generated", and a leftover link makes the new prose cite an
+    # observation its author never used. DELETE is the one mutation the ledger permits, and the
+    # inserts above come first so the row is never link-less at commit.
+    cur.execute(
+        "delete from ai_output_evidence where ai_output_id = %s and not (observation_id = any(%s))",
+        (out_id, t.cited_observation_ids),
+    )
     return t

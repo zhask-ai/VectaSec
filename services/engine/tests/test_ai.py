@@ -89,6 +89,16 @@ def _obs(rows) -> list[dict]:
     return [{"id": i, "claim": c} for i, c in rows]
 
 
+@pytest.fixture(autouse=True)
+def _no_other_provider_keys(monkeypatch):
+    """These tests exercise the Anthropic leg and the fallback in isolation. A GEMINI_API_KEY or
+    OPENAI_API_KEY inherited from the developer's shell would splice extra entries into
+    _provider_chain() and send the chain tests to the real network — the exact thing this file's
+    docstring forbids. The other legs have their own files (test_ai_gemini.py, test_ai_openai.py)."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+
 @pytest.fixture
 def model(monkeypatch):
     """Installs a fake anthropic.Anthropic. Returns a handle whose .calls records kwargs, so a
@@ -151,6 +161,8 @@ class FakeCursor:
         self.cached_links = cached_links if cached_links is not None else [OBS[0]["id"]]
         self.ai_outputs: list = []
         self.evidence: list = []
+        self.evidence_prunes: list = []     # params of every stale-link DELETE
+        self.ai_output_sql: str = ""        # the upsert's SQL, for asserting what it replaces
         self.cache_keys: list = []          # every fingerprint the cache was probed with
         self.obs_query: tuple = ()          # (sql, params) of the evidence read
         self._one = None
@@ -165,10 +177,14 @@ class FakeCursor:
             self._all = [(i, c, len(self.obs_rows)) for i, c in self.obs_rows]
         elif q.startswith("insert into ai_outputs"):
             self.ai_outputs.append(params)
+            self.ai_output_sql = q
             self._one = (NEW_OUT_ID,)
         elif "from ai_outputs where" in q:
             self.cache_keys.append(params[1])
             self._one = (CACHED_OUT_ID, *self.cached) if self.cached else None
+        elif q.startswith("delete from ai_output_evidence"):
+            # before the read branch: the DELETE also contains "from ai_output_evidence where"
+            self.evidence_prunes.append(params)
         elif "from ai_output_evidence where" in q:
             self._all = [(o,) for o in self.cached_links]
         elif q.startswith("insert into ai_output_evidence"):
@@ -513,6 +529,20 @@ def test_a_missing_finding_returns_none(model):
     cur = FakeCursor(finding_row=None)
     assert triage_finding(cur, TENANT, FINDING_ID) is None
     assert model.calls == []
+
+
+def test_a_regenerate_replaces_model_and_prunes_stale_links(model):
+    """The provenance bug the live E2E caught: an ON CONFLICT upsert that only replaced
+    `content` left a fallback-attributed row carrying model-written prose, and the old text's
+    surviving evidence links made the new text over-cite. The upsert must replace `model` WITH
+    `content`, and links not cited by the NEW text must be pruned (DELETE — the one mutation
+    the ledger permits), after the new links are inserted so the row is never link-less."""
+    model.resp = _Resp(payload(citations=[1]))
+    cur = FakeCursor(finding_row=finding_row())
+    t = triage_finding(cur, TENANT, FINDING_ID)
+    assert "model = excluded.model" in cur.ai_output_sql
+    assert cur.evidence == [(NEW_OUT_ID, OBS[0]["id"])]
+    assert cur.evidence_prunes == [(NEW_OUT_ID, t.cited_observation_ids)]
 
 
 def test_no_api_key_falls_back_without_calling_the_model(model, monkeypatch):

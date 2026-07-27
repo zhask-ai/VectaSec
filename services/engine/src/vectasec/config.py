@@ -57,6 +57,17 @@ class Settings:
         return os.environ.get("ANTHROPIC_API_KEY", "").strip()
 
     @property
+    def gemini_api_key(self) -> str:
+        # Optional: a Google Gemini API key. Any AI key enables grounded triage; providers are
+        # tried in _provider_chain() order (Anthropic, then OpenAI, then Gemini).
+        return os.environ.get("GEMINI_API_KEY", "").strip()
+
+    @property
+    def openai_api_key(self) -> str:
+        # Optional: an OpenAI API key. Same contract as the other two AI keys.
+        return os.environ.get("OPENAI_API_KEY", "").strip()
+
+    @property
     def engine_port(self) -> int:
         return int(os.environ.get("ENGINE_PORT", "8000") or 8000)
 
