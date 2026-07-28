@@ -86,6 +86,8 @@ type OsvFinding = {
   assessment: string | null;
   detail: string | null;
   last_seen: string | null;
+  resources: { name: string } | null;
+  scans: { connections: { name: string } | null } | null;
 };
 
 export default async function SupplyChainPage() {
@@ -97,7 +99,7 @@ export default async function SupplyChainPage() {
       .limit(1000),
     supabase
       .from('findings')
-      .select('id, rule_id, severity, status, assessment, detail, last_seen')
+      .select('id, rule_id, severity, status, assessment, detail, last_seen, resources(name), scans(connections(name))')
       .like('rule_id', 'SUPPLY.OSV.%')
       .neq('status', 'resolved')
       .order('last_seen', { ascending: false })
@@ -215,10 +217,20 @@ export default async function SupplyChainPage() {
                     <TD>
                       <SeverityBadge severity={f.severity} />
                     </TD>
-                    <TD mono>
-                      <span style={{ fontSize: 'var(--text-2xs)', overflowWrap: 'anywhere' }}>
-                        {f.detail ?? '—'}
-                      </span>
+                    <TD>
+                      <div style={{ display: 'grid', gap: 2 }}>
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-2xs)', overflowWrap: 'anywhere' }}>
+                          {f.detail ?? '—'}
+                        </span>
+                        {/* The same broker can be observed by more than one connection (its own
+                            connector AND a network-discovery probe), each filing its own
+                            finding — name the observer so twin rows read as two viewpoints,
+                            not a duplicate. */}
+                        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
+                          {f.resources?.name ?? 'component'}
+                          {f.scans?.connections?.name ? ` · via ${f.scans.connections.name}` : ''}
+                        </span>
+                      </div>
                     </TD>
                     <TD>
                       <StatusPill

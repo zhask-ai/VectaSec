@@ -390,6 +390,26 @@ def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
             conn.rollback()
             stats["osv_error"] = f"{type(e).__name__}: {e}"
 
+        # Fold the hook stats back into the scans row. _persist_scan wrote status='done' with
+        # stats BEFORE the three hooks above ran, so their outcomes — including an OSV feed
+        # outage or a correlation error — were returned to the CLI caller but invisible to the
+        # product (the console's scan detail reads the row). Merge (`||`, the reaper's pattern)
+        # rather than overwrite, and defensively: a stats bookkeeping failure must never
+        # matter more than the scan it describes.
+        hook_stats = {k: stats[k] for k in
+                      ("correlation", "correlation_error", "runtime", "runtime_unused",
+                       "runtime_error", "osv", "osv_error") if k in stats}
+        if hook_stats:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "update scans set stats = coalesce(stats, '{}'::jsonb) || %s::jsonb "
+                        "where id = %s",
+                        (json.dumps(hook_stats), scan_id))
+                conn.commit()
+            except Exception:  # pragma: no cover - defensive
+                conn.rollback()
+
         # Post-scan action routing (notify.py): the ONE hook every run_scan caller (worker,
         # CLI, inline API) shares. notify_scan never raises, and the belt-and-braces except
         # exists because a notification failure must NEVER fail a completed scan.
