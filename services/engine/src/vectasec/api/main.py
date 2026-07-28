@@ -1189,14 +1189,78 @@ def report_sbom(p: Principal = Depends(principal)) -> Response:
         )
         scan_ids = [s[0] for s in cur.fetchall()]
 
+        # The vulnerabilities section re-expresses what the product itself has already filed —
+        # the OSV enrichment hook (osv.py) and the curated CVE pack (detect/cve.py) — so the
+        # SBOM download and the findings queue can never disagree. Observations accumulate one
+        # per scan in the append-only ledger; `distinct on … seq desc` keeps only the latest
+        # citation per (advisory, component). Resolved findings are a human's statement that
+        # the problem is gone and are excluded; the stale filter drops decommissioned hosts.
+        cur.execute(
+            """select distinct on (o.source_ref->>'osv_id', r.kind, r.ext_id)
+                      o.source_ref->>'osv_id', r.kind, r.ext_id,
+                      o.source_ref->>'severity_band', o.source_ref->'cvss_score',
+                      o.source_ref->'fixed', o.source_ref->>'summary'
+                 from findings f
+                 join observations o on o.finding_id = f.id
+                 join resources r on r.id = f.resource_id
+                where f.tenant_id = %s and f.rule_id = 'SUPPLY.OSV.KNOWN_VULNERABILITY'
+                  and f.status != 'resolved' and coalesce(r.stale, false) = false
+                  and o.source_ref->>'osv_id' is not null
+                order by o.source_ref->>'osv_id', r.kind, r.ext_id, o.seq desc
+                limit %s""",
+            (p.tenant_id, REPORT_MAX_FINDINGS),
+        )
+        vuln_entries = [
+            {"id": vid, "ref": f"{kind}/{ext}", "source_name": "OSV",
+             "url": f"https://osv.dev/vulnerability/{vid}", "band": band,
+             "score": score, "fixed": fixed or [], "description": summary}
+            for vid, kind, ext, band, score, fixed, summary in cur.fetchall()]
+        cur.execute(
+            """select distinct on (o.source_ref->>'cve', r.kind, r.ext_id)
+                      o.source_ref->>'cve', r.kind, r.ext_id,
+                      o.source_ref->'cvss', o.source_ref->'kev',
+                      o.source_ref->>'fixed_in', o.source_ref->>'source', f.title
+                 from findings f
+                 join observations o on o.finding_id = f.id
+                 join resources r on r.id = f.resource_id
+                where f.tenant_id = %s and f.rule_id = 'CVE.KNOWN_VULNERABILITY'
+                  and f.assessment = 'assessed'
+                  and f.status != 'resolved' and coalesce(r.stale, false) = false
+                  and o.source_ref->>'cve' is not null
+                order by o.source_ref->>'cve', r.kind, r.ext_id, o.seq desc
+                limit %s""",
+            (p.tenant_id, REPORT_MAX_FINDINGS),
+        )
+        # Per-advisory severity is recomputed from the citation's own cvss/kev with the SAME
+        # function that filed the finding (detect/cve.py) — f.severity is the row's worst-CVE
+        # severity, which would overstate the other CVEs sharing the row.
+        from ..detect.cve import _severity as curated_severity
+        vuln_entries += [
+            {"id": cve, "ref": f"{kind}/{ext}", "source_name": "VectaSec curated dataset",
+             "url": src, "band": curated_severity({"cvss": cvss, "kev": bool(kev)}),
+             "score": cvss, "fixed": [fixed_in] if fixed_in else [], "description": title}
+            for cve, kind, ext, cvss, kev, fixed_in, src, title in cur.fetchall()]
+
     resources = [{"kind": k, "name": n, "ext_id": e, "labels": lab, "raw": raw,
                   "connection_type": t} for k, n, e, lab, raw, t, _cid in rows]
     # Any probe-derived component downgrades the whole document to `discovery`.
     authenticated = not any(r["kind"] == "discovered_service" for r in resources)
 
+    # `affects` refs must resolve inside THIS document: a finding may cite a resource the
+    # resource query's row cap excluded, and a dangling ref is a schema-invalid document.
+    # Refs come from component_for itself so its ext_id fallback logic cannot drift from us.
+    component_refs = set()
+    for r in resources:
+        comp = sbom.component_for(r)
+        if comp:
+            component_refs.add(comp["bom-ref"])
+    vulnerabilities = sbom.vulnerabilities_section(
+        [e for e in vuln_entries if e["ref"] in component_refs])
+
     doc = sbom.to_cyclonedx(
         resources, tenant_name=tenant_name, tenant_id=str(p.tenant_id),
-        scan_ids=scan_ids, timestamp=_now_iso(), authenticated=authenticated)
+        scan_ids=scan_ids, timestamp=_now_iso(), authenticated=authenticated,
+        vulnerabilities=vulnerabilities)
     return Response(
         content=json.dumps(doc, indent=2),
         media_type="application/vnd.cyclonedx+json; version=1.6",

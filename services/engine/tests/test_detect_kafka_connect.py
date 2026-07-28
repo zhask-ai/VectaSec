@@ -146,3 +146,70 @@ def test_nhi_connector_without_secrets_yields_no_identity():
     r = parse_connector(BASE, "clean", CFG_NO_SECRETS)
     col = derive_identities("kafka_connect", Collected(resources=[r]))
     assert not [x for x in col.resources if x.kind in ("identity", "credential")]
+
+
+# ── installed-plugin inventory (/connector-plugins) ───────────────────────────
+def test_parse_plugins_inventories_class_type_and_version():
+    from vectasec.connect.kafka_connect import parse_plugins
+    out = parse_plugins(BASE, [
+        {"class": "io.debezium.connector.postgresql.PostgresConnector",
+         "type": "source", "version": "2.5.0.Final"},
+        {"class": "org.apache.kafka.connect.transforms.Cast$Value", "type": "transformation"},
+    ])
+    assert [r.kind for r in out] == ["kafka_connect_plugin"] * 2
+    dbz = out[0]
+    assert dbz.name == "PostgresConnector"
+    assert dbz.labels["product"] == "io.debezium.connector.postgresql.postgresconnector"
+    assert dbz.labels["version"] == "2.5.0.Final" and dbz.raw["version"] == "2.5.0.Final"
+    assert dbz.raw["cluster_ext"] == f"kafka-connect-{BASE}"
+
+
+def test_a_versionless_plugin_never_inherits_the_worker_version():
+    """Older workers omit the field; some serialize the literal "null". Either way the
+    component must carry NO version — an inherited one would drive CVE matching against a
+    number nobody stated (sbom.component_for refuses versionless components by design)."""
+    from vectasec.connect.kafka_connect import parse_plugins
+    from vectasec.sbom import component_for
+    for reported in (None, "", "null"):
+        (r,) = parse_plugins(BASE, [{"class": "a.b.C", "type": "sink", "version": reported}])
+        assert "version" not in r.labels and "version" not in r.raw
+        assert component_for({"kind": r.kind, "name": r.name, "ext_id": r.ext_id,
+                              "labels": r.labels, "raw": r.raw}) is None
+
+
+def test_a_versioned_plugin_becomes_an_sbom_component():
+    from vectasec.connect.kafka_connect import parse_plugins
+    from vectasec.sbom import component_for
+    (r,) = parse_plugins(BASE, [{"class": "io.debezium.connector.postgresql.PostgresConnector",
+                                 "type": "source", "version": "2.5.0.Final"}])
+    comp = component_for({"kind": r.kind, "name": r.name, "ext_id": r.ext_id,
+                          "labels": r.labels, "raw": r.raw})
+    assert comp is not None and comp["version"] == "2.5.0.Final"
+    # No purl and no CPE exists for a Connect plugin class — fabricating either would point
+    # a feed at the wrong artifact. The component is named, versioned, and honestly bare.
+    assert "purl" not in comp and "cpe" not in comp
+
+
+def test_plugins_garbage_shapes_are_dropped():
+    from vectasec.connect.kafka_connect import parse_plugins
+    assert parse_plugins(BASE, None) == []
+    assert parse_plugins(BASE, "nope") == []
+    assert parse_plugins(BASE, [{"type": "source"}, "x", {}]) == []
+
+
+def test_unreadable_plugin_inventory_files_a_gap_not_an_empty_inventory():
+    c = parse_cluster(BASE, {"version": "3.7.0"}, tls_url=False, anonymous_readable=False,
+                      connectors_readable=True, plugins_readable=False)
+    hits = rp.plugins_not_readable(c, _ctx([c]))
+    assert len(hits) == 1 and hits[0].assessable is False
+    assert "/connector-plugins" in hits[0].source_ref["endpoint"]
+
+
+def test_pre_inventory_rows_are_unknown_not_a_refusal():
+    """plugins_readable=None marks a cluster row collected before this inventory existed.
+    Filing a gap on every stale row would mint findings no rescan of old data can close."""
+    c = cluster()                      # helper predates the kwarg -> None
+    assert rp.plugins_not_readable(c, _ctx([c])) == []
+    ok = parse_cluster(BASE, {}, tls_url=False, anonymous_readable=False,
+                       connectors_readable=True, plugins_readable=True)
+    assert rp.plugins_not_readable(ok, _ctx([ok])) == []

@@ -280,6 +280,15 @@ def collect(config: dict) -> Collected:
             "probes": probes,
             "workspaces": [ws for ws, _ in spaces],
             "consumer_credential_sweep": sweep,
+            # GET / reports the INSTALLED plugin set (available_on_server) alongside the
+            # configured instances collected from /plugins. The delta matters both ways: a
+            # custom Lua plugin appears here before anyone configures it, and enabled_in_cluster
+            # naming a plugin absent from available_on_server means a node cannot execute it.
+            # Names only — the Admin API states no per-plugin versions.
+            "plugins_available": sorted((node.get("plugins") or {}).get("available_on_server")
+                                        or {}),
+            "plugins_enabled_in_cluster": sorted((node.get("plugins") or {})
+                                                 .get("enabled_in_cluster") or []),
         },
     ))
 

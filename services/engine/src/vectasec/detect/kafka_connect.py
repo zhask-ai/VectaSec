@@ -144,3 +144,30 @@ def connector_jaas_override(resource, ctx):
         source_ref={"connector": raw.get("connector_name"), "jaas_override_keys": keys,
                     "cve": "CVE-2023-25194"},
     )]
+
+
+@detector(kinds=["kafka_connect_cluster"], rule_id="KAFKA_CONNECT.PLUGINS.NOT_READABLE",
+          severity="info",
+          title="Installed connector-plugin inventory could not be read")
+def plugins_not_readable(resource, ctx):
+    """/connector-plugins is the RUNTIME plugin inventory — a build SBOM cannot enumerate what
+    plugin.path holds, and every installed plugin is loadable code on the worker. An unreadable
+    inventory must file a gap: silence here is byte-identical to 'no plugins installed'.
+
+    `plugins_readable` is three-valued on purpose: None marks a resource collected before this
+    inventory existed (unknown, not a refusal), and only an explicit False is the gap."""
+    raw = resource.raw or {}
+    if raw.get("plugins_readable") is not False:
+        return []
+    return [Hit(
+        observation=(f"kafka connect at {raw.get('base_url')}: /connector-plugins was not "
+                     f"readable, so the set of installed connector plugins — each of which is "
+                     f"loadable code on the worker — could not be inventoried."),
+        remediation=("Grant the scan read access to /connector-plugins so the installed-plugin "
+                     "inventory (and its versions) can feed the estate SBOM."),
+        detail=("Coverage gap: the plugin inventory endpoint returned an error. No claim is "
+                "made about what is installed."),
+        assessable=False,
+        assessment_reason="/connector-plugins unreadable; installed-plugin set undetermined",
+        source_ref={"endpoint": "/connector-plugins"},
+    )]

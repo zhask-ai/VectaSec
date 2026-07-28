@@ -378,6 +378,18 @@ def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
             conn.rollback()
             stats["runtime_error"] = f"{type(e).__name__}: {e}"
 
+        # Supply-chain enrichment: ask the OSV feed about every purl-addressable component
+        # this connection just reported (osv.py). Same isolation contract as the two hooks
+        # above — a feed outage files its own not-assessable finding and must never void a
+        # scan that completed.
+        try:
+            from .osv import enrich_osv
+            stats["osv"] = enrich_osv(conn, tenant_id, str(connection_id), str(scan_id))
+            conn.commit()
+        except Exception as e:  # pragma: no cover - defensive
+            conn.rollback()
+            stats["osv_error"] = f"{type(e).__name__}: {e}"
+
         # Post-scan action routing (notify.py): the ONE hook every run_scan caller (worker,
         # CLI, inline API) shares. notify_scan never raises, and the belt-and-braces except
         # exists because a notification failure must NEVER fail a completed scan.

@@ -187,6 +187,50 @@ def vex_analysis(key: str, observed_value: str, observed_at: str, why: str,
     }
 
 
+def vulnerabilities_section(entries: list[dict]) -> list[dict]:
+    """CycloneDX `vulnerabilities[]` from the advisory observations the scan loop stored.
+
+    One entry per (advisory id, component bom-ref) pair comes in; one vulnerability per
+    advisory id goes out, with every affected component listed under `affects`. Nothing here
+    queries a feed — this section is the product's own filed findings, re-expressed in the
+    schema's vocabulary, so the SBOM download and the findings queue can never disagree.
+
+    Input keys: id, url, source_name, band, score (float|None), fixed (list), ref (bom-ref),
+    description. `score` present means it was derived from a CVSS v3 vector; absent means the
+    band came from a feed label or an explicit default, and no number is fabricated for it.
+    """
+    by_id: dict[str, dict] = {}
+    for e in entries:
+        vid = e.get("id")
+        ref = e.get("ref")
+        if not vid or not ref:
+            continue
+        v = by_id.get(vid)
+        if v is None:
+            rating: dict = {"severity": e.get("band") or "unknown"}
+            if e.get("score") is not None:
+                rating["score"] = e["score"]
+                rating["method"] = "CVSSv31"
+            v = by_id[vid] = {
+                "id": vid,
+                "source": {"name": e.get("source_name") or "OSV",
+                           **({"url": e["url"]} if e.get("url") else {})},
+                "ratings": [rating],
+                "affects": [],
+            }
+            if e.get("description"):
+                v["description"] = str(e["description"])[:512]
+            if e.get("fixed"):
+                v["recommendation"] = (
+                    "Upgrade to a fixed release: " + ", ".join(map(str, e["fixed"][:5])))
+        if not any(a["ref"] == ref for a in v["affects"]):
+            v["affects"].append({"ref": ref})
+    out = sorted(by_id.values(), key=lambda v: v["id"])
+    for v in out:
+        v["affects"].sort(key=lambda a: a["ref"])
+    return out
+
+
 def to_cyclonedx(resources: list, *, tenant_name: str, tenant_id: str,
                  scan_ids: list[str], timestamp: str,
                  authenticated: bool = True,

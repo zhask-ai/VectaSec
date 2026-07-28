@@ -187,3 +187,52 @@ def test_the_claim_names_what_would_invalidate_it():
                      why="Protected mode blocks the path.",
                      invalidated_by="protected-mode is set to no")
     assert "invalidated if protected-mode is set to no" in a["detail"]
+
+
+# ═══ vulnerabilities: the product's own findings, in schema vocabulary ═════
+def _entry(**kw):
+    e = {"id": "BIT-redis-2024-31449", "ref": "redis_server/redis-1",
+         "source_name": "OSV", "url": "https://osv.dev/vulnerability/BIT-redis-2024-31449",
+         "band": "high", "score": 7.0, "fixed": ["7.2.6"], "description": "Lua stack overflow"}
+    e.update(kw)
+    return e
+
+
+def test_vulnerabilities_dedupe_by_advisory_and_collect_affects():
+    from vectasec.sbom import vulnerabilities_section
+    out = vulnerabilities_section([
+        _entry(ref="redis_server/redis-1"),
+        _entry(ref="redis_server/redis-2"),
+        _entry(ref="redis_server/redis-1"),          # ledger repeat — one affect, not two
+        _entry(id="CVE-2023-46118", ref="node/cluster", band="medium", score=4.9,
+               source_name="VectaSec curated dataset",
+               url="https://nvd.nist.gov/vuln/detail/CVE-2023-46118",
+               fixed=["3.12.7"], description="HTTP API DoS"),
+    ])
+    assert [v["id"] for v in out] == ["BIT-redis-2024-31449", "CVE-2023-46118"]
+    assert out[0]["affects"] == [{"ref": "redis_server/redis-1"},
+                                 {"ref": "redis_server/redis-2"}]
+    assert out[0]["ratings"] == [{"severity": "high", "score": 7.0, "method": "CVSSv31"}]
+    assert out[0]["recommendation"] == "Upgrade to a fixed release: 7.2.6"
+    assert out[1]["source"]["name"] == "VectaSec curated dataset"
+
+
+def test_a_band_without_a_vector_score_carries_no_fabricated_number():
+    """A severity that came from a feed label ('Critical') has no CVSS score to report.
+    Emitting method=CVSSv31 with an invented number would be a fabricated measurement."""
+    from vectasec.sbom import vulnerabilities_section
+    out = vulnerabilities_section([_entry(score=None)])
+    assert out[0]["ratings"] == [{"severity": "high"}]
+
+
+def test_entries_missing_id_or_ref_are_dropped_not_guessed():
+    from vectasec.sbom import vulnerabilities_section
+    assert vulnerabilities_section([_entry(id=None), _entry(ref=None)]) == []
+
+
+def test_vulnerabilities_land_in_the_document():
+    from vectasec.sbom import vulnerabilities_section
+    bom = bom_of(resource(), vulnerabilities=vulnerabilities_section([_entry()]))
+    assert bom["vulnerabilities"][0]["id"] == "BIT-redis-2024-31449"
+    # And an empty section is OMITTED, not an empty list pretending to be an assessment.
+    assert "vulnerabilities" not in bom_of(resource())

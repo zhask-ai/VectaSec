@@ -48,7 +48,7 @@ def _is_externalized(value) -> bool:
 
 # ── parse layer: REST dicts → Resources (pure, no httpx) ─────────────────────
 def parse_cluster(base_url: str, root_info, *, tls_url: bool, anonymous_readable: bool,
-                  connectors_readable: bool) -> Resource:
+                  connectors_readable: bool, plugins_readable: bool | None = None) -> Resource:
     info = root_info if isinstance(root_info, dict) else {}
     return Resource(
         kind="kafka_connect_cluster",
@@ -62,8 +62,58 @@ def parse_cluster(base_url: str, root_info, *, tls_url: bool, anonymous_readable
             "over_tls": tls_url,
             "anonymous_readable": anonymous_readable,
             "connectors_readable": connectors_readable,
+            # None = this row predates plugin collection (unknown, not a refusal). The
+            # NOT_READABLE rule fires only on an explicit False.
+            "plugins_readable": plugins_readable,
         },
     )
+
+
+def parse_plugins(base_url: str, plugins_raw) -> list[Resource]:
+    """/connector-plugins → one resource per INSTALLED plugin (class, type, version).
+
+    This is the inventory a build SBOM literally cannot produce: `plugin.path` is scanned at
+    worker startup, so what is installed is a runtime fact of the worker, not of any build.
+    The version is what the plugin ITSELF reports — bundled plugins report the worker version,
+    Debezium and JDBC connectors report their own. A plugin that reports none (older workers
+    omit the field; some serialize the literal string "null") carries NO version rather than
+    inheriting the worker's: sbom.component_for refuses versionless components, and an
+    inherited version would drive CVE matching against a number nobody stated.
+    """
+    out: list[Resource] = []
+    for p in plugins_raw if isinstance(plugins_raw, list) else []:
+        if not isinstance(p, dict):
+            continue
+        cls = str(p.get("class") or "").strip()
+        if not cls:
+            continue
+        version = p.get("version")
+        version = None if version in (None, "", "null") else str(version)
+        labels = {
+            "service": "kafka_connect",
+            # `product` is what sbom.component_for names the component after; the full class
+            # is the only identity the REST API states, so that is what we claim — a prettied
+            # short name would collide across plugins that share a suffix.
+            "product": cls.lower(),
+            "plugin_type": str(p.get("type") or "?"),
+        }
+        raw: dict = {
+            "plugin_class": cls,
+            "plugin_type": p.get("type"),
+            "base_url": base_url,
+            "cluster_ext": f"kafka-connect-{base_url}",
+        }
+        if version:
+            labels["version"] = version
+            raw["version"] = version
+        out.append(Resource(
+            kind="kafka_connect_plugin",
+            name=cls.rsplit(".", 1)[-1],
+            ext_id=f"kafka-connect-{base_url}-plugin-{cls}",
+            labels=labels,
+            raw=raw,
+        ))
+    return out
 
 
 def parse_connector(base_url: str, name: str, cfg) -> Resource:
@@ -104,8 +154,8 @@ def parse_connector(base_url: str, name: str, cfg) -> Resource:
 @connector("kafka_connect", fields=[
     ConnectorField("url", "Connect REST URL", required=True, placeholder="http://connect:8083",
                    help="Kafka Connect REST base URL (default port 8083). Read-only — only GETs "
-                        "against /, /connectors and /connectors/{name}; no connector is created "
-                        "or modified."),
+                        "against /, /connectors, /connectors/{name} and /connector-plugins; no "
+                        "connector is created or modified."),
     ConnectorField("username", "Username", placeholder="",
                    help="Only if the REST API is behind Basic auth. Leave empty to test whether "
                         "the endpoint is anonymously reachable."),
@@ -159,9 +209,21 @@ def collect(config: dict) -> Collected:
             except Exception:
                 anonymous_readable = False
 
+    # Installed-plugin inventory. `connectorsOnly=false` (worker >= 3.2) includes transforms
+    # and converters; older workers ignore the unknown parameter and return connector plugins
+    # only — still a correct, if narrower, inventory. A failure is recorded as a refusal so
+    # the rulepack can file the coverage gap instead of the inventory reading as empty.
+    plugins_raw = None
+    plugins_readable = True
+    try:
+        plugins_raw = _get("/connector-plugins?connectorsOnly=false")
+    except Exception:
+        plugins_readable = False
+
     resources: list[Resource] = [parse_cluster(
         base, root_info, tls_url=tls_url, anonymous_readable=anonymous_readable,
-        connectors_readable=connectors_readable)]
+        connectors_readable=connectors_readable, plugins_readable=plugins_readable)]
+    resources.extend(parse_plugins(base, plugins_raw))
 
     for name in (names or []):
         try:

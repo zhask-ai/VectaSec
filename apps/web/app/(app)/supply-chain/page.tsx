@@ -1,7 +1,9 @@
+import type { Severity } from '@/lib/types';
 import { createClient } from '@/lib/supabase/server';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
+import { SeverityBadge } from '@/components/ui/severity';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 
@@ -76,14 +78,36 @@ function versionOf(raw: Record<string, unknown> | null, labels: Record<string, s
   return typeof l === 'string' && l.trim() ? l.trim() : null;
 }
 
+type OsvFinding = {
+  id: string;
+  rule_id: string;
+  severity: Severity;
+  status: string;
+  assessment: string | null;
+  detail: string | null;
+  last_seen: string | null;
+};
+
 export default async function SupplyChainPage() {
   const supabase = await createClient();
-  const { data } = await supabase
-    .from('resources')
-    .select('id, kind, name, labels, raw, connections(type)')
-    .limit(1000);
+  const [{ data }, { data: osvData }] = await Promise.all([
+    supabase
+      .from('resources')
+      .select('id, kind, name, labels, raw, connections(type)')
+      .limit(1000),
+    supabase
+      .from('findings')
+      .select('id, rule_id, severity, status, assessment, detail, last_seen')
+      .like('rule_id', 'SUPPLY.OSV.%')
+      .neq('status', 'resolved')
+      .order('last_seen', { ascending: false })
+      .limit(50),
+  ]);
 
   const rows = (data ?? []) as unknown as ResourceRow[];
+  const osvFindings = (osvData ?? []) as unknown as OsvFinding[];
+  const feedGaps = osvFindings.filter((f) => f.rule_id === 'SUPPLY.OSV.NOT_ASSESSABLE');
+  const feedHits = osvFindings.filter((f) => f.rule_id === 'SUPPLY.OSV.KNOWN_VULNERABILITY');
   const seen = new Set<string>();
   const components: Component[] = [];
 
@@ -157,6 +181,82 @@ export default async function SupplyChainPage() {
             It also declares itself an incomplete inventory — a scanner sees the systems it was
             pointed at, never a whole software supply chain.
           </p>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Live OSV feed</CardTitle>
+          <CardMeta>
+            queried after every scan for each component with a purl — OSV matches the exact
+            running version server-side
+          </CardMeta>
+        </CardHeader>
+        <CardBody pad={osvFindings.length === 0}>
+          {osvFindings.length === 0 ? (
+            <EmptyState
+              tone="setup"
+              title="No feed results recorded yet"
+              description="The OSV enrichment runs automatically after each scan. Scan a connection whose connector reads a product version, or check that the engine has egress to api.osv.dev (VECTASEC_OSV_DISABLED skips the check deliberately)."
+            />
+          ) : (
+            <Table density="default" caption="OSV feed results per component">
+              <THead>
+                <TR>
+                  <TH width="12%">Severity</TH>
+                  <TH width="66%">Result</TH>
+                  <TH width="12%">Status</TH>
+                  <TH width="10%">Last seen</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {feedHits.map((f) => (
+                  <TR key={f.id}>
+                    <TD>
+                      <SeverityBadge severity={f.severity} />
+                    </TD>
+                    <TD mono>
+                      <span style={{ fontSize: 'var(--text-2xs)', overflowWrap: 'anywhere' }}>
+                        {f.detail ?? '—'}
+                      </span>
+                    </TD>
+                    <TD>
+                      <StatusPill
+                        tone={f.status === 'open' ? 'warn' : 'neutral'}
+                        label={f.status}
+                      />
+                    </TD>
+                    <TD muted>
+                      <span style={{ fontSize: 'var(--text-2xs)' }}>
+                        {f.last_seen ? f.last_seen.slice(0, 10) : '—'}
+                      </span>
+                    </TD>
+                  </TR>
+                ))}
+                {feedGaps.map((f) => (
+                  <TR key={f.id}>
+                    <TD>
+                      <StatusPill tone="warn" label="feed gap" />
+                    </TD>
+                    <TD>
+                      <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+                        The feed could not be consulted — an unqueried feed is not a clean
+                        feed, so this is recorded rather than silently skipped.
+                      </span>
+                    </TD>
+                    <TD>
+                      <StatusPill tone="neutral" label="not assessable" />
+                    </TD>
+                    <TD muted>
+                      <span style={{ fontSize: 'var(--text-2xs)' }}>
+                        {f.last_seen ? f.last_seen.slice(0, 10) : '—'}
+                      </span>
+                    </TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
+          )}
         </CardBody>
       </Card>
 

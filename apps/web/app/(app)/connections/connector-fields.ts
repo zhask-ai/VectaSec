@@ -218,10 +218,10 @@ export const CONNECTORS: ConnectorSpec[] = [
   {
     type: "kafka_connect",
     label: "Kafka Connect",
-    blurb: "Connector REST — unauthenticated API (RCE), plaintext connector secrets, TLS.",
-    rules: 4,
+    blurb: "Connector REST — unauthenticated API (RCE), plaintext connector secrets, TLS, installed-plugin inventory.",
+    rules: 5,
     fields: [
-      { key: "url", label: "Connect REST URL", required: true, placeholder: "http://connect:8083", help: "Kafka Connect REST base URL (default port 8083). Read-only — only GETs against /, /connectors and /connectors/{name}; no connector is created or modified." },
+      { key: "url", label: "Connect REST URL", required: true, placeholder: "http://connect:8083", help: "Kafka Connect REST base URL (default port 8083). Read-only — only GETs against /, /connectors, /connectors/{name} and /connector-plugins; no connector is created or modified." },
       { key: "username", label: "Username", help: "Only if the REST API is behind Basic auth. Leave empty to test whether the endpoint is anonymously reachable." },
       { key: "password", label: "Password", secret: true, help: "Used to open the session, never persisted into any resource." },
       { key: "verify", label: "Verify TLS", placeholder: "true", help: "'false' to skip TLS verification for a self-signed REST cert." },

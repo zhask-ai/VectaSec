@@ -171,6 +171,32 @@ def _auth_probe(client: httpx.Client):
     }
 
 
+def plugin_resources(node_data) -> list[Resource]:
+    """enabled_plugins (already read per node) → one resource per DISTINCT enabled plugin.
+
+    Every enabled plugin is loadable Erlang code on the broker, and several change its
+    security surface outright (rabbitmq_mqtt/rabbitmq_stomp/rabbitmq_web_* open new protocol
+    listeners; rabbitmq_shovel/rabbitmq_federation move data between brokers; auth_backend_*
+    replace authentication). The management API states plugin NAMES only, so that is all we
+    claim: no version is recorded — bundled plugins travel with the broker but community .ez
+    plugins do not, and stamping the broker's version on those would be a fabricated fact.
+    """
+    plugin_nodes: dict[str, list[str]] = {}
+    for n in node_data or []:
+        if not isinstance(n, dict):
+            continue
+        for p in n.get("enabled_plugins") or []:
+            if p:
+                plugin_nodes.setdefault(str(p), []).append(str(n.get("name") or ""))
+    return [Resource(
+        kind="rabbitmq_plugin",
+        name=pname,
+        ext_id=f"plugin-{pname}",
+        labels={"service": "rabbitmq", "plugin": pname},
+        raw={"plugin": pname, "enabled_on_nodes": sorted(nodes)},
+    ) for pname, nodes in sorted(plugin_nodes.items())]
+
+
 def _rabbit_app_version(node: dict):
     """Per-node version lives in applications[name=="rabbit"].version — /api/nodes has no
     dedicated version field and `name` is a node id, not a version."""
@@ -290,6 +316,10 @@ def collect(config: dict) -> Collected:
             },
         ))
         edges.append(Edge(src_ext_id="cluster", dst_ext_id=f"node-{name}", kind="member"))
+
+    for pr in plugin_resources(node_data):
+        resources.append(pr)
+        edges.append(Edge(src_ext_id="cluster", dst_ext_id=pr.ext_id, kind="member"))
 
     for v in (vhosts.get("data") or []) if vhosts.get("ok") else []:
         name = v.get("name")
