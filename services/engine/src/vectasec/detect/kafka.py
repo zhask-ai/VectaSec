@@ -389,7 +389,23 @@ def listener_sasl_plaintext(resource, ctx):
             continue
         mechs = _mechanisms(cfg, name)
         if mechs is None:
-            continue   # override present but redacted -> indeterminate, not a finding
+            # The MECHANISM is indeterminate; the TRANSPORT is not. This listener resolved to
+            # SASL_PLAINTEXT, so its traffic is unencrypted whatever mechanism it negotiates —
+            # dropping the finding entirely threw away a confirmed exposure because a refinement
+            # was unreadable. Report it, flagged as partially assessed.
+            hits.append(Hit(
+                observation=(f"listener '{name}' resolves to SASL_PLAINTEXT, so its traffic is "
+                             f"unencrypted; its sasl.enabled.mechanisms override is present but "
+                             f"redacted, so which mechanism it accepts could not be read"),
+                remediation=("Move this listener to SASL_SSL. Whatever mechanism it negotiates, "
+                             "SASL_PLAINTEXT carries the exchange in the clear."),
+                assessable=False,
+                assessment_reason=("the listener is confirmed unencrypted, but the mechanism "
+                                   "list was redacted so the severity refinement could not run"),
+                source_ref={"config": "listener.security.protocol.map", "listener": name,
+                            "field": "sasl.enabled.mechanisms"},
+            ))
+            continue
         is_controller = _lname(name) in controller
         # Per-mechanism refinement: all traffic is unencrypted either way, but only PLAIN and
         # OAUTHBEARER put a replayable secret on the wire.
@@ -505,7 +521,18 @@ def authz_no_authorizer(resource, ctx):
     if outcome == "ok" and bindings:
         return []
     if outcome == "error":
-        return []   # could not read ACLs -> indeterminate, never a pass and never a finding
+        # `[]` IS a pass — it is the same answer a clean broker gives. authorizer.class.name was
+        # read as unset; only the ACL corroboration failed, so this is a partial assessment, not
+        # a clean bill of health.
+        return [Hit(
+            observation=("authorizer.class.name is not set, and describe_acls failed, so whether "
+                         "an external authorizer is enforcing ACLs could not be corroborated"),
+            remediation=("Grant the scanning principal Describe on the CLUSTER resource so ACLs "
+                         "can be read, then re-scan to settle whether authorization is enforced."),
+            assessable=False,
+            assessment_reason="the ACL listing failed, so authorization enforcement is unknown",
+            source_ref={"config": "authorizer.class.name", "api": "describe_acls"},
+        )]
 
     if outcome == "security_disabled":
         corroboration = "describe_acls raised SecurityDisabledException (error code 54)"
@@ -1756,4 +1783,35 @@ def zk_kraft_migration_acl_gap(resource, ctx):
                            "controller-side ACL enforcement is not readable via the broker Admin API"),
         source_ref={"config_key": "zookeeper.metadata.migration.enable",
                     "authorizer": "authorizer.class.name"},
+    )]
+
+
+@detector(kinds=["broker"], rule_id="KAFKA.SCAN.NOT_ASSESSABLE", severity="medium",
+          title="Kafka broker configuration could not be read")
+def config_not_readable(r, ctx) -> list:
+    """The coverage gap this pack was missing entirely.
+
+    ~22 rules in this module read `raw.config`. When DescribeConfigs is denied — the norm on
+    MSK and Confluent Cloud, and on any least-privilege principal — the connector recorded an
+    empty dict, which is indistinguishable from "read it, there was nothing set". Every one of
+    those rules then returned [], and an entirely unassessed broker rendered as a clean bill of
+    health. Peer packs (RABBITMQ.SCAN.NOT_ASSESSABLE, MEMCACHED.SERVER.NOT_ASSESSED,
+    K8S.COLLECT.FORBIDDEN) all have this rule; Kafka's absence was the gap.
+    """
+    raw = r.raw or {}
+    error = raw.get("config_error")
+    if not error:
+        return []
+    return [Hit(
+        observation=(f"DescribeConfigs failed for broker {raw.get('id')} "
+                     f"({raw.get('host')}:{raw.get('port')}): {error}"),
+        detail="Every configuration-based Kafka rule — listener protocol, authorizer, ACL "
+               "defaults, retention, replication — reads this configuration. None of them ran "
+               "against this broker, so its posture is unknown rather than clean.",
+        remediation="Grant the scanning principal DescribeConfigs on the CLUSTER resource "
+                    "(Confluent Cloud and MSK require it explicitly), then re-scan.",
+        assessable=False,
+        assessment_reason="the broker's configuration could not be read, so no configuration "
+                          "rule could evaluate it",
+        source_ref={"api": "DescribeConfigs", "broker": raw.get("id"), "signal": "config_error"},
     )]

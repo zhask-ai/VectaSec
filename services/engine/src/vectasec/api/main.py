@@ -21,6 +21,7 @@ import hmac as _hmac
 import json
 import logging
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -72,7 +73,13 @@ class Principal(BaseModel):
     # Which auth path admitted the request ("service" | "jwt" | "dev") and, when already
     # known (the JWT path resolves membership anyway), the actor's tenant_members.role.
     # The service path resolves the role lazily, at mutation time (_require_rank).
-    via: str = "dev"
+    #
+    # NO DEFAULT, deliberately. This used to default to "dev" — the one value for which
+    # _require_rank returns unconditionally — so any Principal constructed without naming its
+    # auth path was a silent, complete RBAC bypass. One such construction already existed
+    # (the audit-only actor below). A required field makes that class of mistake a startup
+    # error instead of a privilege escalation nobody notices.
+    via: str
     role: Optional[str] = None
 
 
@@ -126,8 +133,17 @@ def _tenant_for_user(user_id: str, requested: Optional[str]) -> tuple[str, Optio
     if requested:
         if requested not in member_of:
             # Platform operators act as admin in any tenant — the row in super_admins is the
-            # privilege (granted by the operator, never writable from the browser role).
+            # privilege (granted by the operator, never writable from the browser role). This
+            # branch is only reached on the JWT path, where the ENGINE verified the subject.
             if is_super:
+                # The tenant must exist. Without this a typo'd or invented uuid is accepted as
+                # a legitimate operating context: reads return empty (reassuringly), writes
+                # fail deep in a foreign-key error instead of a clean 404, and the audit log
+                # records admin actions against a tenant that was never real.
+                with _db() as conn, conn.cursor() as cur:
+                    cur.execute("select 1 from tenants where id = %s", (requested,))
+                    if not cur.fetchone():
+                        raise HTTPException(404, "no such tenant")
                 return requested, "admin"
             raise HTTPException(403, "not a member of the requested tenant")
         return requested, member_of[requested]
@@ -252,13 +268,76 @@ def _role_for_actor(tenant_id: str, actor: str) -> Optional[str]:
         row = cur.fetchone()
         if row:
             return row[0]
-        # Platform operators: a super_admins row grants the admin tier in ANY tenant, so the
-        # operator console can manage members / invite on a customer's behalf. Audited like
-        # any actor — the audit row names the real user id.
-        cur.execute("select 1 from super_admins where user_id = %s", (user_id,))
-        if cur.fetchone():
-            return "admin"
+
+        # Platform operators. This function runs ONLY on the service-token path, where `actor`
+        # is the self-asserted X-VectaSec-Actor header — the engine has verified the CALLING
+        # SERVICE, not the user it names. Honouring super_admins here therefore turns one
+        # shared env-var secret into cross-tenant admin: a token holder asserts any super
+        # admin's uuid (they are not secret — GET /members returns them) and gains member,
+        # integration and connection control in EVERY tenant.
+        #
+        # So it is off unless an operator explicitly turns it on. The trade is deliberate: the
+        # operator console's act-on-behalf loses its cross-tenant reach in a default install,
+        # and in exchange a leaked engine token stays bounded by tenant_members — which is
+        # what it was before super admins existed. The durable fix is per-user JWTs on console
+        # calls (STATUS.md gap 2), after which the JWT path below carries this natively.
+        if _allow_service_superadmin():
+            cur.execute("select 1 from super_admins where user_id = %s", (user_id,))
+            if cur.fetchone():
+                return "admin"
     return None
+
+
+def _allow_service_superadmin() -> bool:
+    """Opt-in for super-admin elevation on the SERVICE-token path. Default off — see
+    _role_for_actor for why this is not a knob to enable casually."""
+    return os.environ.get("VECTASEC_ALLOW_SERVICE_SUPERADMIN", "").strip().lower() in (
+        "1", "true", "yes")
+
+
+def _is_super_admin(user_id: str) -> bool:
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("select 1 from super_admins where user_id = %s", (user_id,))
+        return cur.fetchone() is not None
+
+
+# ── Error text that is safe to persist and return ─────────────────────────
+# Connector exceptions carry whatever the underlying client library felt like saying, and those
+# libraries are invoked with VAULTED CREDENTIALS. psycopg echoes a malformed DSN verbatim
+# (`postgresql://user:pass@host`), httpx can include a URL with userinfo, and several SDKs put
+# the endpoint and token fragment in the message. That text was going into `audit_log.detail`
+# and `notification_deliveries.error` — both readable by every tenant member, including VIEWERS.
+#
+# `notify._post` already keeps URLs out of its error text and the action-layer migration's own
+# comment says these columns are "never a secret/URL value". This makes that true here too.
+_SECRET_PATTERNS = [
+    # scheme://user:pass@host  → keep the shape, drop the credential
+    (re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), r"\1<redacted>@"),
+    # Bearer FIRST. `Authorization: Bearer <jwt>` otherwise matches the key=value rule below,
+    # which consumes only the word "Bearer" as the value and leaves the token in the clear —
+    # verified: it leaked the JWT until this pair was reordered.
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+"), "bearer <redacted>"),
+    # password / token / secret / api-key = value
+    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|apikey|authorization)"
+                r"\s*[=:]\s*\S+"), r"\1=<redacted>"),
+]
+
+_ERROR_MAX = 300
+
+
+def safe_error(e: BaseException) -> str:
+    """A message safe to store and return: type name, redacted text, bounded length.
+
+    The type name is always exact — that is the part an operator debugs with — while the free
+    text is scrubbed and truncated. The full exception still reaches the server log, where the
+    audience is the operator rather than every viewer in the tenant.
+    """
+    text = str(e)
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    if len(text) > _ERROR_MAX:
+        text = text[:_ERROR_MAX] + "… (truncated)"
+    return f"{type(e).__name__}: {text}" if text else type(e).__name__
 
 
 def _require_rank(p: Principal, min_rank: int) -> Principal:
@@ -267,6 +346,10 @@ def _require_rank(p: Principal, min_rank: int) -> Principal:
     against a made-up actor would be theatre, not security."""
     if p.via == "dev":
         return p
+    if p.via not in ("service", "jwt"):
+        # An unrecognised auth path grants nothing. Fail closed: the alternative is that a new
+        # path added later inherits whatever the last `if` happened to allow.
+        raise HTTPException(403, f"authentication path {p.via!r} cannot perform actions")
     role = p.role if p.role is not None else _role_for_actor(p.tenant_id, p.actor)
     p.role = role
     if ROLE_RANK.get(role or "", 0) < min_rank:
@@ -387,7 +470,9 @@ def create_scan(req: ScanRequest, p: Principal = Depends(editing)) -> dict:
     if req.tenant_id and str(req.tenant_id) != p.tenant_id and p.via != "dev":
         raise HTTPException(403, "body tenant_id does not match the authenticated tenant")
     tenant = str(req.tenant_id) if req.tenant_id else p.tenant_id
-    actor = Principal(tenant_id=tenant, actor=p.actor)
+    # Audit-only: never passed to _require_rank. `via` is explicit because the field is
+    # now required, and "audit" is deliberately a path with no rank of its own.
+    actor = Principal(tenant_id=tenant, actor=p.actor, via="audit")
 
     # Resolved HERE, not left to run_scan's fallback, so the queued connection row and the
     # worker's eventual run_scan(connection_name=...) agree by construction rather than by two
@@ -543,7 +628,7 @@ def test_connection(connection_id: uuid.UUID, p: Principal = Depends(editing)) -
         result = {"ok": True, "resources": len(collected.resources), "kinds": kinds}
         status = "active"
     except (Exception, SystemExit) as e:
-        result = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        result = {"ok": False, "error": safe_error(e)}
         status = "error"
 
     with _db() as conn:
@@ -967,6 +1052,14 @@ def attest_control(framework: str, control_id: str, req: AttestRequest,
 # The generation core is report.py (pure, deterministic, no clock); these endpoints load the
 # tenant's findings + controls + posture and hand them off. Read-only: any tenant member can
 # export the data they can already see. generated_at is stamped here (the API layer owns the clock).
+# Reports are viewer-tier and read whole tables. Unbounded, one caller loops them and pulls the
+# entire estate into engine memory per request. The cap is generous enough that a real report is
+# never silently truncated in practice, and truncation is REPORTED rather than hidden — a
+# security report that quietly drops findings is worse than one that refuses.
+REPORT_MAX_FINDINGS = 20000
+REPORT_MAX_CONTROLS = 5000
+
+
 def _load_report_data(cur, tenant_id: str):
     from .. import report
     cur.execute(
@@ -976,8 +1069,9 @@ def _load_report_data(cur, tenant_id: str):
              left join resources r on r.id = f.resource_id
              left join connections c on c.id = r.connection_id
             where f.tenant_id = %s
-            order by f.severity, f.rule_id""",
-        (tenant_id,),
+            order by f.severity, f.rule_id
+            limit %s""",
+        (tenant_id, REPORT_MAX_FINDINGS + 1),
     )
     findings = [
         {"rule_id": row[0], "severity": row[1], "status": row[2], "title": row[3],
@@ -986,10 +1080,17 @@ def _load_report_data(cur, tenant_id: str):
          "resource": row[7] or "", "system": row[8] or "", "connector": row[8] or ""}
         for row in cur.fetchall()
     ]
+    if len(findings) > REPORT_MAX_FINDINGS:
+        findings = findings[:REPORT_MAX_FINDINGS]
+        raise HTTPException(
+            413, f"this tenant has more than {REPORT_MAX_FINDINGS} findings, which is more than "
+                 "one report can carry. Narrow the scope (per-connection export) rather than "
+                 "receiving a silently truncated document.")
     cur.execute(
         """select framework, control_id, title, requirement, status
-             from controls where tenant_id = %s order by framework, control_id""",
-        (tenant_id,),
+             from controls where tenant_id = %s order by framework, control_id
+             limit %s""",
+        (tenant_id, REPORT_MAX_CONTROLS),
     )
     controls = [{"framework": row[0], "control_id": row[1], "title": row[2],
                  "requirement": row[3], "status": row[4]} for row in cur.fetchall()]
@@ -1042,6 +1143,64 @@ def report_summary(p: Principal = Depends(principal)) -> Response:
     return Response(
         content=md, media_type="text/markdown",
         headers={"Content-Disposition": 'attachment; filename="vectasec-report.md"'})
+
+
+@app.get("/reports/sbom")
+def report_sbom(p: Principal = Depends(principal)) -> Response:
+    """CycloneDX 1.6 SBOM of the running estate.
+
+    Unlike a build SBOM this is read from the systems themselves, which is why the lifecycle
+    phase matters: `operations` when every component's version came from a connector that
+    authenticated, `discovery` when any of it came from an unauthenticated network sweep. We
+    report the weaker of the two rather than the flattering one — a document that claims
+    `operations` over probe-derived data misrepresents how it was obtained.
+    """
+    from .. import sbom
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("select name from tenants where id = %s", (p.tenant_id,))
+        row = cur.fetchone()
+        tenant_name = row[0] if row else "estate"
+        cur.execute(
+            # Select ONLY the raw keys the SBOM reads. `r.raw` is a full jsonb blob per
+            # resource — probe banners, signals, config echoes — and pulling the whole estate's
+            # worth into Python to extract a version string is both a memory problem and an
+            # unnecessary handling of data the document never contains.
+            """select r.kind, r.name, r.ext_id, r.labels,
+                      jsonb_build_object(
+                        'product', r.raw->'product', 'version', r.raw->'version',
+                        'version_inferred', r.raw->'version_inferred',
+                        'redis_version', r.raw->'redis_version',
+                        'rabbitmq_version', r.raw->'rabbitmq_version',
+                        'broker_version', r.raw->'broker_version',
+                        'kafka_version', r.raw->'kafka_version',
+                        'etcdserver', r.raw->'etcdserver',
+                        'host', r.raw->'host', 'port', r.raw->'port',
+                        'transport', r.raw->'transport') as raw,
+                      c.type, r.connection_id
+                 from resources r join connections c on c.id = r.connection_id
+                where r.tenant_id = %s and coalesce(r.stale, false) = false
+                limit %s""",
+            (p.tenant_id, REPORT_MAX_FINDINGS),
+        )
+        rows = cur.fetchall()
+        cur.execute(
+            "select id::text from scans where tenant_id = %s and status = 'done'",
+            (p.tenant_id,),
+        )
+        scan_ids = [s[0] for s in cur.fetchall()]
+
+    resources = [{"kind": k, "name": n, "ext_id": e, "labels": lab, "raw": raw,
+                  "connection_type": t} for k, n, e, lab, raw, t, _cid in rows]
+    # Any probe-derived component downgrades the whole document to `discovery`.
+    authenticated = not any(r["kind"] == "discovered_service" for r in resources)
+
+    doc = sbom.to_cyclonedx(
+        resources, tenant_name=tenant_name, tenant_id=str(p.tenant_id),
+        scan_ids=scan_ids, timestamp=_now_iso(), authenticated=authenticated)
+    return Response(
+        content=json.dumps(doc, indent=2),
+        media_type="application/vnd.cyclonedx+json; version=1.6",
+        headers={"Content-Disposition": 'attachment; filename="vectasec-sbom.cdx.json"'})
 
 
 # ── Graph ─────────────────────────────────────────────────────────────────
@@ -1272,7 +1431,7 @@ def test_integration(integration_id: uuid.UUID, p: Principal = Depends(admin)) -
         deliver(type_, merged, event)
         result: dict = {"ok": True}
     except Exception as e:
-        result = {"ok": False, "error": f"{type(e).__name__}: {e}"[:500]}
+        result = {"ok": False, "error": safe_error(e)}
 
     with _db() as conn:
         conn.autocommit = False
@@ -1439,6 +1598,25 @@ def list_members(p: Principal = Depends(principal)) -> dict:
                         for r in rows]}
 
 
+# Invites send real email from the customer's domain to an address the caller chooses. Without a
+# cap, `POST /members` is an open relay for one message per request and a way to enumerate which
+# addresses already have accounts. The window is per tenant, counted from the audit log so it
+# survives a restart and needs no new table.
+_INVITE_WINDOW_MINUTES = 60
+_INVITE_MAX_PER_WINDOW = 20
+
+
+def _invite_budget_remaining(cur, tenant_id: str) -> int:
+    cur.execute(
+        """select count(*) from audit_log
+            where tenant_id = %s and action = 'member.added'
+              and created_at > now() - make_interval(mins => %s)""",
+        (tenant_id, _INVITE_WINDOW_MINUTES),
+    )
+    used = int((cur.fetchone() or [0])[0])
+    return max(0, _INVITE_MAX_PER_WINDOW - used)
+
+
 def _invite_user(email: str) -> Optional[str]:
     """Create the auth user via GoTrue's admin invite (sends the invite email). Returns the
     new user id, or None when the engine has no service-role key to do it with."""
@@ -1471,11 +1649,23 @@ def add_member(req: MemberAddRequest, p: Principal = Depends(admin)) -> dict:
             if row:
                 user_id = row[0]
             else:
+                # Rate-limit BEFORE sending: this path mails an address the caller chose, from
+                # the customer's domain. Unbounded, it is a spam relay with an audit trail.
+                if _invite_budget_remaining(cur, p.tenant_id) <= 0:
+                    raise HTTPException(
+                        429, f"invite limit reached ({_INVITE_MAX_PER_WINDOW} per "
+                             f"{_INVITE_WINDOW_MINUTES} minutes for this tenant). Existing "
+                             "members can still be added once they have signed up.")
                 user_id = _invite_user(req.email)
                 if user_id is None:
+                    # Deliberately NOT "no user with email x@y": that distinguishes a registered
+                    # address from an unregistered one, which is an account-existence oracle any
+                    # tenant admin could iterate. The remedy is identical either way, so the
+                    # message can be too.
                     raise HTTPException(
-                        404, f"no user with email {req.email!r}: the user must sign up first "
-                             "(or set SUPABASE_SERVICE_ROLE_KEY on the engine to enable invites)")
+                        400, "this address could not be added. If they have not signed up yet, "
+                             "enable invites by setting SUPABASE_SERVICE_ROLE_KEY on the engine; "
+                             "otherwise ask them to sign up first.")
                 invited = True
 
             cur.execute("select 1 from tenant_members where tenant_id=%s and user_id=%s",

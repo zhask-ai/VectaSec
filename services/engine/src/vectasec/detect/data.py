@@ -74,6 +74,14 @@ def _kafka_exposure(ctx) -> dict:
     listener PLAINTEXT" fact, not per-listener resolution."""
     for b in ctx.of_kind("broker"):
         cfg = (b.raw or {}).get("config") or {}
+        # An EMPTY config means DescribeConfigs was denied or failed — not that the broker has
+        # no authorizer. Without this guard `no_authorizer` reads True from absence and this
+        # rule fires CRITICAL, asserting in its observation that "authorizer.class.name is not
+        # set (no ACL enforcement)" about a value it never read. graph_engine.py:216-218 already
+        # treats an empty config as a coverage gap (exposed=None); the native kafka pack
+        # distinguishes absent from unset too. This was the last copy that did not.
+        if not cfg:
+            continue
         authz = _cfg_value(cfg, "authorizer.class.name")
         no_authorizer = not (authz and str(authz).strip())
 

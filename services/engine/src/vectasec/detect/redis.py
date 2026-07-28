@@ -35,6 +35,36 @@ def _redishell_vulnerable(v: str):
     return patch < floor
 
 
+def _unreadable(r) -> Hit | None:
+    """The one guard every config-reading rule in this file needs.
+
+    `connect/redis.py` sets `config_readable=False` when CONFIG is renamed or disabled — the
+    documented hardening on AWS ElastiCache and most locked-down installs — and `acl_readable`
+    likewise. Without this guard those rules read `cfg={}` and INVENT findings: `has_requirepass`
+    is absent so it reads False ("no requirepass set"), `tls_port` defaults to "0" ("tls-port is
+    0"), `bind` defaults to "" ("unset — all interfaces"). Three critical/medium findings
+    asserting three config values that were never read, against a server that may be perfectly
+    hardened — the exact inverse of this product's promise, and a fast way to lose a customer's
+    trust in every other finding.
+    """
+    raw = r.raw or {}
+    if raw.get("config_readable") is False:
+        return Hit(
+            observation="redis refused the CONFIG command, so no server configuration value "
+                        "could be read from this instance",
+            detail="CONFIG is renamed or disabled (the documented hardening on managed Redis "
+                   "such as ElastiCache). Nothing about this server's auth, bind, TLS or "
+                   "protected-mode settings is known.",
+            remediation="Grant the scanning user permission to run CONFIG GET, or accept that "
+                        "configuration rules cannot run against this instance and assess it "
+                        "another way.",
+            assessable=False,
+            assessment_reason="the CONFIG command was refused, so no setting could be read",
+            source_ref={"config": "CONFIG GET", "signal": "config_unreadable"},
+        )
+    return None
+
+
 def _default_user_nopass(ctx) -> bool:
     for u in ctx.of_kind("redis_user"):
         if (u.raw or {}).get("username") == "default":
@@ -46,6 +76,9 @@ def _default_user_nopass(ctx) -> bool:
 @detector(kinds=["redis_server"], rule_id="REDIS.AUTH.NO_PASSWORD", severity="critical",
           title="Redis accepts unauthenticated connections")
 def no_password(r, ctx) -> list:
+    gap = _unreadable(r)
+    if gap:
+        return [gap]
     raw = r.raw or {}
     if raw.get("has_requirepass") or not _default_user_nopass(ctx):
         return []
@@ -63,7 +96,15 @@ def no_password(r, ctx) -> list:
 @detector(kinds=["redis_server"], rule_id="REDIS.NETWORK.PROTECTED_MODE_OFF", severity="high",
           title="Redis protected-mode is disabled")
 def protected_mode_off(r, ctx) -> list:
-    if str((r.raw or {}).get("protected_mode") or "").lower() != "no":
+    if _unreadable(r):
+        return []          # the shared gap Hit is filed once, by no_password
+    pm = (r.raw or {}).get("protected_mode")
+    # Absent is UNKNOWN, not "yes". The old check read a missing key as safe, so the
+    # same unreadable-CONFIG scan that fabricated three findings above silently
+    # passed this one.
+    if pm is None:
+        return []
+    if str(pm).lower() != "no":
         return []
     return [Hit(
         observation="redis config `protected-mode` is `no`, removing the last guard against "
@@ -78,6 +119,8 @@ def protected_mode_off(r, ctx) -> list:
 @detector(kinds=["redis_server"], rule_id="REDIS.NETWORK.BIND_ALL", severity="medium",
           title="Redis binds to all network interfaces")
 def bind_all(r, ctx) -> list:
+    if _unreadable(r):
+        return []
     bind = str((r.raw or {}).get("bind") or "").strip()
     # Empty bind == all interfaces (Redis default when the directive is commented out).
     if bind and "0.0.0.0" not in bind and "*" not in bind and "::" not in bind:
@@ -95,6 +138,8 @@ def bind_all(r, ctx) -> list:
 @detector(kinds=["redis_server"], rule_id="REDIS.TLS.DISABLED", severity="medium",
           title="Redis has no TLS listener")
 def tls_disabled(r, ctx) -> list:
+    if _unreadable(r):
+        return []
     tls_port = str((r.raw or {}).get("tls_port") or "0").strip()
     if tls_port and tls_port != "0":
         return []

@@ -65,13 +65,20 @@ def collect(config: dict) -> Collected:
     # ConfigResource(BROKER, "") returns only cluster-wide dynamic defaults, where no static
     # security setting (listeners, authorizer.class.name, ssl.*) ever appears.
     broker_cfg: dict[str, dict] = {}
+    config_errors: dict[str, str] = {}
     for b in md.brokers.values():
         res = ConfigResource(broker_type, str(b.id))
         try:
             entries = admin.describe_configs([res], request_timeout=timeout)[res].result(timeout=timeout)
             broker_cfg[str(b.id)] = _normalise(entries)
-        except Exception:
+        except Exception as e:
+            # {} here is INDISTINGUISHABLE from "read it, it was empty" — and ~22 broker rules
+            # read this dict, so a denied DescribeConfigs (the norm on MSK, Confluent Cloud and
+            # any least-privilege principal) silently passed the entire pack. Record the failure
+            # so detect/kafka.py can file a coverage gap instead of a clean bill of health.
+            # The same distinction is already made for cluster_dynamic below.
             broker_cfg[str(b.id)] = {}
+            config_errors[str(b.id)] = f"{type(e).__name__}: {str(e)[:200]}"
 
     # The one place the empty resource name is correct: unclean.leader.election.enable has update
     # mode "cluster-wide", and KRaft resolves it from the cluster dynamic config, never from a
@@ -125,6 +132,9 @@ def collect(config: dict) -> Collected:
             ext_id=f"broker-{b.id}",
             labels={"host": b.host, "port": str(b.port)},
             raw={"id": b.id, "host": b.host, "port": b.port, "config": cfg,
+                 # None = read fine; a string = DescribeConfigs failed and `config` is empty
+                 # because we could not read it, NOT because the broker has no settings.
+                 "config_error": config_errors.get(str(b.id)),
                  "cluster_id": md.cluster_id, "cluster_dynamic_config": cluster_dynamic,
                  "acls": acls, "cluster_scope": b.id == scope_id},
         ))

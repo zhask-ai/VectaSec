@@ -483,6 +483,43 @@ def cmd_doctor(args) -> int:
             except Exception as e:
                 print(f"  could not read queue: {type(e).__name__}: {e}")
                 ok = False
+
+            # The evidence ledger's tamper-evidence is worth exactly as much as somebody
+            # checking it. The hash chain has existed since migration 006 and NOTHING has
+            # ever called verify_ledger() — so the product has been claiming "tamper-evident"
+            # on the strength of a function no code path invokes (STATUS.md gap 4).
+            #
+            # Opt-in via --verify-ledger because it walks every hashed observation: cheap on a
+            # demo tenant, a full table scan on a real one. `doctor` must stay fast enough that
+            # people actually run it.
+            if getattr(args, "verify_ledger", False):
+                print("\nevidence ledger")
+                try:
+                    cur.execute("select count(*) from observations where row_hash is not null")
+                    hashed = cur.fetchone()[0]
+                    cur.execute("select finding_id, observation_id, reason from verify_ledger()")
+                    breaks = cur.fetchall()
+                    if breaks:
+                        # A tamper report is not a warning. Print every row: the whole point is
+                        # that someone can act on exactly which claim was rewritten.
+                        print(f"  {len(breaks)} TAMPER(S) DETECTED across {hashed} hashed "
+                              "observation(s):")
+                        for finding_id, obs_id, reason in breaks[:20]:
+                            print(f"    finding {finding_id} · observation {obs_id} · {reason}")
+                        if len(breaks) > 20:
+                            print(f"    … and {len(breaks) - 20} more")
+                        ok = False
+                    else:
+                        print(f"  chain intact · {hashed} hashed observation(s) verified")
+                        if hashed == 0:
+                            print(f"  {DIM}nothing to verify yet: no observation carries a "
+                                  f"hash{RESET}")
+                except Exception as e:
+                    print(f"  could not verify: {type(e).__name__}: {e}")
+                    ok = False
+            else:
+                print(f"\n{DIM}evidence ledger not checked — run with --verify-ledger to "
+                      f"recompute the hash chain{RESET}")
     except Exception as e:
         print(f"  FAILED: {type(e).__name__}: {e}")
         ok = False
@@ -590,6 +627,10 @@ def main() -> int:
     f.set_defaults(fn=cmd_findings)
 
     d = sub.add_parser("doctor", help="check engine wiring")
+    d.add_argument("--verify-ledger", action="store_true",
+                   help="recompute the evidence hash chain (verify_ledger). Walks every hashed "
+                        "observation, so it is off by default — run it before telling anyone "
+                        "the ledger is tamper-evident.")
     d.set_defaults(fn=cmd_doctor)
 
     w = sub.add_parser("worker", help="drain the scan queue (pgmq vectasec_scans) and reap stuck scans")

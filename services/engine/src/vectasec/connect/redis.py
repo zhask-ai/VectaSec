@@ -18,7 +18,7 @@ one. A target that has disabled the CONFIG or ACL command (a legitimate hardenin
 handled: the connector records what it could not read rather than failing the scan.
 """
 from ..registry import ConnectorField, connector
-from ..contracts import Resource, Collected
+from ..contracts import Collected, Edge, Resource
 
 # The security-relevant CONFIG keys we read. An allow-list, not `CONFIG GET *`: we want a small,
 # auditable set and we never want to sweep up a value we didn't mean to store. `requirepass` is
@@ -139,4 +139,123 @@ def collect(config: dict) -> Collected:
             },
         ))
 
-    return Collected(resources=resources, edges=[])
+    # ── Runtime evidence: who is connected right now ─────────────────────────
+    # CLIENT LIST names the authenticated ACL user per connection, plus the last command the
+    # client ran. `cmd` is a COMMAND NAME ("get", "auth", "subscribe") and never its arguments,
+    # so this reads what clients are doing without reading their data — the same line the
+    # RabbitMQ collector draws. Redis <6 has no ACLs, so `user` is absent there and the
+    # principal is honestly recorded as unknown rather than invented as "default".
+    edges: list = []
+    try:
+        clients = client.client_list() or []
+        client_list_readable = True
+    except Exception:
+        clients, client_list_readable = [], False
+    resources[0].raw["client_list_readable"] = client_list_readable
+
+    # ACL LOG — the "who was REFUSED" signal, and the only agentless way to see credential
+    # stuffing against a Redis. Each entry names the username, the reason (auth/command/key/
+    # channel) and the client that tried. Unsupported on Redis Cloud/Software, which is
+    # recorded honestly rather than silently yielding an empty (and reassuring) list.
+    try:
+        acl_log = client.acl_log(count=128) or []
+        acl_log_readable = True
+    except Exception:
+        acl_log, acl_log_readable = [], False
+    resources[0].raw["acl_log_readable"] = acl_log_readable
+
+    if acl_log_readable and acl_log:
+        denials: dict = {}
+        for entry in acl_log:
+            # redis-py returns bytes or str depending on decode_responses/version.
+            def _s(v):
+                return v.decode() if isinstance(v, bytes) else (str(v) if v is not None else None)
+            uname = _s(entry.get("username")) or "unknown"
+            reason = _s(entry.get("reason")) or "unknown"
+            key = (uname, reason)
+            agg = denials.setdefault(key, {"count": 0, "objects": set(), "clients": set()})
+            try:
+                agg["count"] += int(entry.get("count") or 1)
+            except (TypeError, ValueError):
+                agg["count"] += 1
+            if entry.get("object"):
+                agg["objects"].add(_s(entry.get("object")))
+            info = _s(entry.get("client-info")) or ""
+            for tok in info.split():
+                if tok.startswith("addr="):
+                    agg["clients"].add(tok[5:].rsplit(":", 1)[0])
+
+        for (uname, reason), agg in sorted(denials.items()):
+            resources.append(Resource(
+                kind="access_denial",
+                name=f"{uname} denied ({reason})",
+                ext_id=f"denial-{host}:{port}-{uname}-{reason}",
+                labels={"principal": uname, "reason": reason,
+                        "denials": str(agg["count"]), "source": "redis-acl-log"},
+                raw={
+                    "principal": uname,
+                    "reason": reason,          # auth | command | key | channel
+                    "denials": agg["count"],
+                    # For reason=auth these are failed logins: the brute-force signal.
+                    "objects": sorted(o for o in agg["objects"] if o),
+                    "peer_hosts": sorted(c for c in agg["clients"] if c),
+                    "server_ext": server_ext,
+                    "observed_via": "ACL LOG",
+                },
+            ))
+
+    if client_list_readable:
+        seen: dict = {}
+        for c in clients:
+            addr = str(c.get("addr") or "")
+            peer = addr.rsplit(":", 1)[0] if ":" in addr else addr
+            principal = c.get("user")            # absent pre-Redis-6
+            key = (principal, peer)
+            agg = seen.setdefault(key, {"connections": 0, "commands": set(),
+                                        "libs": set(), "max_age": 0, "min_idle": None})
+            agg["connections"] += 1
+            if c.get("cmd"):
+                agg["commands"].add(str(c["cmd"]).split("|")[0])
+            if c.get("lib-name"):
+                agg["libs"].add(f"{c.get('lib-name')} {c.get('lib-ver') or ''}".strip())
+            try:
+                agg["max_age"] = max(agg["max_age"], int(c.get("age") or 0))
+                idle = int(c.get("idle") or 0)
+                agg["min_idle"] = idle if agg["min_idle"] is None else min(agg["min_idle"], idle)
+            except (TypeError, ValueError):
+                pass
+
+        for (principal, peer), agg in sorted(seen.items(), key=lambda kv: str(kv[0])):
+            ext = f"runtime-{host}:{port}-{principal or 'unknown'}-{peer}"
+            resources.append(Resource(
+                kind="runtime_client",
+                name=f"{principal or 'unknown principal'} from {peer}",
+                ext_id=ext,
+                labels={
+                    "principal": str(principal) if principal else "unknown",
+                    "peer_host": peer,
+                    "connections": str(agg["connections"]),
+                    "source": "redis-client-list",
+                },
+                raw={
+                    "principal": principal,
+                    "principal_known": principal is not None,
+                    "peer_host": peer,
+                    "connections": agg["connections"],
+                    # Command NAMES only. Arguments are never read — AUTH's argv carries a
+                    # password and HELLO's carries one too.
+                    "commands": sorted(agg["commands"]),
+                    "client_libraries": sorted(agg["libs"]),
+                    "max_age_seconds": agg["max_age"],
+                    "min_idle_seconds": agg["min_idle"],
+                    "server_ext": server_ext,
+                    "observed_via": "CLIENT LIST",
+                },
+            ))
+            if principal:
+                edges.append(Edge(src_ext_id=ext,
+                                  dst_ext_id=f"redis-user-{host}:{port}-{principal}",
+                                  kind="acts_as"))
+            edges.append(Edge(src_ext_id=ext, dst_ext_id=server_ext, kind="uses"))
+
+    return Collected(resources=resources, edges=edges)

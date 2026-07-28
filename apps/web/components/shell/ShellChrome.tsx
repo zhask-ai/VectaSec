@@ -59,6 +59,9 @@ const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
     items: [
       { href: '/systems', label: 'Systems', Icon: IconSystems },
       { href: '/connections', label: 'Connections', Icon: IconAssets },
+      // Discovery sits with Inventory rather than Operations: its output is estate, and its
+      // headline finding — middleware nobody monitors — is an inventory gap, not a scan result.
+      { href: '/discovery', label: 'Discovery', Icon: IconScans },
       { href: '/identities', label: 'Identities', Icon: IconIdentities },
       { href: '/data', label: 'Data', Icon: IconData },
       { href: '/assets', label: 'Assets', Icon: IconAssets },
@@ -68,6 +71,8 @@ const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
     label: 'Assurance',
     items: [
       { href: '/attack-paths', label: 'Attack paths', Icon: IconAttackPaths },
+      { href: '/runtime', label: 'Runtime', Icon: IconOverview },
+      { href: '/supply-chain', label: 'Supply chain', Icon: IconSystems },
       { href: '/compliance', label: 'Compliance', Icon: IconCompliance },
     ],
   },

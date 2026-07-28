@@ -41,6 +41,15 @@ _NODE_COLUMNS = ",".join((
     "partitions", "enabled_plugins", "being_drained", "config_files",
 ))
 
+# Runtime-evidence columns from /api/connections. Deliberately minimal: WHO connected, from
+# WHERE, over WHAT. The endpoint's default response also carries per-connection traffic stats
+# and `client_properties`, and we ask for neither — the product's claim is that it reads
+# posture, not payloads, and the cheapest way to keep that true is to never request the data.
+_CONNECTION_COLUMNS = ",".join((
+    "name", "user", "vhost", "peer_host", "peer_port", "protocol",
+    "auth_mechanism", "ssl", "state", "connected_at",
+))
+
 _HASH_FNS = {
     "rabbit_password_hashing_sha256": "sha256",
     "rabbit_password_hashing_sha512": "sha512",
@@ -204,6 +213,13 @@ def collect(config: dict) -> Collected:
         vhosts = _get(client, "/api/vhosts", auth)       # ?columns= is ignored here
         perms = _get(client, "/api/permissions", auth)
         whoami = _get(client, "/api/whoami", auth)
+        # RUNTIME EVIDENCE. /api/connections is the only place this product can learn who is
+        # ACTUALLY using the broker, as opposed to who is permitted to: it names the
+        # authenticated user, the vhost they opened, their peer address, the SASL mechanism
+        # they used and whether the connection is TLS. ?columns= keeps the response small —
+        # this endpoint returns a large per-connection stats block we have no use for, and
+        # explicitly NOT asking for it is how payload-adjacent data stays uncollected.
+        conns = _get(client, f"/api/connections?columns={_CONNECTION_COLUMNS}", auth)
         probes = {"auth": _auth_probe(client), "guest_whoami": _guest_probe(client, src_loopback)}
 
     ov = overview.get("data") if overview.get("ok") else None
@@ -334,5 +350,62 @@ def collect(config: dict) -> Collected:
         ))
         edges.append(Edge(src_ext_id=ext_id, dst_ext_id=f"user-{user}", kind="grants"))
         edges.append(Edge(src_ext_id=ext_id, dst_ext_id=f"vhost-{vhost}", kind="scopes"))
+
+    # ── Runtime evidence: who is using this broker right now ─────────────────
+    # One resource per (user, vhost, peer host) rather than per connection: a client pool of
+    # 200 connections is one fact about one client, and 200 rows would drown the inventory and
+    # re-fingerprint on every scan as connection names churn. The counts preserve the scale.
+    if conns.get("ok"):
+        seen: dict = {}
+        for c in conns.get("data") or []:
+            key = (c.get("user"), c.get("vhost"), c.get("peer_host"))
+            agg = seen.setdefault(key, {
+                "user": c.get("user"), "vhost": c.get("vhost"),
+                "peer_host": c.get("peer_host"), "connections": 0,
+                "protocols": set(), "auth_mechanisms": set(),
+                "tls": set(), "states": set(), "earliest_connected_at": None,
+            })
+            agg["connections"] += 1
+            for field, bucket in (("protocol", "protocols"), ("auth_mechanism", "auth_mechanisms"),
+                                  ("state", "states")):
+                if c.get(field):
+                    agg[bucket].add(str(c[field]))
+            agg["tls"].add(bool(c.get("ssl")))
+            at = c.get("connected_at")
+            if at and (agg["earliest_connected_at"] is None or at < agg["earliest_connected_at"]):
+                agg["earliest_connected_at"] = at
+
+        for (user, vhost, peer), agg in sorted(seen.items(), key=lambda kv: str(kv[0])):
+            ext = f"runtime-{user}@{vhost}-{peer}"
+            all_tls = agg["tls"] == {True}
+            resources.append(Resource(
+                kind="runtime_client",
+                name=f"{user}@{vhost} from {peer}",
+                ext_id=ext,
+                namespace=str(vhost) if vhost else None,
+                labels={
+                    "principal": str(user), "vhost": str(vhost), "peer_host": str(peer),
+                    "connections": str(agg["connections"]),
+                    "tls": str(all_tls).lower(),
+                    "source": "rabbitmq-management-api",
+                },
+                raw={
+                    "principal": user, "vhost": vhost, "peer_host": peer,
+                    "connections": agg["connections"],
+                    "protocols": sorted(agg["protocols"]),
+                    "auth_mechanisms": sorted(agg["auth_mechanisms"]),
+                    "states": sorted(agg["states"]),
+                    "tls_all": all_tls,
+                    "tls_mixed": len(agg["tls"]) > 1,
+                    "earliest_connected_at": agg["earliest_connected_at"],
+                    "observed_via": "GET /api/connections",
+                },
+            ))
+            # The runtime edge: this principal is DEMONSTRABLY using this vhost. Static grants
+            # say what is permitted; this says what happened.
+            if vhost:
+                edges.append(Edge(src_ext_id=ext, dst_ext_id=f"vhost-{vhost}", kind="uses"))
+            if user:
+                edges.append(Edge(src_ext_id=ext, dst_ext_id=f"user-{user}", kind="acts_as"))
 
     return Collected(resources=resources, edges=edges)

@@ -730,6 +730,50 @@ jobs:
           -- retention-policy decision, not a bug fix — see "Known gaps" in docs/STATUS.md.
           -- It is called out here so nobody reads this job's green as covering it. What the
           -- guarantee means today is exactly: an observation cannot be UPDATEd.
+
+          -- ════ Guarantee 3: the hash chain verifies on HONEST data ═══
+          -- This is the regression that shipped undetected because nothing called
+          -- verify_ledger(). observed_at defaults to now(), which is TRANSACTION time, so a
+          -- scan writing several observations gives them all one identical timestamp; the
+          -- chain then tie-broke on a random uuid and the verifier walked a different order
+          -- than the trigger built. Result: 36 "tampers" reported against untouched rows.
+          --
+          -- A tamper-evidence mechanism that cries wolf is worse than none, so the fixture
+          -- below reproduces the exact trigger: MANY observations for ONE finding, written in
+          -- ONE transaction. It must verify clean.
+          reset role;
+          begin;
+          insert into observations (tenant_id, finding_id, resource_id, claim) values
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'f1111111-1111-1111-1111-111111111111',
+             'd1111111-1111-1111-1111-111111111111', 'chain probe 1'),
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'f1111111-1111-1111-1111-111111111111',
+             'd1111111-1111-1111-1111-111111111111', 'chain probe 2'),
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'f1111111-1111-1111-1111-111111111111',
+             'd1111111-1111-1111-1111-111111111111', 'chain probe 3'),
+            ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'f1111111-1111-1111-1111-111111111111',
+             'd1111111-1111-1111-1111-111111111111', 'chain probe 4');
+          commit;
+
+          select ci_assert((select count(*) from observations
+                            where claim like 'chain probe%'
+                              and observed_at = (select observed_at from observations
+                                                 where claim = 'chain probe 1')) = 4,
+                           'the fixture did not reproduce the identical-timestamp condition');
+
+          select ci_assert((select count(*) from verify_ledger()) = 0,
+                           'verify_ledger reported tampering on data nobody touched');
+
+          -- …and it must still CATCH a real rewrite. A chain that never fires is not evidence
+          -- either. DELETE+reinsert is the documented carve-out above, so this is the shape a
+          -- tamper actually takes: the row survives, its hash no longer matches its claim.
+          alter table observations disable trigger observations_append_only;
+          update observations set claim = 'silently rewritten'
+           where claim = 'chain probe 3';
+          alter table observations enable trigger observations_append_only;
+
+          select ci_assert((select count(*) from verify_ledger()) > 0,
+                           'verify_ledger did NOT detect a rewritten claim');
+
           \echo '════ EVIDENCE-INTEGRITY ASSERTIONS PASSED ════'
           SQL
 

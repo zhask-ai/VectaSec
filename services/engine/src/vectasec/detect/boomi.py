@@ -80,6 +80,12 @@ def weak_auth(r, ctx) -> list:
           title="Boomi published API does not require HTTPS")
 def no_tls(r, ctx) -> list:
     raw = r.raw or {}
+    # The sibling rules in this file gate on auth_readable; this one did not, so when
+    # SharedServerInformation was unreadable `https_required` came back None and the rule fired
+    # HIGH claiming the API "does not require HTTPS" — with a detail line hardcoding
+    # `https_required=False`, a value never read.
+    if raw.get("auth_readable") is False or raw.get("https_required") is None:
+        return []
     if raw.get("https_required"):
         return []
     return [Hit(

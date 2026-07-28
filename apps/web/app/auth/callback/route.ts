@@ -18,10 +18,25 @@ export async function GET(request: Request) {
   const tokenHash = url.searchParams.get('token_hash');
   const type = url.searchParams.get('type') as EmailOtpType | null;
 
-  // Open-redirect guard: `next` must be a path on this origin, never an absolute URL.
+  // Open-redirect guard. String prefix checks are NOT sufficient here: the WHATWG URL parser
+  // treats a backslash as a path separator, so `/\evil.com` and `/\/evil.com` both resolve to
+  // `https://evil.com/` while passing a `startsWith('/') && !startsWith('//')` test. The attack
+  // is real — the whole `next` value travels inside a same-origin `emailRedirectTo`, so
+  // Supabase's allow-list passes it, the victim authenticates for real, and lands on a clone.
+  //
+  // So resolve it against our own origin and keep it ONLY if it stayed there. Parsing is the
+  // check; anything the parser sends elsewhere is discarded.
   const rawNext = url.searchParams.get('next') ?? '';
   const fallback = type === 'invite' || type === 'recovery' ? '/welcome' : '/';
-  const next = rawNext.startsWith('/') && !rawNext.startsWith('//') ? rawNext : fallback;
+  let next = fallback;
+  if (rawNext) {
+    try {
+      const resolved = new URL(rawNext, url.origin);
+      if (resolved.origin === url.origin) next = resolved.pathname + resolved.search;
+    } catch {
+      next = fallback;
+    }
+  }
 
   const supabase = await createClient();
 

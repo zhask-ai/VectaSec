@@ -28,6 +28,7 @@ RULES = {d.rule_id: d for d in DETECTORS if d.rule_id.startswith("KAFKA.")}
 # Every rule_id the pack is expected to ship. Kept explicit so silently dropping a detector
 # fails a test rather than quietly shrinking coverage.
 EXPECTED_RULES = {
+    "KAFKA.SCAN.NOT_ASSESSABLE",
     "KAFKA.LISTENER.PLAINTEXT",
     "KAFKA.LISTENER.SASL_PLAINTEXT",
     "KAFKA.INTERBROKER.PLAINTEXT",
@@ -181,7 +182,7 @@ def test_all_expected_rules_are_registered():
 
 def test_rule_ids_are_unique():
     ids = [d.rule_id for d in DETECTORS if d.rule_id.startswith("KAFKA.")]
-    assert len(ids) == len(set(ids)) == 23
+    assert len(ids) == len(set(ids)) == 24
 
 
 def test_every_rule_declares_severity_and_title():
@@ -417,8 +418,18 @@ def test_no_authorizer_is_suppressed_by_contradicting_acl_evidence():
 
 
 def test_no_authorizer_is_indeterminate_when_acls_could_not_be_read():
+    """Indeterminate must be FILED, not returned as silence.
+
+    This test previously asserted `== []`, which reads as "indeterminate" but is byte-identical
+    to the answer a clean broker gives — so an unassessed authorization posture rendered as a
+    pass. authorizer.class.name WAS read (and is unset); only the ACL corroboration failed, so
+    the honest output is a not-assessable finding naming exactly that.
+    """
     b, ctx = fixture_scan(outcome="error")
-    assert fire("KAFKA.AUTHZ.NO_AUTHORIZER", b, ctx) == []
+    hits = fire("KAFKA.AUTHZ.NO_AUTHORIZER", b, ctx)
+    assert len(hits) == 1
+    assert hits[0].assessable is False
+    assert "describe_acls failed" in hits[0].observation
 
 
 def test_no_authorizer_states_that_an_empty_acl_list_proves_nothing():
@@ -1406,3 +1417,32 @@ def test_migration_gap_absent_authorizer_key_is_inconclusive():
                   "authorizer.class.name": DELETE})
     b, ctx = fixture_scan(cfg)
     assert fire("KAFKA.ZK.KRAFT_MIGRATION_ACL_GAP", b, ctx) == []
+
+
+# ═══ the coverage gap this pack was missing entirely ═══════════════════════
+# ~22 rules in detect/kafka.py read `raw.config`. The connector used to record `{}` when
+# DescribeConfigs was denied — indistinguishable from "read it, nothing was set" — so on MSK,
+# Confluent Cloud, or any least-privilege principal the whole pack returned [] and an entirely
+# unassessed broker rendered as a clean bill of health.
+def test_a_denied_describe_configs_is_a_coverage_gap_not_a_pass():
+    from vectasec.detect.kafka import config_not_readable
+
+    broker = Resource(kind="broker", name="b1", ext_id="b1", labels={},
+                      raw={"id": 1, "host": "b1.internal", "port": 9092, "config": {},
+                           "config_error": "KafkaError: TOPIC_AUTHORIZATION_FAILED"})
+    hits = config_not_readable(broker, ScanContext(connection_id="c", tenant_id="t",
+                                                   resources=[broker]))
+    assert len(hits) == 1
+    assert hits[0].assessable is False, "an unread broker is unknown, never clean"
+    assert "DescribeConfigs failed" in hits[0].observation
+    assert "TOPIC_AUTHORIZATION_FAILED" in hits[0].observation
+
+
+def test_a_broker_whose_config_was_read_files_no_gap():
+    from vectasec.detect.kafka import config_not_readable
+
+    broker = Resource(kind="broker", name="b1", ext_id="b1", labels={},
+                      raw={"id": 1, "config": {"listeners": "PLAINTEXT://:9092"},
+                           "config_error": None})
+    assert config_not_readable(broker, ScanContext(connection_id="c", tenant_id="t",
+                                                   resources=[broker])) == []

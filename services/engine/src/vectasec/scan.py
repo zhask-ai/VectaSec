@@ -351,6 +351,33 @@ def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
             _mark_scan_error(conn, scan_id, e)
             raise
 
+        # Estate correlation: the cross-connection join a per-scan detector cannot make (is
+        # this discovered broker one we actually monitor?). Its own transaction, and its own
+        # belt-and-braces except, for the same reason as notify below — a correlation failure
+        # must never void a scan that completed.
+        # NOT `with conn:` — psycopg3's connection context manager COMMITS AND CLOSES on exit,
+        # which would hand notify_scan below a dead connection. Explicit commit/rollback.
+        try:
+            from .correlate import correlate_estate
+            stats["correlation"] = correlate_estate(conn, tenant_id, str(scan_id))
+            conn.commit()
+        except Exception as e:  # pragma: no cover - defensive
+            conn.rollback()
+            stats["correlation_error"] = f"{type(e).__name__}: {e}"
+
+        # Runtime evidence: accumulate who was seen using this connection, then ask what the
+        # accumulated window can honestly say about identities nobody has ever been seen using.
+        # Same isolation rule as above — evidence is additive, and losing it must not lose a scan.
+        try:
+            from .runtime_evidence import assess_unused, record_runtime
+            stats["runtime"] = record_runtime(conn, tenant_id, str(connection_id), str(scan_id))
+            stats["runtime_unused"] = assess_unused(conn, tenant_id, str(connection_id),
+                                                    str(scan_id))
+            conn.commit()
+        except Exception as e:  # pragma: no cover - defensive
+            conn.rollback()
+            stats["runtime_error"] = f"{type(e).__name__}: {e}"
+
         # Post-scan action routing (notify.py): the ONE hook every run_scan caller (worker,
         # CLI, inline API) shares. notify_scan never raises, and the belt-and-braces except
         # exists because a notification failure must NEVER fail a completed scan.
@@ -480,9 +507,15 @@ def persist_pushed(conn, tenant_id: str, connection_id: str, scan_id: str, paylo
             "collector_stats": payload.get("stats"),
         }
         from .compliance import map as compliance
+        # Savepoint for the same reason as the twin in _persist_scan: a bare except cannot
+        # rescue a transaction Postgres has already aborted, and the next statement would
+        # take the whole pushed scan down with it.
+        cur.execute("savepoint compliance_eval")
         try:
             stats["compliance"] = compliance.evaluate(cur, tenant_id)
+            cur.execute("release savepoint compliance_eval")
         except Exception as e:  # pragma: no cover
+            cur.execute("rollback to savepoint compliance_eval")
             stats["compliance_error"] = f"{type(e).__name__}: {e}"
 
         cur.execute("update scans set status='done', finished_at=now(), stats=%s where id=%s",
@@ -611,9 +644,21 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
         # free (config.py's contract). A compliance failure must not void a completed scan, so it
         # is caught and recorded in stats rather than raised.
         from .compliance import map as compliance
+        # SAVEPOINT, not a bare try/except. evaluate() is almost entirely SQL, and in Postgres
+        # ANY failed statement aborts the whole transaction: the except would swallow the error,
+        # and then the very next `update scans set status='done'` would raise
+        # InFailedSqlTransaction, propagate to run_scan, and hit _mark_scan_error — rolling back
+        # the resources, edges, findings and observations this scan had already written.
+        #
+        # So the comment above ("must not void a completed scan") was false for the one failure
+        # mode it was written to defend against. A savepoint makes it true: rolling back to it
+        # discards only evaluate()'s work and leaves the transaction usable.
+        cur.execute("savepoint compliance_eval")
         try:
             stats["compliance"] = compliance.evaluate(cur, tenant_id)
+            cur.execute("release savepoint compliance_eval")
         except Exception as e:  # pragma: no cover - defensive
+            cur.execute("rollback to savepoint compliance_eval")
             stats["compliance_error"] = f"{type(e).__name__}: {e}"
 
         cur.execute(

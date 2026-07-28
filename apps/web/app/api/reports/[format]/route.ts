@@ -16,6 +16,13 @@ const FORMATS: Record<string, { path: string; filename: string; type: string }> 
   oscal: { path: '/reports/oscal', filename: 'vectasec-oscal.json', type: 'application/json' },
   csv: { path: '/reports/csv', filename: 'vectasec-findings.csv', type: 'text/csv' },
   summary: { path: '/reports/summary', filename: 'vectasec-report.md', type: 'text/markdown' },
+  // CycloneDX carries its spec version in the media type; consumers (Dependency-Track, Trivy,
+  // Grype) sniff on it, so it must not be flattened to application/json.
+  sbom: {
+    path: '/reports/sbom',
+    filename: 'vectasec-sbom.cdx.json',
+    type: 'application/vnd.cyclonedx+json; version=1.6',
+  },
 };
 
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ format: string }> }) {

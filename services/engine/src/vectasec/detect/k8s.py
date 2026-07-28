@@ -480,6 +480,23 @@ def rbac_wildcard_bound(r, ctx) -> list:
     if (raw.get("role_ref") or {}).get("name") == "cluster-admin":
         return []
     if not raw.get("wildcard_rules"):
+        # `role_found` is written by connect/k8s.py for exactly this case and, until now, read
+        # by no detector: when listing clusterroles is 403'd the connector computes
+        # wildcard=False from a role it never saw, so a `*`/`*` role bound to a ServiceAccount
+        # reported as "no wildcard grants".
+        if raw.get("role_found") is False:
+            return [Hit(
+                observation=(f"binding '{raw.get('name')}' references role "
+                             f"'{(raw.get('role_ref') or {}).get('name')}', which could not be "
+                             f"read, so its rules were never examined"),
+                detail="Whether this binding grants wildcard permissions is unknown — the role "
+                       "it points at was not readable, not empty.",
+                remediation="Grant the scanning ServiceAccount get/list on roles and "
+                            "clusterroles, then re-scan.",
+                assessable=False,
+                assessment_reason="the referenced role could not be read",
+                source_ref={"binding": raw.get("name"), "signal": "role_not_readable"},
+            )]
         return []
     rule = next((x for x in raw.get("role_rules") or []
                  if "*" in (x.get("verbs") or []) and "*" in (x.get("resources") or [])), {})
@@ -501,11 +518,29 @@ def rbac_wildcard_bound(r, ctx) -> list:
     )]
 
 
+# Bindings Kubernetes itself ships and every cluster has. `system:public-info-viewer` binds
+# system:unauthenticated by design so unauthenticated clients can reach /version and /healthz;
+# `system:basic-user` and `system:discovery` bind system:authenticated for self-review and API
+# discovery. Firing on these produced one critical + three high findings on a PRISTINE cluster —
+# and this rule's own remediation says anonymous should "retain nothing beyond the API discovery
+# defaults", i.e. it was flagging exactly what it declares acceptable. A pack that alarms on
+# every clean cluster is a pack people mute.
+_K8S_BUILTIN_PUBLIC_ROLES = {
+    "system:public-info-viewer",
+    "system:basic-user",
+    "system:discovery",
+    "system:service-account-issuer-discovery",
+}
+
+
 @detector(kinds=["k8s_cluster_role_binding", "k8s_role_binding"],
           rule_id="K8S.RBAC.ANONYMOUS_BOUND", severity="critical",
           title="RBAC binding grants access to anonymous or all-authenticated principals")
 def rbac_anonymous_bound(r, ctx) -> list:
     raw = r.raw or {}
+    role_ref = raw.get("role_ref") or {}
+    if str(role_ref.get("name") or "") in _K8S_BUILTIN_PUBLIC_ROLES:
+        return []
     hits = []
     for s in raw.get("subjects") or []:
         name = s.get("name")
