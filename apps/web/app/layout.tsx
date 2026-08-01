@@ -1,6 +1,18 @@
 import type { Metadata } from 'next';
 import Script from 'next/script';
+import { Inter } from 'next/font/google';
 import './globals.css';
+import './auth.css';
+
+/* Inter, self-hosted by next/font at build time — no runtime fetch to Google, so the
+ * "self-contained" rule holds. Exposed as a CSS variable and consumed ONLY by the auth
+ * screens (auth.css); the console keeps the system stack. */
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+  display: 'swap',
+  axes: ['opsz'],
+});
 
 /* The ROOT layout — deliberately minimal. It owns <html>/<body>, the global stylesheet, and one
  * job beyond that: apply the saved theme BEFORE first paint.
@@ -29,7 +41,7 @@ const THEME_INIT = `(function(){try{var t=localStorage.getItem('vs-theme');if(t=
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning className={inter.variable}>
       <body>
         <Script id="vs-theme-init" strategy="beforeInteractive">
           {THEME_INIT}

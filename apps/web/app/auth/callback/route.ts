@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import type { EmailOtpType } from '@supabase/supabase-js';
 
 import { createClient } from '@/lib/supabase/server';
+import { sendSignInNotification } from '@/lib/email';
 
 /* The single landing pad for every auth link: OAuth redirects (?code=, PKCE), and the email
  * links Supabase sends for signup confirmation, invites and recovery (?token_hash=&type=).
@@ -48,6 +49,12 @@ export async function GET(request: Request) {
   if (code) {
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (error) return NextResponse.redirect(new URL('/login?error=oauth', url.origin));
+    // OAuth sign-in notification, sent from here because this is where the flow completes
+    // server-side. Only the ?code= path notifies: token_hash arrivals ARE email links
+    // (confirmation/recovery/invite) — "you signed in" mail about the mail they just clicked
+    // would be noise. sendSignInNotification never throws, so the redirect cannot fail.
+    const { data } = await supabase.auth.getUser();
+    if (data.user?.email) await sendSignInNotification(data.user.email, url.origin);
     return NextResponse.redirect(new URL(next, url.origin));
   }
   return NextResponse.redirect(new URL('/login', url.origin));

@@ -1,24 +1,39 @@
 'use client';
 
 /* Sign-in: email+password or Google. SSO/SAML stays an enterprise-tier concern; magic links
- * still need mail infrastructure we do not have. Keep this boring.
+ * still need mail infrastructure we do not have. Keep the LOGIC boring — the polish is CSS.
  *
  * The session lands in cookies via @supabase/ssr's browser client, and proxy.ts refreshes it on
  * subsequent requests. Authorization itself is never decided here — RLS is the guarantee.
+ *
+ * /auth/callback bounces its failures here as ?error=link|oauth; that read needs
+ * useSearchParams, which in a client page must sit under Suspense to keep the route
+ * statically prerenderable.
  */
-import { useState } from 'react';
+import { Suspense, useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
+
 import { createClient } from '@/lib/supabase/client';
-import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card';
+import { AuthShell } from '@/components/auth/AuthShell';
+import { AuthAlert, PasswordField, SubmitButton, TextField } from '@/components/auth/fields';
 import { AuthDivider, GoogleButton } from '@/components/auth/OAuthButtons';
 
-export default function LoginPage() {
+const CALLBACK_ERRORS: Record<string, string> = {
+  link: 'That email link is invalid or has expired. Request a fresh one below.',
+  oauth: "Google sign-in didn't complete. Please try again.",
+};
+
+function LoginForm() {
   const router = useRouter();
+  const search = useSearchParams();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Shown until the first submit/dismissal — a stale "link expired" over a fresh attempt is noise.
+  const callbackError = !error && !busy ? CALLBACK_ERRORS[search.get('error') ?? ''] : undefined;
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -35,99 +50,73 @@ export default function LoginPage() {
       setBusy(false);
       return;
     }
+    // Fire-and-forget sign-in notification: the session cookie is set, so the route can
+    // identify the user. keepalive lets the request survive the navigation below; auth must
+    // never wait on (or fail because of) mail.
+    void fetch('/api/notify-signin', { method: 'POST', keepalive: true });
+
     // refresh() so the Server Components re-run with the new session cookie attached.
     router.replace('/');
     router.refresh();
   }
 
-  const field: React.CSSProperties = {
-    width: '100%',
-    padding: '8px 10px',
-    background: 'var(--surface)',
-    color: 'var(--text-primary)',
-    // --border fails SC 1.4.11's 3:1 for controls; --border-interactive is the token that passes.
-    border: '1px solid var(--border-interactive)',
-    borderRadius: 'var(--radius-sm, 6px)',
-    fontSize: 'var(--text-sm)',
-  };
-
   return (
-    <div style={{ display: 'grid', placeItems: 'center', minHeight: '60dvh' }}>
-      <Card style={{ width: 360 }}>
-        <CardHeader>
-          <CardTitle>Sign in</CardTitle>
-        </CardHeader>
-        <CardBody>
-          <div style={{ display: 'grid', gap: 14, marginBottom: 14 }}>
-            <GoogleButton label="Sign in with Google" />
-            <AuthDivider />
-          </div>
-          <form onSubmit={onSubmit} style={{ display: 'grid', gap: 12 }}>
-            <div style={{ display: 'grid', gap: 6 }}>
-              <label htmlFor="email" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                required
-                autoComplete="username"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                style={field}
-              />
-            </div>
-            <div style={{ display: 'grid', gap: 6 }}>
-              <label htmlFor="password" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                required
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                style={field}
-              />
-            </div>
+    <>
+      <h1 className="vs-auth-title">Welcome back</h1>
+      <p className="vs-auth-sub">Good to see you again. Sign in to your VectaSec console.</p>
 
-            {error && (
-              // role=alert so it is announced; colour is not the only signal — the text says it.
-              // --sev-critical-fg, with no var() fallback: a fallback hex is what let the old
-              // `var(--sev-high-text, #FF9A9E)` here ship a colour that never re-themed and sat
-              // at 2.03:1 on the light-mode card. A token that does not resolve should break
-              // loudly in review, not silently paint an unreadable literal.
-              <p role="alert" style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--sev-critical-fg)' }}>
-                {error}
-              </p>
-            )}
+      {callbackError && <AuthAlert tone="info">{callbackError}</AuthAlert>}
 
-            <button
-              type="submit"
-              disabled={busy}
-              style={{
-                padding: '9px 12px',
-                background: busy ? 'var(--surface-raised)' : 'var(--accent)',
-                color: busy ? 'var(--text-secondary)' : 'var(--accent-fg)',
-                border: '1px solid var(--border-interactive)',
-                borderRadius: 'var(--radius-sm, 6px)',
-                fontSize: 'var(--text-sm)',
-                fontWeight: 600,
-                cursor: busy ? 'default' : 'pointer',
-              }}
-            >
-              {busy ? 'Signing in…' : 'Sign in'}
-            </button>
-          </form>
-          <p style={{ margin: '14px 0 0', fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-            New to VectaSec?{' '}
-            <Link href="/signup" style={{ color: 'var(--text-primary)' }}>
-              Create an account
+      <GoogleButton label="Continue with Google" />
+      <AuthDivider label="or sign in with email" />
+
+      <form onSubmit={onSubmit}>
+        <TextField
+          label="Email"
+          type="email"
+          required
+          autoComplete="username"
+          placeholder="you@company.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <PasswordField
+          label="Password"
+          required
+          autoComplete="current-password"
+          placeholder="Your password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          hint={
+            <Link href="/forgot-password" className="vs-auth-link" style={{ fontSize: 'var(--text-xs)' }}>
+              Forgot password?
             </Link>
-          </p>
-        </CardBody>
-      </Card>
-    </div>
+          }
+        />
+
+        {error && <AuthAlert tone="error">{error}</AuthAlert>}
+
+        <SubmitButton busy={busy} busyLabel="Signing in…">
+          Sign in
+        </SubmitButton>
+      </form>
+
+      <p className="vs-auth-switch">
+        New to VectaSec?{' '}
+        <Link href="/signup" className="vs-auth-link">
+          Create an account
+        </Link>
+      </p>
+    </>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <AuthShell>
+      <Suspense>
+        <LoginForm />
+      </Suspense>
+    </AuthShell>
   );
 }

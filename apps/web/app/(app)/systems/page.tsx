@@ -1,7 +1,8 @@
 import Link from 'next/link';
+import type { Route } from 'next';
 
 import { engineGet } from '@/lib/engine';
-import { getOwnMembership } from '@/lib/role';
+import { canEdit, getOwnMembership } from '@/lib/role';
 import { createClient, getVerifiedUser } from '@/lib/supabase/server';
 import { SEVERITY_RANK, type Severity } from '@/lib/types';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
@@ -11,7 +12,11 @@ import { PageHeader, SectionHeader } from '@/components/ui/page-header';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatTile } from '@/components/ui/stat';
 import { StatusPill } from '@/components/ui/status-pill';
+import { RouteTabs } from '@/components/ui/route-tabs';
 import { Donut } from '@/components/charts/Donut';
+// The connect flow is one component shared by both tabs of this section: connecting from the
+// catalogue must open the same drawer, not bounce the user to the other tab to start over.
+import { ConnectDrawer } from '../connections/connect-drawer';
 
 /* /systems — the coverage catalogue. The falsifiable "any integration platform" story.
  *
@@ -261,6 +266,9 @@ export default async function SystemsPage() {
   // own membership row, actor from a server-confirmed user. Either being absent (build env, no
   // membership) simply means "coverage unavailable", handled gracefully below.
   const [membership, user] = await Promise.all([getOwnMembership(), getVerifiedUser()]);
+  // Gates the connect action in the UI only; the Server Action re-checks the role, because a
+  // hidden button is not an authorization boundary.
+  const editable = canEdit(membership?.role);
 
   const coverage =
     membership && user
@@ -380,6 +388,16 @@ export default async function SystemsPage() {
         title="Systems"
         description="Every integration-layer system VectaSec can assess, grouped by class — with your connected estate and its live findings mapped onto it. This is the coverage claim, made falsifiable."
         meta={headerMeta}
+        actions={editable ? <ConnectDrawer /> : undefined}
+      />
+      {/* Connected and Coverage are two views of one subject, so they are tabs of a single
+          section rather than two sidebar entries competing to mean the same thing. */}
+      <RouteTabs
+        aria-label="Systems views"
+        tabs={[
+          { href: '/connections' as Route, label: 'Connected' },
+          { href: '/systems' as Route, label: 'Coverage' },
+        ]}
       />
 
       {!engineOk && (
@@ -444,11 +462,9 @@ export default async function SystemsPage() {
               tone="setup"
               title="No systems connected yet"
               description="The catalogue below is what VectaSec can assess. Connect a system to map your own estate onto it."
-              action={
-                <Link href="/connections" style={ctaLinkStyle}>
-                  Connect a system
-                </Link>
-              }
+              // Opens the drawer in place. A link to the other tab made "Connect a system"
+              // mean "go somewhere that has a connect button", which is one click of nothing.
+              action={editable ? <ConnectDrawer label="Connect a system" /> : undefined}
             />
           )}
         </CardBody>
@@ -586,16 +602,3 @@ function SystemCard({
   );
 }
 
-const ctaLinkStyle: React.CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  height: 'var(--row-default)',
-  padding: '0 var(--space-4)',
-  background: 'var(--accent)',
-  color: 'var(--accent-fg)',
-  border: '1px solid var(--accent)',
-  borderRadius: 'var(--radius-md)',
-  fontSize: 'var(--text-sm)',
-  fontWeight: 600,
-  textDecoration: 'none',
-};

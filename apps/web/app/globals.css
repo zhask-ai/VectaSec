@@ -72,13 +72,14 @@
   --sev-low-bg: #e7f1fd;
   --sev-info-bg: #efeeec;
 
-  /* The one brand-blue fill: primary buttons + the focus ring. On white the fill goes dark and
-   * the label light, or the pair cannot reach 4.5:1. Same token names in both themes so no
-   * component has to know which theme it is in. */
-  --accent: #0b5bb5;
+  /* The one brand-violet fill: primary buttons + the focus ring. On white the fill goes dark
+   * and the label light, or the pair cannot reach 4.5:1. Same token names in both themes so no
+   * component has to know which theme it is in. (Hue family matches the auth panel's deep
+   * indigo-violet.) */
+  --accent: #6d28d9;
   --accent-fg: #ffffff;
 
-  --focus-ring: #0b5bb5;
+  --focus-ring: #6d28d9;
 
   /* Elevation is a hairline + a whisper of shadow, never a heavy drop. */
   --shadow-sm: 0 1px 2px rgb(11 11 11 / 0.04);
@@ -131,10 +132,10 @@
   --sev-low-bg: #0e2033;
   --sev-info-bg: #1e1e1c;
 
-  --accent: #4c8dff;
+  --accent: #a78bfa;
   --accent-fg: #0d0d0d;
 
-  --focus-ring: #6fb6ff;
+  --focus-ring: #c4b5fd;
 
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-popover: 0 8px 28px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.4);
@@ -187,10 +188,10 @@
     --sev-low-bg: #0e2033;
     --sev-info-bg: #1e1e1c;
 
-    --accent: #4c8dff;
+    --accent: #a78bfa;
     --accent-fg: #0d0d0d;
 
-    --focus-ring: #6fb6ff;
+    --focus-ring: #c4b5fd;
 
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
     --shadow-popover: 0 8px 28px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.4);
@@ -204,6 +205,17 @@
     --cat-7: #d55181;
     --cat-8: #d95926;
   }
+}
+
+/* ── Google logo hues (theme-invariant) ─────────────────────────────────── */
+/* Used by the auth screens' Google button. They sit here because RULE 2 (no hex in .tsx)
+ * applies even to a trademark, and the contrast checker builds its defined-token set from
+ * this file — a var(--google-*) in a component would otherwise be flagged as dangling. */
+:root {
+  --google-blue: #4285f4;
+  --google-green: #34a853;
+  --google-yellow: #fbbc05;
+  --google-red: #ea4335;
 }
 
 /* ── Non-colour tokens (theme-invariant) ────────────────────────────────── */
@@ -864,3 +876,4 @@ a {
     max-width: 120px;
   }
 }
+

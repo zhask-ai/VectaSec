@@ -8,7 +8,8 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 import { createClient } from '@/lib/supabase/client';
-import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card';
+import { AuthShell } from '@/components/auth/AuthShell';
+import { AuthAlert, PasswordField, SubmitButton } from '@/components/auth/fields';
 
 export default function WelcomePage() {
   const router = useRouter();
@@ -36,101 +37,58 @@ export default function WelcomePage() {
     router.refresh();
   }
 
-  const field: React.CSSProperties = {
-    width: '100%',
-    padding: '8px 10px',
-    background: 'var(--surface)',
-    color: 'var(--text-primary)',
-    border: '1px solid var(--border-interactive)',
-    borderRadius: 'var(--radius-sm, 6px)',
-    fontSize: 'var(--text-sm)',
-  };
+  function skip() {
+    router.replace('/');
+    router.refresh();
+  }
 
   return (
-    <div style={{ display: 'grid', placeItems: 'center', minHeight: '60dvh' }}>
-      <Card style={{ width: 380 }}>
-        <CardHeader>
-          <CardTitle>Welcome — set your password</CardTitle>
-        </CardHeader>
-        <CardBody>
-          <form onSubmit={onSubmit} style={{ display: 'grid', gap: 12 }}>
-            <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-              You are signed in via your email link. Set a password now so you can sign in again
-              later without it.
-            </p>
-            <div style={{ display: 'grid', gap: 6 }}>
-              <label htmlFor="password" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                New password
-              </label>
-              <input
-                id="password"
-                type="password"
-                required
-                minLength={8}
-                autoComplete="new-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                style={field}
-              />
-            </div>
-            <div style={{ display: 'grid', gap: 6 }}>
-              <label htmlFor="confirm" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                Confirm password
-              </label>
-              <input
-                id="confirm"
-                type="password"
-                required
-                minLength={8}
-                autoComplete="new-password"
-                value={confirm}
-                onChange={(e) => setConfirm(e.target.value)}
-                style={field}
-              />
-            </div>
+    <AuthShell>
+      <h1 className="vs-auth-title">Set your password</h1>
+      <p className="vs-auth-sub">
+        You are signed in via your email link. Set a password so you can sign in without it
+        next time.
+      </p>
 
-            {error && (
-              <p role="alert" style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--sev-critical-fg)' }}>
-                {error}
-              </p>
-            )}
+      <form onSubmit={onSubmit}>
+        <PasswordField
+          label="New password"
+          required
+          minLength={8}
+          autoComplete="new-password"
+          placeholder="At least 8 characters"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          showStrength
+          help="At least 8 characters."
+        />
+        <PasswordField
+          label="Confirm password"
+          required
+          minLength={8}
+          autoComplete="new-password"
+          placeholder="Repeat your new password"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+        />
 
-            <button
-              type="submit"
-              disabled={busy}
-              style={{
-                padding: '9px 12px',
-                background: busy ? 'var(--surface-raised)' : 'var(--accent)',
-                color: busy ? 'var(--text-secondary)' : 'var(--accent-fg)',
-                border: '1px solid var(--border-interactive)',
-                borderRadius: 'var(--radius-sm, 6px)',
-                fontSize: 'var(--text-sm)',
-                fontWeight: 600,
-                cursor: busy ? 'default' : 'pointer',
-              }}
-            >
-              {busy ? 'Saving…' : 'Save and continue'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                router.replace('/');
-                router.refresh();
-              }}
-              style={{
-                padding: '6px 12px',
-                background: 'transparent',
-                color: 'var(--text-secondary)',
-                border: 'none',
-                fontSize: 'var(--text-2xs)',
-                cursor: 'pointer',
-              }}
-            >
-              Skip for now
-            </button>
-          </form>
-        </CardBody>
-      </Card>
-    </div>
+        {error && <AuthAlert tone="error">{error}</AuthAlert>}
+
+        <SubmitButton busy={busy} busyLabel="Saving…">
+          Save and continue
+        </SubmitButton>
+      </form>
+
+      <p className="vs-auth-switch">
+        <button
+          type="button"
+          onClick={skip}
+          className="vs-auth-link"
+          style={{ background: 'transparent', border: 0, padding: 0, font: 'inherit', cursor: 'pointer' }}
+        >
+          Skip for now
+        </button>
+      </p>
+    </AuthShell>
   );
 }

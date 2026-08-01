@@ -45,7 +45,15 @@ import { UserMenu } from './UserMenu';
  * action re-checks the role server-side; RLS is the boundary).
  */
 
-type NavItem = { href: Route; label: string; Icon: (p: IconProps) => React.JSX.Element; exact?: boolean };
+type NavItem = {
+  href: Route;
+  label: string;
+  Icon: (p: IconProps) => React.JSX.Element;
+  exact?: boolean;
+  /** Sibling routes that belong to this item — a section whose tabs are separate routes must
+   * stay highlighted on every one of them, or the sidebar denies where the user is. */
+  also?: Route[];
+};
 
 const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
   {
@@ -57,8 +65,12 @@ const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
   {
     label: 'Inventory',
     items: [
-      { href: '/systems', label: 'Systems', Icon: IconSystems },
-      { href: '/connections', label: 'Connections', Icon: IconAssets },
+      // ONE entry for the estate. Connected (/connections) and Coverage (/systems) are tabs of
+      // that one section, not rival sidebar items: both answer "what systems?", and two
+      // near-synonymous nav labels made the reader choose before they knew the difference.
+      // Landing on /connections because the operational view is where an operator lives; the
+      // catalogue is reference, one tab away.
+      { href: '/connections', label: 'Systems', Icon: IconSystems, also: ['/systems'] },
       // Discovery sits with Inventory rather than Operations: its output is estate, and its
       // headline finding — middleware nobody monitors — is an inventory gap, not a scan result.
       { href: '/discovery', label: 'Discovery', Icon: IconScans },
@@ -92,8 +104,9 @@ const PLATFORM_ITEMS: NavItem[] = [
 ];
 
 function isActive(pathname: string, item: NavItem): boolean {
+  const under = (base: string) => pathname === base || pathname.startsWith(`${base}/`);
   if (item.exact) return pathname === item.href;
-  return pathname === item.href || pathname.startsWith(`${item.href}/`);
+  return under(item.href) || (item.also?.some(under) ?? false);
 }
 
 export function ShellChrome({

@@ -13,7 +13,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
 import { createClient } from '@/lib/supabase/client';
-import { Card, CardBody, CardHeader, CardTitle } from '@/components/ui/card';
+import { AuthShell } from '@/components/auth/AuthShell';
+import { AuthAlert, PasswordField, SubmitButton, TextField } from '@/components/auth/fields';
 import { AuthDivider, GoogleButton } from '@/components/auth/OAuthButtons';
 
 export default function SignupPage() {
@@ -56,116 +57,91 @@ export default function SignupPage() {
     setBusy(false);
   }
 
-  const field: React.CSSProperties = {
-    width: '100%',
-    padding: '8px 10px',
-    background: 'var(--surface)',
-    color: 'var(--text-primary)',
-    border: '1px solid var(--border-interactive)',
-    borderRadius: 'var(--radius-sm, 6px)',
-    fontSize: 'var(--text-sm)',
-  };
-
   return (
-    <div style={{ display: 'grid', placeItems: 'center', minHeight: '60dvh' }}>
-      <Card style={{ width: 380 }}>
-        <CardHeader>
-          <CardTitle>Create your account</CardTitle>
-        </CardHeader>
-        <CardBody>
-          {confirmSent ? (
-            <div style={{ display: 'grid', gap: 10 }}>
-              <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
-                Check your email. We sent a confirmation link to{' '}
-                <strong style={{ overflowWrap: 'anywhere' }}>{email}</strong> — open it in this
-                browser and you will land signed in, ready to name your organization.
-              </p>
-              <p style={{ margin: 0, fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
-                Nothing arriving? Check spam, or try signing in — the address may already have an
-                account.
-              </p>
-            </div>
-          ) : (
-            <div style={{ display: 'grid', gap: 14 }}>
-              <GoogleButton label="Continue with Google" />
-              <AuthDivider />
-              <form onSubmit={onSubmit} style={{ display: 'grid', gap: 12 }}>
-                <div style={{ display: 'grid', gap: 6 }}>
-                  <label htmlFor="name" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                    Your name <span style={{ color: 'var(--text-muted)' }}>(optional)</span>
-                  </label>
-                  <input
-                    id="name"
-                    type="text"
-                    autoComplete="name"
-                    value={fullName}
-                    onChange={(e) => setFullName(e.target.value)}
-                    style={field}
-                  />
-                </div>
-                <div style={{ display: 'grid', gap: 6 }}>
-                  <label htmlFor="email" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                    Work email
-                  </label>
-                  <input
-                    id="email"
-                    type="email"
-                    required
-                    autoComplete="username"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    style={field}
-                  />
-                </div>
-                <div style={{ display: 'grid', gap: 6 }}>
-                  <label htmlFor="password" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                    Password
-                  </label>
-                  <input
-                    id="password"
-                    type="password"
-                    required
-                    minLength={8}
-                    autoComplete="new-password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    style={field}
-                  />
-                </div>
+    <AuthShell>
+      {confirmSent ? (
+        <div className="vs-auth-mailbox">
+          <span className="vs-auth-mailbox-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <rect x="3" y="5" width="18" height="14" rx="2" />
+              <path d="M3.5 7l8.5 6 8.5-6" />
+            </svg>
+          </span>
+          <h1 className="vs-auth-title" style={{ margin: 0 }}>
+            Check your inbox
+          </h1>
+          <p className="vs-auth-sub" style={{ margin: 0 }}>
+            We sent a confirmation link to{' '}
+            <strong style={{ color: 'var(--text-primary)', overflowWrap: 'anywhere' }}>{email}</strong>.
+            Open it in this browser and you will land signed in, ready to name your organization.
+          </p>
+          <p className="vs-auth-help" style={{ margin: 0 }}>
+            Nothing arriving? Check spam, or{' '}
+            <Link href="/login" className="vs-auth-link">
+              try signing in
+            </Link>{' '}
+            — the address may already have an account.
+          </p>
+        </div>
+      ) : (
+        <>
+          <h1 className="vs-auth-title">Create your account</h1>
+          <p className="vs-auth-sub">
+            Connect your stack and get your first posture score in minutes.
+          </p>
 
-                {error && (
-                  <p role="alert" style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--sev-critical-fg)' }}>
-                    {error}
-                  </p>
-                )}
+          <GoogleButton label="Continue with Google" />
+          <AuthDivider label="or continue with email" />
 
-                <button
-                  type="submit"
-                  disabled={busy}
-                  style={{
-                    padding: '9px 12px',
-                    background: busy ? 'var(--surface-raised)' : 'var(--accent)',
-                    color: busy ? 'var(--text-secondary)' : 'var(--accent-fg)',
-                    border: '1px solid var(--border-interactive)',
-                    borderRadius: 'var(--radius-sm, 6px)',
-                    fontSize: 'var(--text-sm)',
-                    fontWeight: 600,
-                    cursor: busy ? 'default' : 'pointer',
-                  }}
-                >
-                  {busy ? 'Creating account…' : 'Create account'}
-                </button>
-              </form>
-              <p style={{ margin: 0, fontSize: 'var(--text-sm)', color: 'var(--text-secondary)' }}>
-                Already have an account?{' '}
-                <Link href="/login" style={{ color: 'var(--text-primary)' }}>
-                  Sign in
-                </Link>
-              </p>
-            </div>
-          )}
-        </CardBody>
-      </Card>
-    </div>
+          <form onSubmit={onSubmit}>
+            <TextField
+              label={
+                <>
+                  Your name <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>(optional)</span>
+                </>
+              }
+              type="text"
+              autoComplete="name"
+              placeholder="Ada Lovelace"
+              value={fullName}
+              onChange={(e) => setFullName(e.target.value)}
+            />
+            <TextField
+              label="Work email"
+              type="email"
+              required
+              autoComplete="username"
+              placeholder="you@company.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+            <PasswordField
+              label="Password"
+              required
+              minLength={8}
+              autoComplete="new-password"
+              placeholder="At least 8 characters"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              showStrength
+              help="At least 8 characters."
+            />
+
+            {error && <AuthAlert tone="error">{error}</AuthAlert>}
+
+            <SubmitButton busy={busy} busyLabel="Creating account…">
+              Create account
+            </SubmitButton>
+          </form>
+
+          <p className="vs-auth-switch">
+            Already have an account?{' '}
+            <Link href="/login" className="vs-auth-link">
+              Sign in
+            </Link>
+          </p>
+        </>
+      )}
+    </AuthShell>
   );
 }

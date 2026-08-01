@@ -1,0 +1,78 @@
+<!-- Supabase → Authentication → Emails → Templates → "Confirm signup"
+     Subject: Confirm your VectaSec account
+     See README.md for the email-client constraints this markup is written against. -->
+
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+  Confirm your email address to finish setting up your VectaSec console.
+  &#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f2f2f0;padding:44px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(16,12,32,0.04),0 12px 32px rgba(16,12,32,0.08);">
+
+        <tr>
+          <td bgcolor="#4c1d95" style="background-color:#4c1d95;background-image:linear-gradient(135deg,#6d28d9 0%,#4c1d95 55%,#2e1065 100%);padding:26px 36px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+              <tr>
+                <td width="34" height="34" align="center" valign="middle" style="width:34px;height:34px;background:#ffffff;border-radius:9px;color:#4c1d95;font-size:17px;font-weight:700;line-height:34px;text-align:center;">V</td>
+                <td style="padding-left:12px;">
+                  <div style="font-size:15px;font-weight:700;letter-spacing:0.18em;color:#ffffff;line-height:1.2;">VECTASEC</div>
+                  <div style="font-size:11px;color:#c9b8f5;line-height:1.4;padding-top:2px;">integration-layer security posture</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:36px;">
+
+            <h1 style="margin:0 0 12px;font-size:25px;line-height:1.25;font-weight:600;letter-spacing:-0.025em;color:#0b0b0b;">Confirm your email</h1>
+            <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#52514e;">
+              Welcome to VectaSec. Confirm this address to finish creating your account and land in your console.
+            </p>
+
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:26px;">
+              <tr>
+                <td bgcolor="#6d28d9" align="center" style="background-color:#6d28d9;background-image:linear-gradient(180deg,#7c3aed 0%,#6d28d9 100%);border-radius:10px;box-shadow:0 2px 8px rgba(109,40,217,0.28);">
+                  <a href="{{ .ConfirmationURL }}" style="display:inline-block;padding:14px 32px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;letter-spacing:-0.005em;">Confirm email address</a>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin:0 0 28px;font-size:12px;line-height:1.6;color:#8a8880;">
+              Or paste this link into your browser:<br />
+              <a href="{{ .ConfirmationURL }}" style="color:#6d28d9;word-break:break-all;text-decoration:none;">{{ .ConfirmationURL }}</a>
+            </p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f7f5ff;border:1px solid #e6dffb;border-radius:11px;">
+              <tr>
+                <td style="padding:14px 16px;font-size:12.5px;line-height:1.6;color:#5b5570;">
+                  <strong style="color:#3f2d70;">Didn&rsquo;t sign up?</strong> You can safely ignore this email &mdash; no account is activated until this link is opened.
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+      </table>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;">
+        <tr>
+          <td align="center" style="padding:22px 16px 0;">
+            <div style="font-size:11.5px;line-height:1.6;color:#8a8880;">
+              VectaSec &middot; continuous security posture for the integration layer
+            </div>
+            <div style="font-size:11px;line-height:1.6;color:#a3a099;padding-top:4px;">
+              This is an automated message &mdash; please don&rsquo;t reply.
+            </div>
+          </td>
+        </tr>
+      </table>
+
+    </td>
+  </tr>
+</table>

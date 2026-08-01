@@ -1799,6 +1799,145 @@ def remove_member(user_id: uuid.UUID, p: Principal = Depends(admin)) -> dict:
     return {"removed": True, "user_id": str(user_id), "role": current[str(user_id)]}
 
 
+# ── Platform operator surface ───────────────────────────────────────────────
+# Everything above is TENANT-scoped: `admin` means "rank 3 inside the tenant named by the
+# request header". These three endpoints are not — they act on the platform itself (an auth
+# account, the operator roster), so they need a different gate and get one.
+#
+# THE DANGEROUS PAIR. Deleting an account and granting operator rank are the two most
+# destructive things this API can do, so each carries guards that exist to stop an operator
+# harming the platform BY ACCIDENT, not merely without permission:
+#
+#   · you cannot delete yourself, or revoke your own operator rank — either is a lockout, and
+#     the second one silently, since the console keeps rendering until the next page load;
+#   · you cannot delete another operator — revoke their rank first. Two deliberate steps mean
+#     an operator war needs intent, not one misclick on the wrong row;
+#   · you cannot revoke the last operator — a platform with no operator cannot appoint one.
+#
+# Audit rows for these are written against the ACTOR'S OWN tenant (the header tenant), because
+# audit_log.tenant_id is not nullable and a platform action has no tenant of its own. The
+# target user id is in `target`, so the trail is complete either way.
+
+
+def super_operator(p: Principal = Depends(acting)) -> Principal:
+    """Acting principal that must hold a super_admins row — platform rank, not tenant rank.
+
+    Dev header-trust is exempt for the same reason _require_rank exempts it: that mode already
+    trusts self-asserted identity wholesale, so a roster check against a made-up actor would be
+    theatre. Every other path must present an actor that IS on the roster; a tenant admin, no
+    matter how senior inside their org, is refused here.
+    """
+    if p.via == "dev":
+        return p
+    if p.via not in ("service", "jwt"):
+        raise HTTPException(403, f"authentication path {p.via!r} cannot perform actions")
+    if not _is_super_admin(p.actor):
+        raise HTTPException(403, "this action requires platform operator rank")
+    return p
+
+
+def _delete_auth_user(user_id: str) -> None:
+    """Delete the auth account through GoTrue admin. Requires the engine's service-role key —
+    the console must never hold it, which is exactly why this lives here."""
+    service_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    if not service_key or not base:
+        raise HTTPException(
+            501,
+            "account deletion needs SUPABASE_SERVICE_ROLE_KEY and SUPABASE_URL on the engine. "
+            "Membership was left untouched.",
+        )
+    import httpx
+    res = httpx.delete(
+        f"{base}/auth/v1/admin/users/{user_id}",
+        timeout=10.0,
+        headers={"apikey": service_key, "Authorization": f"Bearer {service_key}"},
+    )
+    # 404 is success-shaped: the account is gone, which is the state the caller asked for.
+    if res.status_code >= 300 and res.status_code != 404:
+        raise HTTPException(502, f"delete failed: GoTrue HTTP {res.status_code}: {res.text[:200]}")
+
+
+@app.delete("/admin/users/{user_id}")
+def admin_delete_user(user_id: uuid.UUID, p: Principal = Depends(super_operator)) -> dict:
+    """Delete an auth account platform-wide, and every membership with it.
+
+    Memberships are removed first, inside a transaction, so a GoTrue failure leaves the account
+    intact rather than half-deleted. The reverse order would strand a user who can still sign in
+    but belongs to nothing.
+    """
+    target = str(user_id)
+    if target == str(p.actor):
+        raise HTTPException(400, "you cannot delete your own account")
+    if _is_super_admin(target):
+        raise HTTPException(
+            400, "that account is a platform operator: revoke its operator rank first, then delete it")
+
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("select email from auth.users where id = %s", (target,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "no such user")
+            email = row[0]
+            cur.execute("select tenant_id::text, role from tenant_members where user_id = %s", (target,))
+            memberships = [{"tenant_id": t, "role": r} for t, r in cur.fetchall()]
+            cur.execute("delete from tenant_members where user_id = %s", (target,))
+            _audit(cur, p, "admin.user.deleted", target,
+                   {"email": email, "memberships": memberships})
+            # Inside the transaction on purpose: if GoTrue refuses, the rollback below restores
+            # the memberships and nothing was lost.
+            _delete_auth_user(target)
+        conn.commit()
+    return {"deleted": True, "user_id": target, "email": email, "memberships_removed": len(memberships)}
+
+
+@app.post("/admin/super-admins/{user_id}", status_code=201)
+def admin_grant_super(user_id: uuid.UUID, p: Principal = Depends(super_operator)) -> dict:
+    """Grant platform operator rank. Idempotent: granting twice is not an error."""
+    target = str(user_id)
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute("select email from auth.users where id = %s", (target,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "no such user")
+            cur.execute(
+                "insert into super_admins (user_id) values (%s) on conflict (user_id) do nothing",
+                (target,),
+            )
+            _audit(cur, p, "admin.super.granted", target, {"email": row[0]})
+        conn.commit()
+    return {"granted": True, "user_id": target, "email": row[0]}
+
+
+@app.delete("/admin/super-admins/{user_id}")
+def admin_revoke_super(user_id: uuid.UUID, p: Principal = Depends(super_operator)) -> dict:
+    """Revoke platform operator rank. Refuses self-revocation and the last operator."""
+    target = str(user_id)
+    if target == str(p.actor):
+        raise HTTPException(
+            400, "you cannot revoke your own operator rank: ask another operator to do it")
+
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            # for update: two concurrent revocations must not both see a second operator and
+            # leave the platform with none.
+            cur.execute("select user_id::text from super_admins for update")
+            operators = {r[0] for r in cur.fetchall()}
+            if target not in operators:
+                raise HTTPException(404, "that account is not a platform operator")
+            if len(operators) <= 1:
+                raise HTTPException(400, "cannot revoke the last platform operator")
+            cur.execute("delete from super_admins where user_id = %s", (target,))
+            _audit(cur, p, "admin.super.revoked", target, {})
+        conn.commit()
+    return {"revoked": True, "user_id": target}
+
+
 # ── Collector control plane ─────────────────────────────────────────────────
 # The customer-side Collector's ONLY outbound endpoints. It authenticates with a short-lived,
 # tenant-scoped bearer token minted at /enroll (auth.mint_collector_token — stateless HMAC, not a

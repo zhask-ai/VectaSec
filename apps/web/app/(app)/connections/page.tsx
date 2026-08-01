@@ -13,7 +13,9 @@ import { StatTile } from '@/components/ui/stat';
 import { StatusPill, type StatusTone } from '@/components/ui/status-pill';
 import { Toolbar } from '@/components/ui/toolbar';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
-import { AddConnection } from './add-connection';
+import { RouteTabs } from '@/components/ui/route-tabs';
+import { CONNECTORS } from './connector-fields';
+import { ConnectDrawer } from './connect-drawer';
 import { CadenceSelect } from './cadence-select';
 import { RowActions } from './row-actions';
 
@@ -36,7 +38,7 @@ import { RowActions } from './row-actions';
  * postgres/BYPASSRLS and leak every tenant).
  *
  * The design system (PageHeader/StatTile/Toolbar/StatusPill/SeverityBadge) frames it; every
- * mutation still flows through the same Server Actions (AddConnection / RowActions / CadenceSelect),
+ * mutation still flows through the same Server Actions (ConnectDrawer / RowActions / CadenceSelect),
  * role-gated by `editable` in the UI and re-checked server-side.
  */
 
@@ -60,11 +62,14 @@ type ConnectionRow = {
 
 type ScanRow = { id: string; status: string; started_at: string; finished_at: string | null };
 
-/** The connector types the add-form can create today (connector-fields.ts). The full catalogue of
- * what VectaSec can assess — 37 connectors — lives on /systems. */
-const CONNECTOR_TYPES = ['kafka', 'kong', 'rabbitmq', 'redis', 'mcp'];
+/* The connectable catalogue is connector-fields.ts itself — derived, never restated. A
+ * hardcoded list here said "5 connector types available" long after the registry grew to 37,
+ * under-selling coverage by 32 systems on the page whose entire job is coverage honesty. */
+const CONNECTOR_COUNT = CONNECTORS.length;
+/** A few names for the empty state, so "connect something" has concrete examples. */
+const CONNECTOR_EXAMPLES = ['kafka', 'rabbitmq', 'kong', 'redis', 'mcp'];
 
-export const metadata = { title: 'Connections · VectaSec' };
+export const metadata = { title: 'Connected systems · VectaSec' };
 
 function relative(iso: string): string {
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
@@ -142,7 +147,7 @@ export default async function ConnectionsPage({
 
   if (connectionsRes.error) {
     return (
-      <Shell>
+      <Shell editable={editable}>
         <Card>
           <CardBody>
             <EmptyState tone="error" title="Could not load connections" description={connectionsRes.error.message} />
@@ -156,7 +161,7 @@ export default async function ConnectionsPage({
 
   if (connections.length === 0) {
     return (
-      <Shell>
+      <Shell editable={editable}>
         <SetupState editable={editable} />
       </Shell>
     );
@@ -208,7 +213,7 @@ export default async function ConnectionsPage({
   if (failed) {
     const message = (failed.resTotalRes.error ?? failed.resStaleRes.error ?? failed.openRes.error)!.message;
     return (
-      <Shell>
+      <Shell editable={editable}>
         <Card>
           <CardBody>
             <EmptyState tone="error" title="Could not load connection health" description={message} />
@@ -259,7 +264,7 @@ export default async function ConnectionsPage({
   const activeFilter = statusFilter === 'attention' || statusFilter === 'healthy' ? statusFilter : 'all';
 
   return (
-    <Shell>
+    <Shell editable={editable}>
       {/* Poll only while something is actually in flight; static again the render after. */}
       <AutoRefresh active={scanning > 0} />
 
@@ -286,7 +291,7 @@ export default async function ConnectionsPage({
       <Card>
         <CardBody>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 'var(--space-4)' }}>
-            <StatTile label="Connections" value={rows.length} sub={`${CONNECTOR_TYPES.length} connector types available`} />
+            <StatTile label="Connections" value={rows.length} sub={`${CONNECTOR_COUNT} connectors available`} />
             <StatTile
               label="Needs attention"
               value={attention}
@@ -506,25 +511,36 @@ export default async function ConnectionsPage({
           )}
         </CardBody>
       </Card>
-
-      {editable && <ConnectHelp />}
     </Shell>
   );
 }
 
-/** Route frame: the single <h1> via PageHeader, then the page body grid. Every branch (error,
- * empty, populated) renders through here so the header never disappears under a failure. */
-function Shell({ children }: { children: React.ReactNode }) {
+/** Route frame: the single <h1> via PageHeader, the section tab strip, then the page body grid.
+ * Every branch (error, empty, populated) renders through here so the header never disappears
+ * under a failure — and so the connect action is reachable at the TOP of every one of them,
+ * including the error state, where "connect a different system" may be the actual fix.
+ *
+ * Connected and Coverage are two views of one subject, so they are tabs of a single "Systems"
+ * section rather than two sidebar entries competing to mean the same thing. */
+function Shell({ children, editable }: { children: React.ReactNode; editable?: boolean }) {
   return (
     <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
       <PageHeader
-        title="Connections"
+        title="Systems"
         description="The systems VectaSec is collecting from, and how healthy that collection is. A broken connection is louder than a clean one — it is the coverage gap."
-        meta={
-          <>
-            read-only · <Link href={'/systems' as Route} style={{ color: 'var(--text-secondary)' }}>see full coverage</Link>
-          </>
-        }
+        meta="read-only"
+        actions={editable ? <ConnectDrawer /> : undefined}
+      />
+      {/* No counts in the tabs. The connectable list here (connector-fields.ts, a mirror of the
+          registry) and the engine's live registry on Coverage can legitimately differ by a
+          connector between regenerations — and two adjacent numbers that disagree read as a bug
+          even when both are honest. Each page states its own count, from its own source. */}
+      <RouteTabs
+        aria-label="Systems views"
+        tabs={[
+          { href: '/connections' as Route, label: 'Connected' },
+          { href: '/systems' as Route, label: 'Coverage' },
+        ]}
       />
       {children}
     </div>
@@ -576,7 +592,7 @@ function SetupState({ editable }: { editable: boolean }) {
             tone="setup"
             title="No systems connected"
             description="VectaSec scans the integration layer — the brokers, gateways and MCP servers between your services. Connecting one needs an editor or admin role; ask an admin to connect a system or to change your role."
-            meta={`connectors available: ${CONNECTOR_TYPES.join(', ')}`}
+            meta={`${CONNECTOR_COUNT} connectors available — ${CONNECTOR_EXAMPLES.join(', ')} and more`}
           />
         </CardBody>
       </Card>
@@ -590,88 +606,12 @@ function SetupState({ editable }: { editable: boolean }) {
           tone="setup"
           title="No systems connected"
           description="VectaSec scans the integration layer — the brokers, gateways and MCP servers between your services. Connect one to start; the first scan runs immediately."
-          meta={`connectors available: ${CONNECTOR_TYPES.join(', ')}`}
+          meta={`${CONNECTOR_COUNT} connectors available — ${CONNECTOR_EXAMPLES.join(', ')} and more`}
         />
-        <div style={{ maxWidth: 640, margin: '0 auto', display: 'grid', gap: 'var(--space-4)' }}>
-          <AddConnection />
-          <details>
-            <summary style={{ cursor: 'pointer', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
-              Prefer the CLI?
-            </summary>
-            <div style={{ marginTop: 'var(--space-2)' }}>
-              <ConnectSnippet />
-            </div>
-          </details>
-        </div>
+        {/* No connect form here: the action lives in the page header, where it is reachable
+            without scrolling past whatever this page grows into. */}
       </CardBody>
     </Card>
-  );
-}
-
-function ConnectHelp() {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Connect another system</CardTitle>
-        <CardMeta>read-only · scans run from the worker, never the browser</CardMeta>
-      </CardHeader>
-      <CardBody>
-        <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
-          <AddConnection />
-          <details>
-            <summary style={{ cursor: 'pointer', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
-              Prefer the CLI?
-            </summary>
-            <div style={{ marginTop: 'var(--space-2)' }}>
-              <ConnectSnippet />
-            </div>
-          </details>
-        </div>
-      </CardBody>
-    </Card>
-  );
-}
-
-/** The CLI path — same result as the form, from wherever the target is reachable. The form
- * submits through the engine API with a verified actor (actions.ts); this snippet exists for
- * operators whose broker is only reachable from a bastion the browser isn't on. */
-function ConnectSnippet() {
-  return (
-    <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
-      <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
-        Run the engine CLI where the system is reachable. It reads; it never writes to the target.
-      </p>
-      <pre
-        style={{
-          margin: 0,
-          padding: 'var(--space-3)',
-          background: 'var(--bg)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius-md)',
-          fontFamily: 'var(--font-mono)',
-          fontSize: 'var(--text-2xs)',
-          lineHeight: 'var(--leading-sm)',
-          color: 'var(--text-primary)',
-          overflowX: 'auto',
-        }}
-      >
-        <span style={{ color: 'var(--text-muted)' }}># save a connection, then scan it by name</span>
-        {'\n'}vectasec connections add --type kafka --name prod-kafka --bootstrap broker-1:9092
-        {'\n'}vectasec scan --connection prod-kafka
-        {'\n\n'}
-        <span style={{ color: 'var(--text-muted)' }}># or ad-hoc (saves the connection as a side effect)</span>
-        {'\n'}vectasec scan --type rabbitmq --url http://localhost:15672 --username svc --password ***
-        {'\n'}vectasec scan --type kong --url http://localhost:8001
-        {'\n'}vectasec scan --type mcp --url https://mcp.example.com
-      </pre>
-      <p style={{ margin: 0, fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
-        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec connections</code> lists the estate;{' '}
-        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec scans</code> shows history;{' '}
-        <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec doctor</code> checks wiring. Scans
-        queued here need <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec worker</code>{' '}
-        running to execute.
-      </p>
-    </div>
   );
 }
 

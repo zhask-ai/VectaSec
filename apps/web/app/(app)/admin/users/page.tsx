@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation';
 
-import { createClient } from '@/lib/supabase/server';
+import { createClient, getVerifiedUser } from '@/lib/supabase/server';
 import { isSuperAdmin } from '@/lib/role';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -8,6 +8,7 @@ import { PageHeader } from '@/components/ui/page-header';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 import { AutoRefresh } from '@/components/AutoRefresh';
+import { InviteUser, UserControls, type OrgOption } from './user-controls';
 
 /* The operator's user list — every account on the platform, with presence. "Online" is a
  * heartbeat under 2 minutes old (the shell touches last_seen_at once a minute); it is
@@ -42,8 +43,17 @@ export default async function AdminUsersPage() {
   if (!(await isSuperAdmin())) notFound();
 
   const supabase = await createClient();
-  const { data, error } = await supabase.rpc('admin_users');
+  // admin_orgs() feeds the "add to an organization" picker; both RPCs re-check super_admins
+  // themselves, so this page's notFound() above is privacy, not the security boundary.
+  const [{ data, error }, orgsRes, me] = await Promise.all([
+    supabase.rpc('admin_users'),
+    supabase.rpc('admin_orgs'),
+    getVerifiedUser(),
+  ]);
   const users = (data ?? []) as UserRow[];
+  const orgs = ((orgsRes.data ?? []) as { id: string; name: string }[]).map(
+    (o): OrgOption => ({ id: o.id, name: o.name }),
+  );
   const online = users.filter(
     (u) => u.last_seen_at && Date.now() - new Date(u.last_seen_at).getTime() < ONLINE_WINDOW_MS,
   ).length;
@@ -55,6 +65,7 @@ export default async function AdminUsersPage() {
         title="Users"
         description="Every account on the platform, with live presence — a green dot is a console open within the last two minutes."
         meta={`${users.length} user${users.length === 1 ? '' : 's'} · ${online} online`}
+        actions={<InviteUser orgs={orgs} />}
       />
       <Card>
         <CardHeader>
@@ -76,11 +87,12 @@ export default async function AdminUsersPage() {
             <Table density="default" caption="All users, newest first">
               <THead>
                 <TR>
-                  <TH width="28%">User</TH>
-                  <TH width="12%">Presence</TH>
-                  <TH width="14%">Last seen</TH>
-                  <TH width="34%">Organizations</TH>
-                  <TH width="12%">Joined</TH>
+                  <TH width="26%">User</TH>
+                  <TH width="11%">Presence</TH>
+                  <TH width="12%">Last seen</TH>
+                  <TH width="29%">Organizations</TH>
+                  <TH width="11%">Joined</TH>
+                  <TH width="11%">Manage</TH>
                 </TR>
               </THead>
               <TBody>
@@ -130,6 +142,16 @@ export default async function AdminUsersPage() {
                         )}
                       </TD>
                       <TD>{relative(u.created_at)}</TD>
+                      <TD>
+                        <UserControls
+                          userId={u.user_id}
+                          email={u.email}
+                          memberships={u.memberships}
+                          isSuper={u.is_super}
+                          isSelf={u.user_id === me?.id}
+                          orgs={orgs}
+                        />
+                      </TD>
                     </TR>
                   );
                 })}

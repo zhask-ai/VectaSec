@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>VectaSec auth emails — preview</title>
+<style>
+  body { margin:0; background:#17161c; color:#e9e8ee;
+         font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif; }
+  header { padding:36px 24px 8px; text-align:center; }
+  h1 { margin:0 0 6px; font-size:22px; font-weight:600; letter-spacing:-0.02em; }
+  header p { margin:0; font-size:13px; color:#9c99a8; }
+  .item { padding:28px 16px 40px; }
+  .meta { max-width:520px; margin:0 auto 14px; }
+  .name { font-size:15px; font-weight:600; letter-spacing:-0.01em; }
+  .subject { font-size:12.5px; color:#a89ff0; padding-top:3px; }
+  .source { font-size:11px; color:#75727f; padding-top:2px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .frame { max-width:520px; margin:0 auto; border-radius:14px; overflow:hidden;
+           box-shadow:0 18px 50px rgba(0,0,0,0.45); }
+  .frame > table { margin:0 !important; }
+  hr.sep { border:0; border-top:1px solid #2a2833; max-width:900px; margin:0 auto; }
+</style></head>
+<body>
+<header>
+  <h1>VectaSec auth emails</h1>
+  <p>Rendered from the real templates, with sample values in place of Supabase's variables.</p>
+</header>
+<div class="item">
+  <div class="meta">
+    <div class="name">Confirm signup</div>
+    <div class="subject">Subject: Confirm your VectaSec account</div>
+    <div class="source">docs/email-templates/confirm-signup.html</div>
+  </div>
+  <div class="frame">
+
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+  Confirm your email address to finish setting up your VectaSec console.
+  &#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f2f2f0;padding:44px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(16,12,32,0.04),0 12px 32px rgba(16,12,32,0.08);">
+
+        <tr>
+          <td bgcolor="#4c1d95" style="background-color:#4c1d95;background-image:linear-gradient(135deg,#6d28d9 0%,#4c1d95 55%,#2e1065 100%);padding:26px 36px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+              <tr>
+                <td width="34" height="34" align="center" valign="middle" style="width:34px;height:34px;background:#ffffff;border-radius:9px;color:#4c1d95;font-size:17px;font-weight:700;line-height:34px;text-align:center;">V</td>
+                <td style="padding-left:12px;">
+                  <div style="font-size:15px;font-weight:700;letter-spacing:0.18em;color:#ffffff;line-height:1.2;">VECTASEC</div>
+                  <div style="font-size:11px;color:#c9b8f5;line-height:1.4;padding-top:2px;">integration-layer security posture</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:36px;">
+
+            <h1 style="margin:0 0 12px;font-size:25px;line-height:1.25;font-weight:600;letter-spacing:-0.025em;color:#0b0b0b;">Confirm your email</h1>
+            <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#52514e;">
+              Welcome to VectaSec. Confirm this address to finish creating your account and land in your console.
+            </p>
+
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:26px;">
+              <tr>
+                <td bgcolor="#6d28d9" align="center" style="background-color:#6d28d9;background-image:linear-gradient(180deg,#7c3aed 0%,#6d28d9 100%);border-radius:10px;box-shadow:0 2px 8px rgba(109,40,217,0.28);">
+                  <a href="https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback" style="display:inline-block;padding:14px 32px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;letter-spacing:-0.005em;">Confirm email address</a>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin:0 0 28px;font-size:12px;line-height:1.6;color:#8a8880;">
+              Or paste this link into your browser:<br />
+              <a href="https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback" style="color:#6d28d9;word-break:break-all;text-decoration:none;">https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback</a>
+            </p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f7f5ff;border:1px solid #e6dffb;border-radius:11px;">
+              <tr>
+                <td style="padding:14px 16px;font-size:12.5px;line-height:1.6;color:#5b5570;">
+                  <strong style="color:#3f2d70;">Didn&rsquo;t sign up?</strong> You can safely ignore this email &mdash; no account is activated until this link is opened.
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+      </table>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;">
+        <tr>
+          <td align="center" style="padding:22px 16px 0;">
+            <div style="font-size:11.5px;line-height:1.6;color:#8a8880;">
+              VectaSec &middot; continuous security posture for the integration layer
+            </div>
+            <div style="font-size:11px;line-height:1.6;color:#a3a099;padding-top:4px;">
+              This is an automated message &mdash; please don&rsquo;t reply.
+            </div>
+          </td>
+        </tr>
+      </table>
+
+    </td>
+  </tr>
+</table>
+</div>
+</div>
+<hr class="sep" />
+<div class="item">
+  <div class="meta">
+    <div class="name">Invite user</div>
+    <div class="subject">Subject: You're invited to VectaSec</div>
+    <div class="source">docs/email-templates/invite.html</div>
+  </div>
+  <div class="frame">
+
+
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+  Accept your invitation and set a password to get into your VectaSec console.
+  &#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f2f2f0;padding:44px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(16,12,32,0.04),0 12px 32px rgba(16,12,32,0.08);">
+
+        
+        <tr>
+          <td bgcolor="#4c1d95" style="background-color:#4c1d95;background-image:linear-gradient(135deg,#6d28d9 0%,#4c1d95 55%,#2e1065 100%);padding:26px 36px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+              <tr>
+                <td width="34" height="34" align="center" valign="middle" style="width:34px;height:34px;background:#ffffff;border-radius:9px;color:#4c1d95;font-size:17px;font-weight:700;line-height:34px;text-align:center;">V</td>
+                <td style="padding-left:12px;">
+                  <div style="font-size:15px;font-weight:700;letter-spacing:0.18em;color:#ffffff;line-height:1.2;">VECTASEC</div>
+                  <div style="font-size:11px;color:#c9b8f5;line-height:1.4;padding-top:2px;">integration-layer security posture</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        
+        <tr>
+          <td style="padding:36px;">
+
+            <h1 style="margin:0 0 12px;font-size:25px;line-height:1.25;font-weight:600;letter-spacing:-0.025em;color:#0b0b0b;">You&rsquo;ve been invited</h1>
+            <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#52514e;">
+              You&rsquo;ve been invited to join a VectaSec workspace. Accept below and you&rsquo;ll be asked to set a password &mdash; after that you&rsquo;re in.
+            </p>
+
+            
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:26px;">
+              <tr>
+                <td bgcolor="#6d28d9" align="center" style="background-color:#6d28d9;background-image:linear-gradient(180deg,#7c3aed 0%,#6d28d9 100%);border-radius:10px;box-shadow:0 2px 8px rgba(109,40,217,0.28);">
+                  <a href="https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback" style="display:inline-block;padding:14px 32px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;letter-spacing:-0.005em;">Accept invitation</a>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin:0 0 28px;font-size:12px;line-height:1.6;color:#8a8880;">
+              Or paste this link into your browser:<br />
+              <a href="https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback" style="color:#6d28d9;word-break:break-all;text-decoration:none;">https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback</a>
+            </p>
+
+            
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f7f5ff;border:1px solid #e6dffb;border-radius:11px;">
+              <tr>
+                <td style="padding:14px 16px;font-size:12.5px;line-height:1.6;color:#5b5570;">
+                  <strong style="color:#3f2d70;">Not expecting this?</strong> You can ignore this email &mdash; the invitation expires on its own and no account is created until you accept.
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+      </table>
+
+      
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;">
+        <tr>
+          <td align="center" style="padding:22px 16px 0;">
+            <div style="font-size:11.5px;line-height:1.6;color:#8a8880;">
+              VectaSec &middot; continuous security posture for the integration layer
+            </div>
+            <div style="font-size:11px;line-height:1.6;color:#a3a099;padding-top:4px;">
+              This is an automated message &mdash; please don&rsquo;t reply.
+            </div>
+          </td>
+        </tr>
+      </table>
+
+    </td>
+  </tr>
+</table>
+</div>
+</div>
+<hr class="sep" />
+<div class="item">
+  <div class="meta">
+    <div class="name">Reset password</div>
+    <div class="subject">Subject: Reset your VectaSec password</div>
+    <div class="source">docs/email-templates/reset-password.html</div>
+  </div>
+  <div class="frame">
+
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+  Use the link inside to choose a new password for your VectaSec account.
+  &#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f2f2f0;padding:44px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(16,12,32,0.04),0 12px 32px rgba(16,12,32,0.08);">
+
+        <tr>
+          <td bgcolor="#4c1d95" style="background-color:#4c1d95;background-image:linear-gradient(135deg,#6d28d9 0%,#4c1d95 55%,#2e1065 100%);padding:26px 36px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+              <tr>
+                <td width="34" height="34" align="center" valign="middle" style="width:34px;height:34px;background:#ffffff;border-radius:9px;color:#4c1d95;font-size:17px;font-weight:700;line-height:34px;text-align:center;">V</td>
+                <td style="padding-left:12px;">
+                  <div style="font-size:15px;font-weight:700;letter-spacing:0.18em;color:#ffffff;line-height:1.2;">VECTASEC</div>
+                  <div style="font-size:11px;color:#c9b8f5;line-height:1.4;padding-top:2px;">integration-layer security posture</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:36px;">
+
+            <h1 style="margin:0 0 12px;font-size:25px;line-height:1.25;font-weight:600;letter-spacing:-0.025em;color:#0b0b0b;">Reset your password</h1>
+            <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#52514e;">
+              We received a request to reset the password for <strong style="color:#0b0b0b;">dchinnappa@vibrantinc.com</strong>. Choose a new one below.
+            </p>
+
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:26px;">
+              <tr>
+                <td bgcolor="#6d28d9" align="center" style="background-color:#6d28d9;background-image:linear-gradient(180deg,#7c3aed 0%,#6d28d9 100%);border-radius:10px;box-shadow:0 2px 8px rgba(109,40,217,0.28);">
+                  <a href="https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback" style="display:inline-block;padding:14px 32px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;letter-spacing:-0.005em;">Set a new password</a>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin:0 0 28px;font-size:12px;line-height:1.6;color:#8a8880;">
+              Or paste this link into your browser:<br />
+              <a href="https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback" style="color:#6d28d9;word-break:break-all;text-decoration:none;">https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback</a>
+            </p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f7f5ff;border:1px solid #e6dffb;border-radius:11px;">
+              <tr>
+                <td style="padding:14px 16px;font-size:12.5px;line-height:1.6;color:#5b5570;">
+                  <strong style="color:#3f2d70;">Didn&rsquo;t request this?</strong> Ignore this email &mdash; your password stays as it is, and this link expires on its own.
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+      </table>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;">
+        <tr>
+          <td align="center" style="padding:22px 16px 0;">
+            <div style="font-size:11.5px;line-height:1.6;color:#8a8880;">
+              VectaSec &middot; continuous security posture for the integration layer
+            </div>
+            <div style="font-size:11px;line-height:1.6;color:#a3a099;padding-top:4px;">
+              This is an automated message &mdash; please don&rsquo;t reply.
+            </div>
+          </td>
+        </tr>
+      </table>
+
+    </td>
+  </tr>
+</table>
+</div>
+</div>
+<hr class="sep" />
+<div class="item">
+  <div class="meta">
+    <div class="name">Magic Link</div>
+    <div class="subject">Subject: Your VectaSec sign-in link</div>
+    <div class="source">docs/email-templates/magic-link.html</div>
+  </div>
+  <div class="frame">
+
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+  Your one-time link to sign in to the VectaSec console.
+  &#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f2f2f0;padding:44px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(16,12,32,0.04),0 12px 32px rgba(16,12,32,0.08);">
+
+        <tr>
+          <td bgcolor="#4c1d95" style="background-color:#4c1d95;background-image:linear-gradient(135deg,#6d28d9 0%,#4c1d95 55%,#2e1065 100%);padding:26px 36px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+              <tr>
+                <td width="34" height="34" align="center" valign="middle" style="width:34px;height:34px;background:#ffffff;border-radius:9px;color:#4c1d95;font-size:17px;font-weight:700;line-height:34px;text-align:center;">V</td>
+                <td style="padding-left:12px;">
+                  <div style="font-size:15px;font-weight:700;letter-spacing:0.18em;color:#ffffff;line-height:1.2;">VECTASEC</div>
+                  <div style="font-size:11px;color:#c9b8f5;line-height:1.4;padding-top:2px;">integration-layer security posture</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:36px;">
+
+            <h1 style="margin:0 0 12px;font-size:25px;line-height:1.25;font-weight:600;letter-spacing:-0.025em;color:#0b0b0b;">Your sign-in link</h1>
+            <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#52514e;">
+              Open the link below to sign in to your VectaSec console. It works once, and only in the browser you open it in.
+            </p>
+
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:26px;">
+              <tr>
+                <td bgcolor="#6d28d9" align="center" style="background-color:#6d28d9;background-image:linear-gradient(180deg,#7c3aed 0%,#6d28d9 100%);border-radius:10px;box-shadow:0 2px 8px rgba(109,40,217,0.28);">
+                  <a href="https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback" style="display:inline-block;padding:14px 32px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;letter-spacing:-0.005em;">Sign in to VectaSec</a>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin:0 0 28px;font-size:12px;line-height:1.6;color:#8a8880;">
+              Or paste this link into your browser:<br />
+              <a href="https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback" style="color:#6d28d9;word-break:break-all;text-decoration:none;">https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback</a>
+            </p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f7f5ff;border:1px solid #e6dffb;border-radius:11px;">
+              <tr>
+                <td style="padding:14px 16px;font-size:12.5px;line-height:1.6;color:#5b5570;">
+                  <strong style="color:#3f2d70;">Never forward this email.</strong> Anyone holding the link can sign in as you. Didn&rsquo;t ask for it? Ignore this &mdash; the link expires unused.
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+      </table>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;">
+        <tr>
+          <td align="center" style="padding:22px 16px 0;">
+            <div style="font-size:11.5px;line-height:1.6;color:#8a8880;">
+              VectaSec &middot; continuous security posture for the integration layer
+            </div>
+            <div style="font-size:11px;line-height:1.6;color:#a3a099;padding-top:4px;">
+              This is an automated message &mdash; please don&rsquo;t reply.
+            </div>
+          </td>
+        </tr>
+      </table>
+
+    </td>
+  </tr>
+</table>
+</div>
+</div>
+<hr class="sep" />
+<div class="item">
+  <div class="meta">
+    <div class="name">Change Email Address</div>
+    <div class="subject">Subject: Confirm your new email address</div>
+    <div class="source">docs/email-templates/change-email.html</div>
+  </div>
+  <div class="frame">
+
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+  Confirm the email address change on your VectaSec account.
+  &#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f2f2f0;padding:44px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(16,12,32,0.04),0 12px 32px rgba(16,12,32,0.08);">
+
+        <tr>
+          <td bgcolor="#4c1d95" style="background-color:#4c1d95;background-image:linear-gradient(135deg,#6d28d9 0%,#4c1d95 55%,#2e1065 100%);padding:26px 36px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+              <tr>
+                <td width="34" height="34" align="center" valign="middle" style="width:34px;height:34px;background:#ffffff;border-radius:9px;color:#4c1d95;font-size:17px;font-weight:700;line-height:34px;text-align:center;">V</td>
+                <td style="padding-left:12px;">
+                  <div style="font-size:15px;font-weight:700;letter-spacing:0.18em;color:#ffffff;line-height:1.2;">VECTASEC</div>
+                  <div style="font-size:11px;color:#c9b8f5;line-height:1.4;padding-top:2px;">integration-layer security posture</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:36px;">
+
+            <h1 style="margin:0 0 12px;font-size:25px;line-height:1.25;font-weight:600;letter-spacing:-0.025em;color:#0b0b0b;">Confirm your new email</h1>
+            <p style="margin:0 0 28px;font-size:15px;line-height:1.65;color:#52514e;">
+              A request was made to change the email on your VectaSec account from
+              <strong style="color:#0b0b0b;">dchinnappa@vibrantinc.com</strong> to
+              <strong style="color:#0b0b0b;">dishanth@vectasec.com</strong>. Confirm to complete the change.
+            </p>
+
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:26px;">
+              <tr>
+                <td bgcolor="#6d28d9" align="center" style="background-color:#6d28d9;background-image:linear-gradient(180deg,#7c3aed 0%,#6d28d9 100%);border-radius:10px;box-shadow:0 2px 8px rgba(109,40,217,0.28);">
+                  <a href="https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback" style="display:inline-block;padding:14px 32px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;letter-spacing:-0.005em;">Confirm email change</a>
+                </td>
+              </tr>
+            </table>
+
+            <p style="margin:0 0 28px;font-size:12px;line-height:1.6;color:#8a8880;">
+              Or paste this link into your browser:<br />
+              <a href="https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback" style="color:#6d28d9;word-break:break-all;text-decoration:none;">https://evuyyttvmffxtxmaxpjo.supabase.co/auth/v1/verify?token=8f3c2e91b4&type=invite&redirect_to=https://vecta-sec-web.vercel.app/auth/callback</a>
+            </p>
+
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#fdf1f1;border:1px solid #f5d5d5;border-radius:11px;">
+              <tr>
+                <td style="padding:14px 16px;font-size:12.5px;line-height:1.6;color:#7a4a4a;">
+                  <strong style="color:#8f2a2a;">Didn&rsquo;t request this?</strong> Do not confirm it. Reset your password immediately &mdash; someone may have access to your account.
+                </td>
+              </tr>
+            </table>
+
+          </td>
+        </tr>
+      </table>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;">
+        <tr>
+          <td align="center" style="padding:22px 16px 0;">
+            <div style="font-size:11.5px;line-height:1.6;color:#8a8880;">
+              VectaSec &middot; continuous security posture for the integration layer
+            </div>
+            <div style="font-size:11px;line-height:1.6;color:#a3a099;padding-top:4px;">
+              This is an automated message &mdash; please don&rsquo;t reply.
+            </div>
+          </td>
+        </tr>
+      </table>
+
+    </td>
+  </tr>
+</table>
+</div>
+</div>
+<hr class="sep" />
+<div class="item">
+  <div class="meta">
+    <div class="name">Sign-in notification</div>
+    <div class="subject">Subject: New sign-in to your VectaSec account</div>
+    <div class="source">apps/web/lib/email.ts (sent by the app, not Supabase)</div>
+  </div>
+  <div class="frame"><div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">
+  Your VectaSec account was just signed in to on Tue, 28 Jul 2026 16:42:10 GMT.
+</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f2f2f0;padding:44px 16px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(16,12,32,0.04),0 12px 32px rgba(16,12,32,0.08);">
+        <tr>
+          <td bgcolor="#4c1d95" style="background-color:#4c1d95;background-image:linear-gradient(135deg,#6d28d9 0%,#4c1d95 55%,#2e1065 100%);padding:26px 36px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+              <tr>
+                <td width="34" height="34" align="center" valign="middle" style="width:34px;height:34px;background:#ffffff;border-radius:9px;color:#4c1d95;font-size:17px;font-weight:700;line-height:34px;text-align:center;">V</td>
+                <td style="padding-left:12px;">
+                  <div style="font-size:15px;font-weight:700;letter-spacing:0.18em;color:#ffffff;line-height:1.2;">VECTASEC</div>
+                  <div style="font-size:11px;color:#c9b8f5;line-height:1.4;padding-top:2px;">integration-layer security posture</div>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:36px;">
+            <h1 style="margin:0 0 12px;font-size:25px;line-height:1.25;font-weight:600;letter-spacing:-0.025em;color:#0b0b0b;">New sign-in to your account</h1>
+            <p style="margin:0 0 22px;font-size:15px;line-height:1.65;color:#52514e;">
+              Your VectaSec account <strong style="color:#0b0b0b;">dchinnappa@vibrantinc.com</strong> was just signed in to.
+            </p>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#faf9f7;border:1px solid #ececea;border-radius:11px;margin-bottom:26px;">
+              <tr>
+                <td style="padding:14px 16px;">
+                  <div style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#8a8880;">Signed in at</div>
+                  <div style="font-size:14px;color:#0b0b0b;padding-top:3px;">Tue, 28 Jul 2026 16:42:10 GMT</div>
+                </td>
+              </tr>
+            </table>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background:#f7f5ff;border:1px solid #e6dffb;border-radius:11px;">
+              <tr>
+                <td style="padding:14px 16px;font-size:12.5px;line-height:1.6;color:#5b5570;">
+                  <strong style="color:#3f2d70;">Wasn&rsquo;t you?</strong> Reset your password now:<br />
+                  <a href="https://vecta-sec-web.vercel.app/forgot-password" style="color:#6d28d9;word-break:break-all;text-decoration:none;">https://vecta-sec-web.vercel.app/forgot-password</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;max-width:520px;">
+        <tr>
+          <td align="center" style="padding:22px 16px 0;">
+            <div style="font-size:11.5px;line-height:1.6;color:#8a8880;">
+              VectaSec &middot; continuous security posture for the integration layer
+            </div>
+            <div style="font-size:11px;line-height:1.6;color:#a3a099;padding-top:4px;">
+              This is an automated message &mdash; please don&rsquo;t reply.
+            </div>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table></div>
+</div>
+<hr class="sep" />
+</body></html>
