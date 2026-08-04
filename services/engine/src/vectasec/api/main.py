@@ -527,15 +527,41 @@ def get_scan(scan_id: uuid.UUID, p: Principal = Depends(principal)) -> dict:
 # (PostgREST + RLS, config never selected); everything here changes state or starts work, so
 # it lives behind an authenticated actor + audit row like every other action.
 
+def rule_owner(rule_id: str) -> str:
+    """Which connector type a rule id belongs to. FIRST-SEGMENT-WINS, second-segment-fallback.
+
+    Most rule ids lead with their connector (KAFKA.ACL.*), but a rule may lead with the
+    CAPABILITY it serves when it belongs to one — SUPPLY.IAC.* is integration-as-code analysis,
+    filed under the supply-chain capability the README promises it under, and would otherwise be
+    attributed to a connector named "supply" that does not exist. Falling back to the second
+    segment finds those.
+
+    The fallback must NOT apply when the first segment is already a connector type, or
+    DISCOVERY.MCP.UNMANAGED_SURFACE — a discovery rule that happens to concern MCP — is counted
+    twice, once for `discovery` and again for `mcp`, inflating both pickers. Exactly one rule in
+    the registry has that shape today, which is precisely why it is easy to get wrong.
+
+    Returns the first segment for a rule that matches nothing, so an unattributable rule is
+    simply counted nowhere rather than crashing the catalogue.
+    """
+    parts = rule_id.split(".")
+    head = parts[0].lower()
+    if head in {t.lower() for t in CONNECTORS}:
+        return head
+    return parts[1].lower() if len(parts) > 1 else head
+
+
 @app.get("/connectors")
 def connectors(p: Principal = Depends(principal)) -> dict:
     """The connector catalogue: what can be connected and what a human must supply to
     connect it. Driven by the registry, so a dropped-in connector file shows up here — and
     in the console's form — with no list to edit. `rules` counts the detectors whose
-    rule_id prefix belongs to the type, because "20 checks" is what the form's picker says."""
+    rule_id prefix belongs to the type, because "20 checks" is what the form's picker says.
+
+    Attribution is rule_owner()'s job — see the note there."""
     out = []
     for type_ in sorted(CONNECTORS):
-        rules = sum(1 for d in DETECTORS if d.rule_id.split(".")[0].lower() == type_)
+        rules = sum(1 for d in DETECTORS if rule_owner(d.rule_id) == type_)
         out.append({
             "type": type_,
             "rules": rules,

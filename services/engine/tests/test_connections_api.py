@@ -89,13 +89,33 @@ def test_connectors_catalogue_shape(monkeypatch):
 
 def test_connectors_rule_counts_match_registry(monkeypatch):
     """The picker says "N checks"; N must be the registry's truth, not a hardcode."""
+    from vectasec.api.main import rule_owner
     from vectasec.registry import DETECTORS
     monkeypatch.setenv("VECTASEC_DEV_TRUST_HEADERS", "1")
     client = TestClient(app)
     for entry in client.get("/connectors").json()["connectors"]:
-        expected = sum(1 for d in DETECTORS
-                       if d.rule_id.split(".")[0].lower() == entry["type"])
+        expected = sum(1 for d in DETECTORS if rule_owner(d.rule_id) == entry["type"])
         assert entry["rules"] == expected
+
+
+def test_no_rule_is_counted_for_two_connectors(monkeypatch):
+    """The catalogue's counts must partition the registry, not overlap it. DISCOVERY.MCP.* is
+    the shape that breaks a naive "match either segment" attribution: it would be counted for
+    both `discovery` and `mcp`, so both pickers would overstate their coverage."""
+    from vectasec.registry import DETECTORS
+    monkeypatch.setenv("VECTASEC_DEV_TRUST_HEADERS", "1")
+    client = TestClient(app)
+    total_claimed = sum(e["rules"] for e in client.get("/connectors").json()["connectors"])
+    assert total_claimed <= len(DETECTORS), "a rule is being counted under two connectors"
+
+
+def test_capability_prefixed_rules_are_attributed_to_their_connector():
+    """SUPPLY.IAC.* leads with the capability, not the connector. Without the fallback the iac
+    connector advertises "0 checks" in the console's picker while shipping a full rulepack."""
+    from vectasec.api.main import rule_owner
+    assert rule_owner("SUPPLY.IAC.LITERAL_SECRET") == "iac"
+    assert rule_owner("KAFKA.ACL.WILDCARD") == "kafka"
+    assert rule_owner("DISCOVERY.MCP.UNMANAGED_SURFACE") == "discovery"
 
 
 # ── CLI flag → config assembly ─────────────────────────────────────────────

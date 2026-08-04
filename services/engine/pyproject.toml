@@ -17,6 +17,7 @@ dependencies = [
   "kubernetes>=29.0",         # k8s connector (read-only CRD posture: Istio/Linkerd/ingress/mesh)
   "grpcio>=1.60",             # rpc connector (gRPC server-reflection posture)
   "grpcio-reflection>=1.60",  # rpc connector (reflection client stubs)
+  "pyyaml>=6.0",              # iac connector (parses compose / k8s manifests, read-only)
 ]
 
 [dependency-groups]

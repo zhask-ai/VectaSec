@@ -9,6 +9,10 @@ pool state):
                    admin_users, stats_users, auth_file (the security-relevant ones)
   SHOW DATABASES   the pooled databases and any pinned backend user (force_user / auth_user)
   SHOW USERS       the configured client users + their pool mode (the NHI material)
+  SHOW CLIENTS     the RUNTIME half — who is connected to the pooler right now (user, database,
+                   source address, and whether that client's own socket is TLS). A pooler is
+                   the one place in an estate where every database client is visible at once,
+                   which makes this the highest-yield runtime source we have short of a sensor.
 
 Credential-reduction discipline (same contract as the Redis/RabbitMQ connectors): SHOW commands
 never return a password value — PgBouncer masks connection-string passwords and the userlist
@@ -16,7 +20,10 @@ hashes are not exposed here — so the NHI layer records that a stored credentia
 hashing shape (inferred from auth_type), never a secret. The admin password used to connect lives
 only in the psycopg conninfo and is never copied into a Resource.
 
-Kinds are DISTINCT (pgbouncer_pool, pgbouncer_database, pgbouncer_user).
+Kinds are DISTINCT (pgbouncer_pool, pgbouncer_database, pgbouncer_user) — except live clients,
+which are emitted as the shared `runtime_client` kind that detect/runtime.py owns, because "a
+shared admin account is connected right now from a public address" is the same finding wherever
+the socket lands. See the same note in connect/nats.py.
 
 Split for offline testing:
   collect(config)        opens the psycopg connection, runs the SHOW commands
@@ -80,8 +87,102 @@ def _parse_users(rows) -> list:
     return out
 
 
+def _parse_clients(rows) -> list:
+    """SHOW CLIENTS rows → the live-client facts we keep.
+
+    Only the columns that carry security meaning survive: who (`user`), against what
+    (`database`), from where (`addr`), over what (`tls`), and since when (`connect_time`).
+    Query text is never present in SHOW CLIENTS output, and we do not go looking for it —
+    a posture tool has no business collecting the statements an application runs.
+    """
+    out = []
+    for row in rows or []:
+        user = row.get("user")
+        if user is None:
+            continue
+        out.append({
+            "user": user,
+            "database": row.get("database"),
+            "addr": row.get("addr"),
+            "port": row.get("port"),
+            "state": row.get("state"),
+            # PgBouncer 1.14+ reports the client's own TLS as a version string, or an empty
+            # string when the client connected in plaintext. Older builds omit the column
+            # entirely — which is UNKNOWN, not "no TLS", and must stay distinguishable.
+            "tls": row.get("tls"),
+            "tls_reported": "tls" in row,
+            "connect_time": row.get("connect_time"),
+        })
+    return out
+
+
+def _build_runtime_clients(clients: list, pool_ext: str) -> tuple[list, list]:
+    """Live pooler clients → `runtime_client` resources, aggregated by (user, database, addr).
+
+    Aggregated for the same reason as NATS: an app server holds a pool of sockets under one
+    role from one host, and one finding per socket would bury the one fact that matters.
+    """
+    agg: dict[tuple, dict] = {}
+    for c in clients or []:
+        user = str(c.get("user"))
+        database = str(c.get("database") or "")
+        addr = str(c.get("addr") or "unknown")
+        slot = agg.setdefault((user, database, addr), {
+            "connections": 0, "tls": set(), "states": set(), "tls_reported": False,
+            "earliest_connect": None,
+        })
+        slot["connections"] += 1
+        if c.get("tls_reported"):
+            slot["tls_reported"] = True
+            slot["tls"].add(bool(str(c.get("tls") or "").strip()))
+        if c.get("state"):
+            slot["states"].add(str(c["state"]))
+        ct = c.get("connect_time")
+        if ct and (slot["earliest_connect"] is None or str(ct) < slot["earliest_connect"]):
+            slot["earliest_connect"] = str(ct)
+
+    resources: list[Resource] = []
+    edges: list[Edge] = []
+    for (user, database, addr), a in sorted(agg.items()):
+        # tls_all stays None when this PgBouncer build never reported the column: the rulepack
+        # then says the transport could not be read, instead of asserting plaintext.
+        all_tls = (a["tls"] == {True}) if a["tls_reported"] else None
+        ext = f"runtime-{user}@{database}-{addr}"
+        resources.append(Resource(
+            kind="runtime_client",
+            name=f"{user}@{database} from {addr}",
+            ext_id=ext,
+            namespace=database or None,
+            labels={
+                "principal": user,
+                "database": database,
+                "peer_host": addr,
+                "connections": str(a["connections"]),
+                "tls": str(all_tls).lower() if all_tls is not None else "unknown",
+                "source": "pgbouncer-show-clients",
+            },
+            raw={
+                "principal": user,
+                "principal_known": True,   # SHOW CLIENTS always names the authenticated role
+                "database": database,
+                "vhost": database,         # the scope key runtime_evidence folds on
+                "peer_host": addr,
+                "connections": a["connections"],
+                "tls_all": all_tls,
+                "tls_mixed": len(a["tls"]) > 1,
+                "states": sorted(a["states"]),
+                "earliest_connected_at": a["earliest_connect"],
+                "pool_ext": pool_ext,
+                "observed_via": "SHOW CLIENTS",
+            },
+        ))
+        edges.append(Edge(src_ext_id=ext, dst_ext_id=pool_ext, kind="uses"))
+        edges.append(Edge(src_ext_id=ext, dst_ext_id=f"pgbouncer-user-{user}", kind="acts_as"))
+    return resources, edges
+
+
 def _build_resources(config: dict, databases: list, users: list, *,
-                     config_readable: bool, outcomes: dict) -> Collected:
+                     config_readable: bool, outcomes: dict, clients: list | None = None) -> Collected:
     config = config or {}
     admin_users = _split_list(config.get("admin_users"))
     stats_users = _split_list(config.get("stats_users"))
@@ -108,6 +209,7 @@ def _build_resources(config: dict, databases: list, users: list, *,
             "max_client_conn": config.get("max_client_conn"),
             "ignore_startup_parameters": config.get("ignore_startup_parameters"),
             "databases_count": len(databases or []),
+            "live_client_count": len(clients or []),
             "endpoint_outcomes": outcomes or {},
         },
     ))
@@ -131,6 +233,10 @@ def _build_resources(config: dict, databases: list, users: list, *,
             labels={"is_admin": "true" if str(name).lower() in admin_set else "false"},
             raw={**u, "is_admin": str(name).lower() in admin_set, "pool_ext": pool_ext},
         ))
+
+    rt_resources, rt_edges = _build_runtime_clients(clients or [], pool_ext)
+    resources.extend(rt_resources)
+    edges.extend(rt_edges)
 
     return Collected(resources=resources, edges=edges)
 
@@ -170,6 +276,7 @@ def collect(config: dict) -> Collected:
     cfg: dict = {}
     databases: list = []
     users: list = []
+    clients: list = []
     config_readable = False
 
     def _rows(cur):
@@ -199,12 +306,21 @@ def collect(config: dict) -> Collected:
                     outcomes["users"] = "ok"
                 except psycopg.Error as e:
                     outcomes["users"] = f"error: {type(e).__name__}: {e}"
+                try:
+                    cur.execute("SHOW CLIENTS")
+                    clients = _parse_clients(_rows(cur))
+                    outcomes["clients"] = "ok"
+                except psycopg.Error as e:
+                    # A stats-only user can read CONFIG but not CLIENTS. That is a coverage
+                    # boundary worth recording, not a scan failure: the posture half is still
+                    # entirely valid without the runtime half.
+                    outcomes["clients"] = f"error: {type(e).__name__}: {e}"
     finally:
         conn.close()
 
     cfg["_target"] = f"{host}:{port}"
     return _build_resources(cfg, databases, users, config_readable=config_readable,
-                            outcomes=outcomes)
+                            outcomes=outcomes, clients=clients)
 
 
 # ── NHI: pgbouncer users → identity + credential, backends → identity/credential ──

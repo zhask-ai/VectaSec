@@ -17,46 +17,150 @@
       "system_account": "SYS"
     }
   },
-  "jsz": {"total": 3, "streams": 12},
-  "connz": {"num_connections": 5},
+  "jsz": {
+    "total": 3,
+    "streams": 12
+  },
+  "connz": {
+    "num_connections": 4,
+    "connections": [
+      {
+        "cid": 1,
+        "ip": "10.0.4.9",
+        "port": 51820,
+        "lang": "go",
+        "version": "1.31.0",
+        "name": "orders-worker",
+        "subscriptions": 3,
+        "start": "2026-07-02T09:11:00Z"
+      },
+      {
+        "cid": 2,
+        "ip": "93.184.216.34",
+        "port": 44120,
+        "authorized_user": "admin",
+        "account": "APP",
+        "lang": "java",
+        "tls_version": "1.3",
+        "subscriptions": 12,
+        "start": "2026-07-01T22:03:00Z"
+      },
+      {
+        "cid": 3,
+        "ip": "93.184.216.34",
+        "port": 44121,
+        "authorized_user": "admin",
+        "account": "APP",
+        "lang": "java",
+        "tls_version": "1.3",
+        "subscriptions": 5,
+        "start": "2026-07-01T21:59:00Z"
+      },
+      {
+        "cid": 4,
+        "ip": "10.0.4.10",
+        "port": 51999,
+        "authorized_user": "billing-svc",
+        "account": "APP",
+        "lang": "go",
+        "tls_version": "1.3",
+        "subscriptions": 2,
+        "start": "2026-07-02T10:00:00Z"
+      }
+    ]
+  },
   "config": {
     "insecure": {
       "system_account": "SYS",
       "no_auth_user": "sysadmin",
       "accounts": {
         "SYS": {
-          "users": [{"user": "sysadmin", "password": "REDACTED"}]
+          "users": [
+            {
+              "user": "sysadmin",
+              "password": "REDACTED"
+            }
+          ]
         },
         "APP": {
           "jetstream": true,
           "users": [
-            {"user": "app", "password": "REDACTED",
-             "permissions": {"publish": {"allow": ["orders.>"]},
-                             "subscribe": {"allow": ["_INBOX.>"]}}},
-            {"user": "nocred"}
+            {
+              "user": "app",
+              "password": "REDACTED",
+              "permissions": {
+                "publish": {
+                  "allow": [
+                    "orders.>"
+                  ]
+                },
+                "subscribe": {
+                  "allow": [
+                    "_INBOX.>"
+                  ]
+                }
+              }
+            },
+            {
+              "user": "nocred"
+            }
           ]
         }
       },
-      "leafnodes": {"port": 7422},
-      "gateway": {"name": "east", "port": 7222}
+      "leafnodes": {
+        "port": 7422
+      },
+      "gateway": {
+        "name": "east",
+        "port": 7222
+      }
     },
     "hardened": {
       "system_account": "SYS",
       "accounts": {
         "SYS": {
-          "users": [{"user": "sysadmin", "nkey": "UBSYSADMINPUBLICKEY"}]
+          "users": [
+            {
+              "user": "sysadmin",
+              "nkey": "UBSYSADMINPUBLICKEY"
+            }
+          ]
         },
         "APP": {
           "jetstream": true,
           "users": [
-            {"user": "app", "password": "REDACTED",
-             "permissions": {"publish": {"allow": ["orders.>"]},
-                             "subscribe": {"allow": ["_INBOX.>"]}}}
+            {
+              "user": "app",
+              "password": "REDACTED",
+              "permissions": {
+                "publish": {
+                  "allow": [
+                    "orders.>"
+                  ]
+                },
+                "subscribe": {
+                  "allow": [
+                    "_INBOX.>"
+                  ]
+                }
+              }
+            }
           ]
         }
       },
-      "leafnodes": {"port": 7422, "tls": {"cert_file": "leaf.pem"}},
-      "gateway": {"name": "east", "port": 7222, "tls": {"cert_file": "gw.pem"}}
+      "leafnodes": {
+        "port": 7422,
+        "tls": {
+          "cert_file": "leaf.pem"
+        }
+      },
+      "gateway": {
+        "name": "east",
+        "port": 7222,
+        "tls": {
+          "cert_file": "gw.pem"
+        }
+      }
     }
   }
 }

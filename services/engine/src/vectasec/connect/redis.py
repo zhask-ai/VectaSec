@@ -248,6 +248,12 @@ def collect(config: dict) -> Collected:
                     "client_libraries": sorted(agg["libs"]),
                     "max_age_seconds": agg["max_age"],
                     "min_idle_seconds": agg["min_idle"],
+                    # EXPLICIT unknown, not an absent key. CLIENT LIST reports no per-connection
+                    # TLS indicator in any Redis version (the field simply does not exist), so
+                    # RUNTIME.TRANSPORT.PLAINTEXT_IN_USE must report a coverage gap here rather
+                    # than assert plaintext. Writing the None makes that contract visible to the
+                    # next reader instead of leaving it to a .get() default.
+                    "tls_all": None,
                     "server_ext": server_ext,
                     "observed_via": "CLIENT LIST",
                 },

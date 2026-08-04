@@ -121,6 +121,18 @@ export const CONNECTORS: ConnectorSpec[] = [
     ],
   },
   {
+    type: "discovery",
+    label: "Network discovery",
+    blurb: "Read-only, pre-auth fingerprinting of declared hosts/CIDRs — finds shadow middleware without sending a credential.",
+    rules: 9,
+    fields: [
+      { key: "targets", label: "Targets", required: true, placeholder: "10.0.0.0/24, kafka.internal:9092, 10.1.2.3", help: "Hosts, host:port, or CIDRs to probe — comma or newline separated. Only what you name here is ever contacted, and only if you are authorized to probe it." },
+      { key: "ports", label: "Ports", placeholder: "9092, 6379, 5672", help: "Override the default middleware port set for targets that do not name their own port." },
+      { key: "allow_public", label: "Allow public IP ranges", placeholder: "false", help: "Off by default. Set true ONLY if you are authorized to scan the public addresses you named — scanning hosts you do not own is not something to do by accident." },
+      { key: "timeout", label: "Per-probe timeout (seconds)", placeholder: "3" },
+    ],
+  },
+  {
     type: "elasticsearch",
     label: "Elasticsearch / OpenSearch",
     blurb: "Search cluster — anonymous access, security-plugin state, transport/HTTP TLS, CORS.",
@@ -210,7 +222,7 @@ export const CONNECTORS: ConnectorSpec[] = [
     type: "kafka",
     label: "Apache Kafka",
     blurb: "Brokers, topics, ACLs — listener security, authorization, footguns, durability posture.",
-    rules: 23,
+    rules: 24,
     fields: [
       { key: "bootstrap", label: "Bootstrap servers", required: true, placeholder: "broker-1:9092,broker-2:9092", help: "Comma-separated host:port list the engine or worker can reach. Read-only AdminClient — nothing is written to the cluster." },
     ],
@@ -321,6 +333,17 @@ export const CONNECTORS: ConnectorSpec[] = [
     fields: [
       { key: "base_url", label: "Instance URL", required: true, placeholder: "https://n8n.example.com", help: "Root URL of the n8n instance. The public API is read under {base}/api/v1; GETs only, plus one unauthenticated GET {base}/rest/settings." },
       { key: "api_key", label: "API key", secret: true, help: "An n8n public-API key (X-N8N-API-KEY). Use a key scoped to workflow:read, user:read and audit — the connector never creates, updates, or deletes." },
+    ],
+  },
+  {
+    type: "iac",
+    label: "Deployment manifests",
+    blurb: "Integration-as-code — literal secrets, default credentials, anonymous access, plaintext listeners, unpinned images.",
+    rules: 8,
+    fields: [
+      { key: "source_path", label: "Manifest path", placeholder: "/srv/deploy", help: "A directory or single file the engine can read. Walked read-only for docker-compose files, Kubernetes workload manifests and Kafka Connect connector JSON. Nothing is written and no repository is cloned." },
+      { key: "source_text", label: "Manifest text", help: "Paste a manifest instead of giving a path — useful for CI, or when the repository is not on a filesystem the engine can reach." },
+      { key: "source_name", label: "Manifest name", placeholder: "docker-compose.yml", help: "Filename to attribute pasted text to, so findings point somewhere a human can open. Defaults to docker-compose.yml." },
     ],
   },
   {

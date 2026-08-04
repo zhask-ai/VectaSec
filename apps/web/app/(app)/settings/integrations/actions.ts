@@ -5,6 +5,7 @@ import { revalidatePath } from 'next/cache';
 import { engineDelete, enginePost } from '@/lib/engine';
 import { getOwnMembership, isAdmin } from '@/lib/role';
 import { getVerifiedUser } from '@/lib/supabase/server';
+import { CONNECTORS } from '../../connections/connector-fields';
 import { integrationSpecFor } from './integration-fields';
 
 /* Alert integrations and routing rules — admin-only, engine-written.
@@ -20,8 +21,9 @@ export type ActionState = { ok: boolean; message: string } | null;
 const DENIED = 'You are not signed in, or you are not an admin of this tenant. Nothing was sent.';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
-/** The connector types the engine registers (mirrors connections/page CONNECTOR_TYPES). */
-const CONNECTOR_TYPES = ['kafka', 'kong', 'rabbitmq', 'mcp'] as const;
+/** Valid connector-type filters — derived from the connector catalogue so every connector the
+ * picker offers is routable. A hardcoded copy here once rejected 35 of 39 types. */
+const CONNECTOR_TYPES: string[] = CONNECTORS.map((c) => c.type);
 
 function str(form: FormData, key: string): string {
   const v = form.get(key);

@@ -10,6 +10,10 @@ nothing:
                         These endpoints have NO authentication mechanism of their own (they are
                         meant to be network-isolated + TLS-fronted), which is itself a finding
                         surface — NATS.MONITORING.UNAUTHENTICATED.
+                        /connz is read with `?auth=1`, which is what makes the RUNTIME half
+                        possible: without that parameter NATS omits `authorized_user`/`account`
+                        from each connection, so every live client would be unattributable and
+                        the runtime rulepack could say nothing about WHO is connected.
   config (optional)     the account / authorization / no_auth_user / leafnode / gateway model,
                         supplied as JSON. nats-server's own config format is a JSON superset, so
                         an operator can hand us their nats-server.conf converted to JSON (or the
@@ -25,7 +29,11 @@ layer (build_resources) is pure: monitoring dicts + config dict in, Resources ou
 live server stay out of the test suite.
 
 Kinds are DISTINCT (nats_server, nats_account) so no other rulepack ever runs against a NATS
-resource — the same reason connect/redis.py refuses to reuse `broker`.
+resource — the same reason connect/redis.py refuses to reuse `broker`. The ONE exception is
+deliberate: live clients are emitted as `runtime_client`, the shared cross-connector kind that
+detect/runtime.py owns, because "a default account is in use over a plaintext socket" is the
+same finding whether the socket terminates in RabbitMQ, Redis or NATS. Writing a NATS-specific
+copy of those four rules would fragment the evidence model for no gain.
 """
 import json
 from urllib.parse import urlparse
@@ -104,6 +112,100 @@ def _resolve_no_auth_user(name, accounts: dict, global_users: list, system_accou
 
 def _has_tls_block(block) -> bool:
     return isinstance(block, dict) and bool(block.get("tls"))
+
+
+def _runtime_clients(connz: dict | None, server_ext: str) -> tuple[list, list]:
+    """Live NATS clients → `runtime_client` resources, aggregated by (principal, account, peer).
+
+    WHY AGGREGATE. A busy client library opens dozens of connections from one host under one
+    user. One resource per socket would file the same finding dozens of times and make the
+    console unreadable; the count is carried as a number instead, which is the fact that
+    actually matters ("47 live connections as `guest`" is the finding, not 47 findings).
+
+    TLS is read from `tls_version` — NATS reports that key per connection ONLY when the
+    connection is encrypted, so its absence is genuine evidence of a plaintext socket rather
+    than a gap in what we read. `authorized_user` is present only when the server has auth
+    enabled AND /connz was read with ?auth=1; when it is missing we set principal_known=False
+    rather than inventing a name, which is exactly what RUNTIME.IDENTITY.UNATTRIBUTED_CLIENT
+    exists to report.
+    """
+    conns = (connz or {}).get("connections")
+    if not isinstance(conns, list):
+        return [], []
+
+    agg: dict[tuple, dict] = {}
+    for c in conns:
+        if not isinstance(c, dict):
+            continue
+        user = c.get("authorized_user")
+        account = c.get("account") or "$G"
+        peer = str(c.get("ip") or "unknown")
+        key = (str(user) if user else None, str(account), peer)
+        slot = agg.setdefault(key, {
+            "connections": 0, "tls": set(), "langs": set(), "names": set(),
+            "tls_versions": set(), "subscriptions": 0, "earliest_start": None,
+        })
+        slot["connections"] += 1
+        # tls_version present ⇔ the socket is encrypted. NATS omits the key entirely otherwise.
+        tls_version = c.get("tls_version")
+        slot["tls"].add(bool(tls_version))
+        if tls_version:
+            slot["tls_versions"].add(str(tls_version))
+        if c.get("lang"):
+            slot["langs"].add(str(c["lang"]))
+        if c.get("name"):
+            slot["names"].add(str(c["name"]))
+        subs = c.get("subscriptions")
+        if isinstance(subs, int):
+            slot["subscriptions"] += subs
+        start = c.get("start")
+        if start and (slot["earliest_start"] is None or str(start) < slot["earliest_start"]):
+            slot["earliest_start"] = str(start)
+
+    resources: list[Resource] = []
+    edges: list[Edge] = []
+    for (user, account, peer), a in sorted(agg.items(), key=lambda kv: str(kv[0])):
+        all_tls = a["tls"] == {True}
+        label = f"{user or 'anonymous'}@{account} from {peer}"
+        ext = f"runtime-{user or 'anonymous'}@{account}-{peer}"
+        resources.append(Resource(
+            kind="runtime_client",
+            name=label,
+            ext_id=ext,
+            namespace=account,
+            labels={
+                "principal": str(user) if user else "",
+                "account": account,
+                "peer_host": peer,
+                "connections": str(a["connections"]),
+                "tls": str(all_tls).lower(),
+                "source": "nats-connz",
+            },
+            raw={
+                "principal": user,
+                # No authorized_user means the server could not name this client — either auth
+                # is off or it connected anonymously. Either way it is unrevocable individually.
+                "principal_known": user is not None,
+                "account": account,
+                # runtime_evidence.record_runtime folds `resource_ext` from vhost|server_ext;
+                # the NATS account is the equivalent scope, so it travels under `vhost`.
+                "vhost": account,
+                "peer_host": peer,
+                "connections": a["connections"],
+                "tls_all": all_tls,
+                "tls_mixed": len(a["tls"]) > 1,
+                "tls_versions": sorted(a["tls_versions"]),
+                "client_languages": sorted(a["langs"]),
+                "client_names": sorted(a["names"]),
+                "subscriptions": a["subscriptions"],
+                "earliest_connected_at": a["earliest_start"],
+                "server_ext": server_ext,
+                "observed_via": "GET /connz?auth=1",
+            },
+        ))
+        # Runtime edges: static grants say what is permitted, these say what happened.
+        edges.append(Edge(src_ext_id=ext, dst_ext_id=server_ext, kind="uses"))
+    return resources, edges
 
 
 def build_resources(*, varz: dict | None, jsz: dict | None, connz: dict | None,
@@ -191,6 +293,14 @@ def build_resources(*, varz: dict | None, jsz: dict | None, connz: dict | None,
     if global_users and "$G" not in accounts:
         _emit_account("$G", {}, global_users)
 
+    # Live clients (the runtime half). Absent when /connz was unreadable or returned no
+    # connections list — a server nobody is talking to and a server we could not read look
+    # identical here on purpose, and runtime_evidence.py is the layer allowed to reason about
+    # that silence, only once it has a window long enough to mean something.
+    rt_resources, rt_edges = _runtime_clients(connz, server_ext)
+    resources.extend(rt_resources)
+    edges.extend(rt_edges)
+
     return Collected(resources=resources, edges=edges)
 
 
@@ -243,7 +353,11 @@ def collect(config: dict) -> Collected:
                       follow_redirects=False, auth=None) as client:
         varz_res = _get(client, "/varz", auth)
         jsz_res = _get(client, "/jsz", auth)
-        connz_res = _get(client, "/connz", auth)
+        # auth=1 is what puts `authorized_user`/`account` on each connection — without it every
+        # live client is anonymous to us. subs=0 keeps the response small: subscription SUBJECTS
+        # can carry business data (customer ids in subject tokens), and this product has no
+        # reason to collect them.
+        connz_res = _get(client, "/connz?auth=1&subs=0", auth)
 
     return build_resources(
         varz=varz_res.get("data") if varz_res.get("ok") else None,

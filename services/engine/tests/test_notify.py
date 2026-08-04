@@ -31,6 +31,7 @@ from vectasec.notify import (
     send_jira,
     send_siem,
     send_slack,
+    send_teams,
     send_webhook,
     split_integration_config,
     validate_integration_config,
@@ -90,6 +91,38 @@ def test_slack_http_error_is_a_notify_error_not_a_crash():
     assert "500" in str(e.value)
     # The URL is a credential; the error text must not leak it.
     assert "hooks.slack.com" not in str(e.value)
+
+
+def test_teams_posts_an_adaptive_card_message_envelope():
+    """Teams incoming webhooks (Workflows trigger or legacy connector) both accept the
+    message envelope with an Adaptive Card attachment — assert exactly that shape."""
+    client, seen = capture_client(202)     # Workflows answers 202 Accepted
+    send_teams({"webhook_url": "https://prod-1.westus.logic.azure.com/workflows/x"},
+               event(), client=client)
+    assert len(seen) == 1
+    body = json.loads(seen[0].content)
+    assert body["type"] == "message"
+    att = body["attachments"][0]
+    assert att["contentType"] == "application/vnd.microsoft.card.adaptive"
+    card = att["content"]
+    assert card["type"] == "AdaptiveCard" and card["version"] == "1.4"
+    texts = " ".join(b["text"] for b in card["body"] if b["type"] == "TextBlock")
+    assert "1 new finding(s)" in texts and "kafka/prod" in texts
+    assert "KAFKA.TOPIC.PUBLIC" in texts
+
+
+def test_teams_without_url_is_a_notify_error():
+    with pytest.raises(NotifyError):
+        send_teams({}, event(), client=capture_client()[0])
+
+
+def test_teams_http_error_names_the_type_not_the_url():
+    client, _ = capture_client(400)
+    with pytest.raises(NotifyError) as e:
+        send_teams({"webhook_url": "https://prod-1.westus.logic.azure.com/workflows/x"},
+                   event(), client=client)
+    assert "teams" in str(e.value) and "400" in str(e.value)
+    assert "logic.azure.com" not in str(e.value)
 
 
 def test_webhook_posts_the_event_body_unsigned_by_default():
@@ -239,12 +272,13 @@ def test_deliver_unknown_type_is_a_notify_error():
 
 # ═══ Integration config contract ═════════════════════════════════════════════
 def test_validate_unknown_type():
-    problems = validate_integration_config("teams", {})
+    problems = validate_integration_config("carrier-pigeon", {})
     assert problems and "unknown integration type" in problems[0]
 
 
 @pytest.mark.parametrize("type_,config,missing", [
     ("slack", {}, "webhook_url"),
+    ("teams", {}, "webhook_url"),
     ("webhook", {}, "url"),
     ("email", {}, "to"),
     ("jira", {"base_url": "https://x"}, "project_key"),

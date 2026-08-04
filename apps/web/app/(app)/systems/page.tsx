@@ -142,6 +142,12 @@ const CATEGORIES: CategoryDef[] = [
     blurb: 'B2B file exchange — the partner-facing surface where a stale account or weak cipher becomes a supply-chain foothold.',
     types: ['mft'],
   },
+  {
+    id: 'iac',
+    label: 'Integration-as-code',
+    blurb: 'The manifests that deploy the estate. The only source that can see a credential committed to a repository — a running broker cannot tell you its password is also in git.',
+    types: ['iac'],
+  },
 ];
 
 /** Human labels for the engine's type ids. Unknown types fall back to a prettified id — an
@@ -183,6 +189,7 @@ const TYPE_LABELS: Record<string, string> = {
   openapi: 'OpenAPI / REST',
   airflow: 'Apache Airflow',
   mft: 'Managed file transfer',
+  iac: 'Deployment manifests',
 };
 
 /** type id → category id. Built once; anything the engine reports that isn't mapped lands in

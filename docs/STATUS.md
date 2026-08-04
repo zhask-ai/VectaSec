@@ -145,10 +145,12 @@ Rows added or materially changed since the 07-17 revision are marked **new**. "P
 ### Phases 2–3 — Breadth + identity, MCP + enterprise
 The 07-17 verdicts are mostly obsolete in the good direction: mesh posture (via K8s), an
 agentless cloud path (AWS), MCP current-spec coverage, and cross-connector NHI all exist now.
-Still absent from those phase lists: iPaaS connectors (any), supply chain (SBOM/CVE/IaC — the
-version rules are floors, not a scanner), NHI usage/staleness telemetry, registry/rug-pull
-detection, runtime sensor, enterprise on-prem hardening, billing/metering (`usage` table still
-written by nothing), SIEM export, public read API.
+Supply chain is now built end to end (SBOM/VEX, the live OSV feed, plugin inventory, and
+integration-as-code static analysis), and the agentless runtime half spans four sources
+(RabbitMQ, Redis, NATS, PgBouncer). Still absent from those phase lists: iPaaS connectors
+(any), NHI usage/staleness telemetry, registry/rug-pull detection, the OPTIONAL in-cluster
+runtime sensor, enterprise on-prem hardening, billing/metering (`usage` table still written
+by nothing), SIEM export, public read API.
 
 ---
 
@@ -160,8 +162,10 @@ written by nothing), SIEM export, public read API.
 - **SSO / SAML / SCIM, invites, password reset, user directory.** Sign-in is email+password only.
 - **Supabase Storage, Edge Functions, `packages/`** (`pnpm-workspace.yaml` still globs two
   directories that don't exist; `apps/web/lib/types.ts` is still hand-maintained — gap #13 lives).
-- **SBOM / CVE scanning / IaC static analysis.**
-- **Runtime sensor.**
+- **The OPTIONAL in-cluster eBPF runtime sensor.** The agentless path is built and covers
+  four sources; the sensor was always the second half and remains unstarted. Note eBPF
+  cannot recover Kafka topic metadata for TLS-enabled Java clients at all (the JSSE
+  `SSLEngine` gap), which is why broker-side is the primary path, not the fallback.
 - **SOC 2 (any type), a validated on-prem deploy, a design partner, a customer.**
 
 ---

@@ -19,7 +19,7 @@ export type IntegrationField = {
 };
 
 export type IntegrationSpec = {
-  type: 'slack' | 'webhook' | 'email' | 'jira' | 'siem';
+  type: 'slack' | 'teams' | 'webhook' | 'email' | 'jira' | 'siem';
   label: string;
   /** One honest sentence for the picker. */
   blurb: string;
@@ -42,6 +42,22 @@ export const INTEGRATION_TYPES: IntegrationSpec[] = [
         secret: true,
         placeholder: 'https://hooks.slack.com/services/…',
         help: 'Slack: app settings → Incoming Webhooks. The URL embeds a token, so it is stored server-side and never shown again.',
+      },
+    ],
+  },
+  {
+    type: 'teams',
+    label: 'Microsoft Teams',
+    blurb: 'Post findings to a Teams channel as an Adaptive Card via an incoming-webhook URL.',
+    glyph: '⊞',
+    fields: [
+      {
+        key: 'webhook_url',
+        label: 'Incoming webhook URL',
+        required: true,
+        secret: true,
+        placeholder: 'https://….logic.azure.com/workflows/… or https://….webhook.office.com/…',
+        help: 'Teams: Workflows → "Post to a channel when a webhook request is received" (or a legacy Incoming Webhook connector). The URL embeds a signature, so it is stored server-side and never shown again.',
       },
     ],
   },

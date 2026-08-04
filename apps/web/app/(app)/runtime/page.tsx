@@ -142,7 +142,8 @@ export default async function RuntimePage() {
             <EmptyState
               tone="setup"
               title="No runtime evidence yet"
-              description="Runtime evidence comes from the brokers themselves — RabbitMQ's connections API and Redis' CLIENT LIST name who is connected right now. No sensor or agent is required; scan a RabbitMQ or Redis connection and this fills in."
+              description="Runtime evidence comes from the systems themselves — RabbitMQ's connections API, Redis' CLIENT LIST, NATS' /connz and PgBouncer's SHOW CLIENTS each name who is connected right now. No sensor or agent is required; scan any of those connections and this fills in."
+              meta="runtime sources: rabbitmq · redis · nats · pgbouncer"
             />
           </CardBody>
         </Card>

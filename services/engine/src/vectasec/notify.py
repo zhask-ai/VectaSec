@@ -1,8 +1,9 @@
 """The action layer: route a finished scan's outcome to the outside world.
 
-Five destination types (`integrations.type`): Slack incoming webhooks, generic JSON webhooks
-(optionally HMAC-signed), email over SMTP, Jira Cloud issues, and SIEM export as OCSF
-Detection Finding (class 2004) JSON. `routing_rules.match` decides which findings go where.
+Six destination types (`integrations.type`): Slack incoming webhooks, Microsoft Teams
+incoming webhooks (Adaptive Card), generic JSON webhooks (optionally HMAC-signed), email
+over SMTP, Jira Cloud issues, and SIEM export as OCSF Detection Finding (class 2004) JSON.
+`routing_rules.match` decides which findings go where.
 
 Design rules, in the same spirit as the scan loop:
 
@@ -51,6 +52,7 @@ DEFAULT_EVENTS = ("new_findings", "scan_failed")
 # below), not per-integration data.
 INTEGRATION_SECRET_KEYS: dict[str, tuple[str, ...]] = {
     "slack":   ("webhook_url",),
+    "teams":   ("webhook_url",),                # Workflows/legacy-connector URL embeds a signature
     "webhook": ("url", "hmac_secret"),          # hmac_secret optional; secret when present
     "email":   (),
     "jira":    ("api_token",),
@@ -58,6 +60,7 @@ INTEGRATION_SECRET_KEYS: dict[str, tuple[str, ...]] = {
 }
 INTEGRATION_REQUIRED: dict[str, tuple[str, ...]] = {
     "slack":   ("webhook_url",),
+    "teams":   ("webhook_url",),
     "webhook": ("url",),
     "email":   ("to",),
     "jira":    ("base_url", "project_key", "email", "api_token"),
@@ -216,6 +219,37 @@ def send_slack(config: dict, event: dict, client: Optional[httpx.Client] = None)
     _post(client, url, dest="slack", json={"text": _summary_text(event)})
 
 
+def send_teams(config: dict, event: dict, client: Optional[httpx.Client] = None) -> None:
+    """Microsoft Teams incoming webhook. Works with both webhook flavours Teams has shipped:
+    a Workflows (Power Automate) "When a Teams webhook request is received" trigger URL and
+    the legacy Office 365 connector URL — both accept the same message envelope carrying an
+    Adaptive Card attachment, which is the format Microsoft documents for incoming webhooks."""
+    url = config.get("webhook_url")
+    if not url:
+        raise NotifyError("teams: webhook_url is not configured")
+    lines = _summary_text(event).splitlines()
+    body_blocks: list[dict] = [
+        {"type": "TextBlock", "text": lines[0], "weight": "Bolder", "wrap": True},
+    ]
+    if len(lines) > 1:
+        body_blocks.append({"type": "TextBlock", "text": "\n".join(lines[1:]),
+                            "wrap": True, "spacing": "Small", "isSubtle": True})
+    payload = {
+        "type": "message",
+        "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "type": "AdaptiveCard",
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "version": "1.4",
+                "msteams": {"width": "Full"},
+                "body": body_blocks,
+            },
+        }],
+    }
+    _post(client, url, dest="teams", json=payload)
+
+
 def send_webhook(config: dict, event: dict, client: Optional[httpx.Client] = None) -> None:
     url = config.get("url")
     if not url:
@@ -312,6 +346,7 @@ def send_siem(config: dict, event: dict, client: Optional[httpx.Client] = None) 
 
 SENDERS: dict[str, Callable[..., None]] = {
     "slack": send_slack,
+    "teams": send_teams,
     "webhook": send_webhook,
     "email": send_email,
     "jira": send_jira,

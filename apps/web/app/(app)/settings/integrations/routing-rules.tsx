@@ -2,6 +2,7 @@
 
 import { useActionState, useEffect, useRef } from 'react';
 
+import { CONNECTORS } from '../../connections/connector-fields';
 import { addRoutingRuleAction, deleteRoutingRuleAction, type ActionState } from './actions';
 
 /* Routing rules — "findings at or above this severity (optionally from this connector type)
@@ -15,12 +16,13 @@ const SEVERITY_CHOICES: { value: string; label: string }[] = [
   { value: 'info', label: 'everything (info and above)' },
 ];
 
+// Derived from the connector catalogue so a dropped-in connector is routable with no list to
+// edit here — hardcoding this list once stranded 35 connector types (redis included).
 const CONNECTOR_CHOICES: { value: string; label: string }[] = [
   { value: '', label: 'any connector' },
-  { value: 'kafka', label: 'kafka only' },
-  { value: 'kong', label: 'kong only' },
-  { value: 'rabbitmq', label: 'rabbitmq only' },
-  { value: 'mcp', label: 'mcp only' },
+  ...[...CONNECTORS]
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .map((c) => ({ value: c.type, label: `${c.label} only` })),
 ];
 
 export function AddRoutingRule({ integrations }: { integrations: { id: string; name: string; type: string }[] }) {
