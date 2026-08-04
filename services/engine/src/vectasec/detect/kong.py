@@ -3,6 +3,15 @@
 Two shared pieces carry most of the correctness here: the listener parser (`_listen_entries`) and
 the plugin scope resolver (`_in_scope`). Both have failure modes that silently invert a verdict, so
 they are written once and reused rather than re-derived per rule.
+
+Four rules carry the third outcome, because for them an empty answer and an unread one are the
+same shape on the wire and must not be the same verdict:
+  • the two KONG.VERSION.* CVE rules — a version the comparator cannot place is reported
+    assessable=False, never as "not vulnerable";
+  • KONG.CONSUMER.NO_CREDENTIALS — a credential sweep that did not run, or one where no endpoint
+    answered 200, is a coverage gap, not a consumer with credentials;
+  • KONG.SCOPE.WORKSPACES_NOT_ENUMERATED — a refused /workspaces narrows collection to the default
+    workspace, so every route/service/consumer/plugin rule silently covered one workspace.
 """
 import ipaddress
 
@@ -468,6 +477,49 @@ def admin_plaintext_listener(resource, ctx):
                 "'0.0.0.0:8444 http2 ssl', an Admin API exposed to the whole network but encrypted; "
                 "KONG.ADMIN.OFF_HOST_LISTENER would be the companion rule for that gap."),
         source_ref={"api": "GET /", "config_key": "admin_listen"},
+    )]
+
+
+# ══ KONG.SCOPE.WORKSPACES_NOT_ENUMERATED ══════════════════════════════════
+@detector(kinds=["broker"], rule_id="KONG.SCOPE.WORKSPACES_NOT_ENUMERATED", severity="medium",
+          title="Kong workspace list was refused, so the scan covered one workspace only")
+def workspaces_not_enumerated(resource, ctx):
+    """The third honest outcome at node scope: this scan's reach was narrower than it looks.
+
+    Every route / service / consumer / plugin rule in this pack judges what the connector
+    collected, and on Enterprise the connector collects per workspace. A 403 on /workspaces leaves
+    it walking the default workspace alone, so the routes in every other workspace are not clean —
+    they were never fetched, and KONG.ROUTE.NO_AUTH_PLUGIN never ran on one of them. raw.workspaces
+    is [""] whether that happened or the node is plain OSS, which is why the enumeration outcome is
+    recorded separately and read here.
+    """
+    rec = resource.raw.get("workspace_enumeration") or {}
+    if rec.get("readable") is not False:
+        return []                              # True = enumerated; None = OSS, no workspace layer
+
+    counted = ", ".join(f"{len(ctx.of_kind(k))} {k}(s)"
+                        for k in ("route", "service", "consumer", "plugin"))
+    err = rec.get("error") or f"HTTP {rec.get('status')!r}"
+    return [Hit(
+        observation=(
+            f"`GET /workspaces` on this Kong Enterprise node returned {err}, so the workspace list "
+            f"could not be enumerated and collection fell back to the default workspace alone. "
+            f"Everything this scan holds for the node — {counted} — came from that one workspace; "
+            f"a route, service, consumer or plugin in any other workspace was never fetched, and "
+            f"no rule in this pack was run against it."
+        ),
+        remediation=(
+            "Grant the Admin API token's RBAC role read access to the workspaces endpoint and "
+            "re-scan, or add one connection per workspace so each is collected under its own "
+            "credential. Until then this node's coverage is one workspace, not the gateway."
+        ),
+        detail=("Kong Enterprise scopes /routes, /services, /consumers and /plugins per workspace. "
+                "raw.workspaces reads [''] both for an OSS node and for an Enterprise node whose "
+                "workspace list was refused — only the enumeration outcome separates them."),
+        assessable=False,
+        assessment_reason=("the workspace list was refused, so every route, service, consumer and "
+                           "plugin rule covered the default workspace only"),
+        source_ref={"api": "GET /workspaces", "status": rec.get("status")},
     )]
 
 
@@ -1015,6 +1067,39 @@ def plugin_security_disabled(resource, ctx):
 
 
 # ══ KONG.CONSUMER.NO_CREDENTIALS ══════════════════════════════════════════
+def _credential_sweep_gap(resource, reason: str) -> Hit:
+    """This rule's third outcome.
+
+    It fires on 200-with-empty-.data from every credential endpoint. A sweep that never ran, and
+    one where no endpoint answered 200, produce the same "no credentials seen" with none of the
+    evidence — and returning [] for them renders as "checked, this consumer holds credentials",
+    the opposite of what happened.
+    """
+    creds = resource.raw.get("credentials") or {}
+    seen = ", ".join(f"/{k} → {(v or {}).get('status')!r}" for k, v in sorted(creds.items())) \
+        or "(no credential endpoint was queried)"
+    return Hit(
+        observation=(
+            f"Consumer '{resource.name}' (id {resource.raw.get('id')}): {reason}. Per-endpoint "
+            f"status: {seen}. Whether this consumer holds any credential was therefore not "
+            f"established — it is not referenced by any plugin's config.anonymous, by any "
+            f"consumer-scoped plugin, or by any consumer group, but its credentials are unknown "
+            f"rather than absent."
+        ),
+        remediation=(
+            "Re-scan with connection config collect_consumer_credentials=true and a "
+            "consumer_credential_limit above this node's consumer count, using an Admin API token "
+            "allowed to read /consumers/{id}/{key-auth,basic-auth,jwt,hmac-auth,oauth2,acls,"
+            "mtls-auth}. Until then this consumer cannot be triaged as dead configuration."
+        ),
+        detail="Coverage gap: the per-consumer credential sweep produced no readable evidence.",
+        assessable=False,
+        assessment_reason=reason,
+        source_ref={"api": "GET /consumers/{id}/{key-auth,basic-auth,jwt,hmac-auth,oauth2,acls,"
+                           "mtls-auth}"},
+    )
+
+
 @detector(kinds=["consumer"], rule_id="KONG.CONSUMER.NO_CREDENTIALS", severity="info",
           title="Kong consumer has no credentials and is unreferenced")
 def consumer_no_credentials(resource, ctx):
@@ -1029,16 +1114,9 @@ def consumer_no_credentials(resource, ctx):
     if any(p.get("name") in EXTERNAL_IDENTITY for p in plugins):
         return []
 
-    creds = resource.raw.get("credentials")
-    if not creds:
-        return []                              # sweep skipped for this consumer — nothing observed
-
-    # 404 is not a value: mtls-auth is Enterprise-only and simply absent on OSS. Fire only if every
-    # endpoint that answered 200 was empty AND at least one answered 200.
-    answered = {k: v for k, v in creds.items() if v.get("status") == 200}
-    if not answered or any(v.get("count") for v in answered.values()):
-        return []
-
+    # The reference exemptions are checked before the credential evidence, not after: a consumer
+    # the config points at is exempt whatever its credentials turn out to be, so an unread sweep
+    # costs this rule nothing on it and must not file a coverage gap for it.
     cid, username = resource.raw.get("id"), resource.raw.get("username")
     for p in plugins:
         anon = (p.get("config") or {}).get("anonymous")
@@ -1048,6 +1126,20 @@ def consumer_no_credentials(resource, ctx):
             return []                          # targeted by a consumer-scoped plugin
     if (resource.raw.get("consumer_groups") or {}).get("names"):
         return []                              # group member, e.g. for rate-limiting-advanced scoping
+
+    creds = resource.raw.get("credentials")
+    if not creds:
+        return [_credential_sweep_gap(
+            resource, "the per-consumer credential sweep did not run for this consumer")]
+
+    # 404 is not a value: mtls-auth is Enterprise-only and simply absent on OSS. Fire only if every
+    # endpoint that answered 200 was empty AND at least one answered 200.
+    answered = {k: v for k, v in creds.items() if v.get("status") == 200}
+    if not answered:
+        return [_credential_sweep_gap(
+            resource, "no credential endpoint answered 200 for this consumer")]
+    if any(v.get("count") for v in answered.values()):
+        return []
 
     empty = sorted(answered)
     absent = sorted(k for k, v in creds.items() if v.get("status") == 404)
@@ -1095,11 +1187,36 @@ def cve_2026_6338(resource, ctx):
     # The edition gate is mandatory, not a parenthetical. Kong OSS 3.4.x is a real, still-deployed
     # LTS line reporting a 3-part version; zero-padding '3.4.3' to '3.4.3.0' drops it inside the
     # 3.4.0.0–3.4.3.26 range and fires on an unaffected community node. Never zero-pad.
-    if edition != "enterprise":
+    if edition and edition != "enterprise":
         return []
     v = _parts(version)
-    if v is None or len(v) != 4:
-        return []
+    if v is None or len(v) != 4 or not edition:
+        # Nothing to place: no version, a version string this comparator cannot parse, a scheme
+        # that is not the 4-part Enterprise one, or an edition `GET /` did not report (without it
+        # the advisory's applicability is itself unknown). Silence here reads in the console as
+        # "not vulnerable", which is a claim this rule has no evidence for.
+        if v is not None and _CVE_2026_6338_FLOORS.get(v[:2]) is None:
+            return []                          # series no floor covers — ruled out on any edition
+        floors = ", ".join(".".join(str(x) for x in f)
+                           for f in sorted(_CVE_2026_6338_FLOORS.values()))
+        return [Hit(
+            observation=(
+                f"Admin API `GET /` reports .version={version!r} and .edition={edition!r}; that "
+                f"pair cannot be placed against the CVE-2026-6338 fixed floors ({floors}), which "
+                f"are 4-part Kong Enterprise versions — so this node's exposure to the HTTP "
+                f"request-smuggling / desynchronization flaw was not determined."
+            ),
+            remediation=(
+                "Confirm the running edition and version (`kong version`, or the Admin API with a "
+                "token that is allowed to read them) and check it against the fixed floor for its "
+                "series: 3.4.3.27, 3.10.0.12, 3.11.0.12, 3.12.0.7, 3.13.0.5, 3.14.0.4 (or "
+                "3.15.0.0). Kong OSS is not affected by this advisory."
+            ),
+            detail="Coverage gap: version string unreadable/unparseable, or edition not reported.",
+            assessable=False,
+            assessment_reason="Kong version string not parseable to a known Enterprise release",
+            source_ref={"api": "GET /", "cve": "CVE-2026-6338"},
+        )]
 
     floor = _CVE_2026_6338_FLOORS.get(v[:2])
     if floor is None or v >= floor:            # bounds are exclusive, mirroring versionEndExcluding
@@ -1133,25 +1250,49 @@ def cve_2026_6338(resource, ctx):
           title="Kong below the CVE-2021-27306 JWT bypass fix with the jwt plugin enabled")
 def cve_2021_27306(resource, ctx):
     edition, version = resource.raw.get("edition"), resource.raw.get("version")
-    v = _parts(version)
-    if v is None:
+
+    # Hoisted above the version arithmetic: with no enabled jwt plugin there is no JWT bypass to
+    # have on any version, so an unreadable version costs this rule nothing and must not file a
+    # coverage gap.
+    jwt = [p for p in _plugins(ctx) if p.get("name") == "jwt" and _enabled(p)]
+    if not jwt:
         return []
+
+    v = _parts(version)
+    if v is not None and v[:3] >= (2, 3, 2):
+        return []                              # at or above the fix line in BOTH version schemes,
+                                               # so the edition cannot change the answer
 
     # Branch the threshold; never cross-compare version schemes. Community is 3-part and fixed in
     # 2.3.2; Enterprise is 4-part and fixed in 2.3.2.0. A naive comparator treats 2.3.2 < 2.3.2.0 as
     # true and fires on the exact OSS version that carries the fix.
-    if edition == "enterprise":
-        if len(v) != 4 or v >= (2, 3, 2, 0):
-            return []
-        floor = "2.3.2.0 (Enterprise)"
-    else:
-        if len(v) != 3 or v >= (2, 3, 2):
-            return []
-        floor = "2.3.2 (OSS)"
-
-    jwt = [p for p in _plugins(ctx) if p.get("name") == "jwt" and _enabled(p)]
-    if not jwt:
-        return []
+    scheme_len, floor = (4, "2.3.2.0 (Enterprise)") if edition == "enterprise" \
+        else (3, "2.3.2 (OSS)")
+    if v is None or len(v) != scheme_len:
+        # An absent, unparseable or wrong-scheme version below the fix line cannot be placed —
+        # and returning [] here renders as "not vulnerable" on a node running an enabled jwt
+        # plugin, which is the one combination this rule exists to catch.
+        return [Hit(
+            observation=(
+                f"Admin API `GET /` reports .version={version!r}, .edition={edition!r}, and "
+                f"fully-paginated /plugins contains {len(jwt)} enabled jwt plugin(s) "
+                f"(id {jwt[0].get('id')}). The version string could not be placed against the "
+                f"CVE-2021-27306 fix line ({floor}), so this node's exposure to the JWT "
+                f"access-control bypass was not determined."
+            ),
+            remediation=(
+                "Confirm the running version (`kong version`) and ensure it is at least 2.3.2 "
+                "(OSS) / 2.3.2.0 (Enterprise). Kong 2.x is long past its maintenance window — 2.8 "
+                "LTS ended 2025-03-01 — so plan an upgrade to a supported 3.x release rather than "
+                "a point patch."
+            ),
+            detail=("Coverage gap: version string unreadable/unparseable, or reported in a scheme "
+                    "that does not match .edition. An enabled jwt plugin is present, so the "
+                    "advisory is in scope for this node."),
+            assessable=False,
+            assessment_reason="Kong version string not parseable to a known release",
+            source_ref={"api": "GET /, GET /plugins (paginated)", "cve": "CVE-2021-27306"},
+        )]
 
     return [Hit(
         observation=(

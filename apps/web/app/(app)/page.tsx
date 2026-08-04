@@ -143,6 +143,20 @@ export default async function OverviewPage() {
     supabase.from('scans').select('id, status, started_at, finished_at, connections(type, name)').order('started_at', { ascending: false }).limit(6),
   ]);
 
+  // The severity facets ARE the posture score. A failed read left `counts` all-zero, which
+  // scores 100 / grade A and renders the severity card as "No open findings · Every rule passed
+  // on the last scan" — a reassuring green page produced by a broken query. The topbar chip in
+  // layout.tsx already guards on this error, so the two disagreed in the direction that
+  // comforts. Fail loudly instead: a security console must never invent a clean bill of health.
+  if (facetsRes.error) {
+    return (
+      <Frame>
+        <Card><CardBody><EmptyState tone="error" title="Could not load the findings summary"
+          description={`${facetsRes.error.message} — posture and severity counts are unavailable, so nothing on this page would be trustworthy.`} /></CardBody></Card>
+      </Frame>
+    );
+  }
+
   // --- Posture, grounded in the raw severity counts ---
   const counts = Object.fromEntries(SEVERITIES.map((k) => [k, 0])) as SeverityCounts;
   let totalOpen = 0;

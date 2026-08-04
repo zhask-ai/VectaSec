@@ -71,6 +71,11 @@ export const INTEGRATION_TYPES: IntegrationSpec[] = [
         key: 'url',
         label: 'Endpoint URL',
         required: true,
+        // The engine vaults this (notify.INTEGRATION_SECRET_KEYS["webhook"] includes "url"), so
+        // rendering it as a plain text input contradicted this file's own header — and made
+        // re-saving a webhook demand a URL the console could not show, while the success
+        // message promised that blanks were left unchanged.
+        secret: true,
         placeholder: 'https://alerts.example.com/vectasec',
       },
       {

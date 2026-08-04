@@ -256,6 +256,92 @@ def _enrich_collected(type_: str, collected: Collected) -> Collected:
     return collected
 
 
+# ── Failure classification ────────────────────────────────────────────────
+# A scan can fail because the world is temporarily unavailable (retry helps) or because the
+# connection is WRONG (retry cannot help — a rejected credential is rejected every time). The
+# queue's retry ladder is deliberately slow (worker.MAX_READS × the visibility timeout ≈ 40
+# minutes) so a flapping broker does not page anyone; applying that same patience to a typo'd
+# password means the operator hears about it 40 minutes after the console already shows it.
+#
+# So: classify, and let the worker give up immediately on the permanent kind. The cost of a
+# wrong call is bounded and asymmetric — a misjudged transient failure is reported early and
+# re-attempted on the connection's next scheduled scan, whereas a misjudged permanent failure
+# would be 40 minutes of silence. Match only on signals that are unambiguously "this request
+# was understood and refused", never on connect/timeout/transport errors.
+_PERMANENT_HTTP_STATUS = {401, 403}
+
+_PERMANENT_TYPE_MARKERS = (
+    "authenticationerror", "authenticationfailed", "authorizationerror", "authorizationfailed",
+    "invalidtoken", "invalidcredentials", "credentialserror", "nocredentialserror",
+    "permissiondenied", "forbidden", "unauthorized", "accessdenied",
+)
+
+_PERMANENT_TEXT_MARKERS = (
+    "authentication failed", "authentication error", "failed to authenticate",
+    "invalid credentials", "bad credentials", "invalid username or password",
+    "invalid api key", "invalid token", "invalid access key", "signature does not match",
+    "login failed", "access denied", "permission denied", "not authorized",
+    "unauthorized", "forbidden", "authorization_failed", "authorizationexception",
+)
+
+# A BARE "401"/"403" is not usable evidence, and matching on one was a real bug: librdkafka
+# appends `(after %ldms in state %s)` to every broker failure, so roughly 1% of ordinary Kafka
+# transport errors carry those digits by luck of the millisecond counter — and uuids, byte
+# counts, ports and timeouts hit them too. Require the digits to be introduced as a status.
+_PERMANENT_STATUS_TEXT = tuple(
+    f"{prefix}{code}"
+    for code in ("401", "403")
+    for prefix in ("http ", "http/1.1 ", "http/2 ", "status ", "status=", "status_code=",
+                   "statuscode=", "(", "code: ", "returned ")
+)
+
+
+# Phrases that mean the CONVERSATION broke rather than the credential being refused. Checked
+# first, and they win: librdkafka reports a handshake the broker dropped as
+# `SASL authentication error: Broker closed the connection` — the normal shape of a rolling
+# restart — which the "authentication error" marker below would otherwise call permanent and
+# page somebody for on every deploy. An explicit refusal is permanent; a socket that went away
+# mid-sentence tells us nothing about the credential.
+_TRANSIENT_OVERRIDE = (
+    "closed the connection", "connection closed", "disconnected", "connection reset",
+    "timed out", "timeout", "broken pipe", "connection refused", "no brokers available",
+    "temporarily unavailable", "transport failure", "eof",
+)
+
+
+def permanent_failure_reason(e: BaseException) -> Optional[str]:
+    """A short reason when this failure will recur identically on every retry, else None.
+
+    SystemExit is the connectors' config-error channel (their CLI heritage): an unknown
+    connector type or a missing required field is deterministic by construction.
+    """
+    if isinstance(e, SystemExit):
+        return "configuration error"
+
+    if any(m in str(e).lower() for m in _TRANSIENT_OVERRIDE):
+        return None
+
+    response = getattr(e, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None and isinstance(response, dict):
+        # botocore exposes `.response` as a DICT, so the attribute lookup above always misses
+        # and the HTTP-status path never fired for any AWS connector.
+        status = ((response.get("ResponseMetadata") or {}).get("HTTPStatusCode"))
+    if status in _PERMANENT_HTTP_STATUS:
+        return f"credentials rejected (HTTP {status})"
+
+    type_name = type(e).__name__.lower()
+    if any(m in type_name for m in _PERMANENT_TYPE_MARKERS):
+        return "credentials rejected"
+
+    text = str(e).lower()
+    if any(m in text for m in _PERMANENT_TEXT_MARKERS):
+        return "credentials rejected"
+    if any(m in text for m in _PERMANENT_STATUS_TEXT):
+        return "credentials rejected"
+    return None
+
+
 def _mark_scan_error(conn, scan_id: str, e: BaseException) -> None:
     """Record a scan as failed, on a transaction of its own.
 
@@ -263,12 +349,21 @@ def _mark_scan_error(conn, scan_id: str, e: BaseException) -> None:
     statement raises InFailedSqlTransaction), so roll back first and write the error row on a
     fresh transaction. Without this, a persist/detect failure rolls the `scans` row back with
     it and a scan that fails every night leaves no trace in the database at all.
+
+    The stored stats carry the classification, so the console and the scan-failed alert can
+    say "credentials rejected — fix the connection" rather than making a human read a driver's
+    exception text to work out whether waiting will help.
     """
+    reason = permanent_failure_reason(e)
+    stats = {"error": f"{type(e).__name__}: {e}",
+             "failure_class": "permanent" if reason else "transient"}
+    if reason:
+        stats["failure_reason"] = reason
     conn.rollback()
     with conn.cursor() as cur:
         cur.execute(
             "update scans set status='error', finished_at=now(), stats=%s where id=%s",
-            (json.dumps({"error": f"{type(e).__name__}: {e}"}), scan_id),
+            (json.dumps(stats), scan_id),
         )
     conn.commit()
 
@@ -390,6 +485,18 @@ def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
             conn.rollback()
             stats["osv_error"] = f"{type(e).__name__}: {e}"
 
+        # …and the other identifier axis (nvd.py). OSV reads purls and NVD reads CPEs, and the
+        # two feeds genuinely disagree about which products they carry: Kong and Pulsar have no
+        # bitnami purl at all, so before this hook they were vulnerability-BLIND while sitting
+        # next to a component list that looked complete. Same isolation contract as above.
+        try:
+            from .nvd import enrich_nvd
+            stats["nvd"] = enrich_nvd(conn, tenant_id, str(connection_id), str(scan_id))
+            conn.commit()
+        except Exception as e:  # pragma: no cover - defensive
+            conn.rollback()
+            stats["nvd_error"] = f"{type(e).__name__}: {e}"
+
         # Fold the hook stats back into the scans row. _persist_scan wrote status='done' with
         # stats BEFORE the three hooks above ran, so their outcomes — including an OSV feed
         # outage or a correlation error — were returned to the CLI caller but invisible to the
@@ -398,7 +505,7 @@ def run_scan(type_: str, config: dict, tenant_id: Optional[str] = None,
         # matter more than the scan it describes.
         hook_stats = {k: stats[k] for k in
                       ("correlation", "correlation_error", "runtime", "runtime_unused",
-                       "runtime_error", "osv", "osv_error") if k in stats}
+                       "runtime_error", "osv", "osv_error", "nvd", "nvd_error") if k in stats}
         if hook_stats:
             try:
                 with conn.cursor() as cur:
@@ -623,8 +730,10 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
                              -- come and go, and never touches a status a HUMAN set
                              -- (resolved/triaged/in_progress/accepted).
                              status = case
-                               when excluded.status = 'suppressed' then 'suppressed'
-                               when findings.status = 'suppressed' then 'open'
+                               when excluded.status = 'suppressed'
+                                     and findings.status in ('open','suppressed') then 'suppressed'
+                               when findings.status = 'suppressed'
+                                     and excluded.status <> 'suppressed' then 'open'
                                else findings.status
                              end
                        returning id""",

@@ -42,6 +42,24 @@ def _val(cfg: dict, key: str):
     return None if e is None else e.get("value")
 
 
+def _topic_config(resource) -> tuple:
+    """(config, read_error) for a topic resource — the two empty cases, kept apart.
+
+    `{}` with no error is a FACT: DescribeConfigs answered and this topic has nothing set.
+    `{}` with an error is the ABSENCE of a fact: the read was refused or failed, and a rule that
+    returns [] on it has told the customer a topic it never looked at is clean. Broker resources
+    have made this distinction since KAFKA.SCAN.NOT_ASSESSABLE (`config_error`); topic resources
+    did not, and the gap was reachable on its own — topic-scope DescribeConfigs can be denied
+    while broker-scope is granted, so the broker's coverage rule stays silent too.
+
+    Every topic rule below splits on this. The never-read arm returns [] *here* and is owned by
+    KAFKA.SCAN.TOPIC_NOT_ASSESSABLE, which files ONE finding for the whole scan rather than
+    (topic-config rules x unread topics) copies of the same sentence.
+    """
+    raw = resource.raw or {}
+    return (raw.get("config") or {}), raw.get("config_error")
+
+
 def _source(entry) -> str:
     if entry is None:
         return "ABSENT"
@@ -1200,7 +1218,20 @@ def topic_auto_create_enabled(resource, ctx):
     bid = resource.raw.get("id")
     e = _entry(cfg, "auto.create.topics.enable")
     if e is None:
-        return []   # managed platforms restrict DescribeConfigs on BROKER -> unknown, not a fail
+        # auto.create.topics.enable DOES default to true, so the obvious reading is that an
+        # absent key is a dangerous default going unreported — the convention connect/flink.py
+        # applies to web.submit.enable. It does not transfer, because the two APIs report
+        # defaults differently. Flink's /jobmanager/config returns only keys that were
+        # explicitly SET, so omission genuinely means "the default applies". Kafka's
+        # DescribeConfigs on a BROKER resource enumerates the broker's whole config space and
+        # returns unset keys explicitly, carrying is_default=true — so whenever this scan can
+        # actually read a broker's config, the shipped default arrives as a readable
+        # value='true' entry and the rule below fires on it. Absence therefore never means
+        # "unset, so true"; it means the response was filtered (MSK/Confluent Cloud hand back a
+        # restricted subset) or was not read at all, and firing would be a false positive on the
+        # managed platforms that most often disable auto-create in the first place. A wholly
+        # denied read is already covered by KAFKA.SCAN.NOT_ASSESSABLE.
+        return []
     v = e.get("value")
     if v is None or v.strip().lower() == "false":
         return []
@@ -1272,9 +1303,13 @@ def topic_auto_create_enabled(resource, ctx):
 @detector(kinds=["topic"], rule_id="KAFKA.TOPIC.RETENTION_UNBOUNDED", severity="low",
           title="Topic retains data indefinitely (retention.ms=-1)")
 def topic_retention_unbounded(resource, ctx):
-    cfg = resource.raw.get("config") or {}
+    cfg, unread = _topic_config(resource)
+    if unread:
+        # Never read. Silent HERE only because KAFKA.SCAN.TOPIC_NOT_ASSESSABLE files the one
+        # coverage finding for every topic in this state; see _topic_config.
+        return []
     if not cfg:
-        return []   # topic DescribeConfigs not readable -> indeterminate
+        return []   # read, and this topic carries no config at all -> nothing to assess
 
     policy = _entry(cfg, "cleanup.policy")
     ms = _entry(cfg, "retention.ms")
@@ -1332,14 +1367,30 @@ def topic_retention_unbounded(resource, ctx):
           title="min.insync.replicas=1 on a replicated topic — acks=all degrades to single-copy "
                 "durability when the ISR shrinks")
 def durability_min_insync_replicas_one(resource, ctx):
-    cfg = resource.raw.get("config") or {}
+    cfg, unread = _topic_config(resource)
     rf = resource.raw.get("replication_factor")
-    if not cfg or rf is None:
-        return []
+    if unread:
+        return []   # never read -> KAFKA.SCAN.TOPIC_NOT_ASSESSABLE owns it; see _topic_config
+    if not cfg:
+        return []   # read, nothing set -> nothing to assess
     # describeConfigs on the TOPIC resource already returns the effective inherited value, so
     # there is no broker-config chain to reconstruct.
     e = _entry(cfg, "min.insync.replicas")
     if e is None or (e.get("value") or "").strip() != "1":
+        return []
+    # rf is None: the dangerous value WAS observed and only the disambiguator is missing, so
+    # this is deliberately NOT folded into the coverage rule above. Judgement, stated so it can
+    # be argued with: `replication_factor` comes from the same list_topics() metadata call that
+    # created this resource at all — it is not separately deniable, and None means the topic's
+    # partition list came back empty. A topic with no partitions has no replicas to fall out of
+    # sync, so misr=1 has no durability effect on it and a finding would be vacuous. Compounding
+    # that, misr=1 is Kafka's shipped default and therefore set on essentially every topic, so
+    # speaking up on unknown-rf would emit one finding per topic on any scan with partial
+    # metadata — noise on the exact resources where the claim is weakest. The observation could
+    # not state its own evidence either: it is built around "replication.factor=N vs misr=1".
+    # If partition metadata ever becomes deniable on its own, that is a metadata-coverage gap
+    # and belongs in its own coverage rule, not smuggled into a durability rule.
+    if rf is None:
         return []
     if rf < 2:
         return []   # nothing to be in-sync with; the setting has no durability effect
@@ -1382,7 +1433,9 @@ def durability_unclean_leader_election(resource, ctx):
     key = "unclean.leader.election.enable"
 
     if resource.kind == "topic":
-        cfg = resource.raw.get("config") or {}
+        cfg, unread = _topic_config(resource)
+        if unread:
+            return []   # never read -> KAFKA.SCAN.TOPIC_NOT_ASSESSABLE owns it
         e = _entry(cfg, key)
         if e is None or not _is_true(e) or e.get("is_default"):
             return []
@@ -1814,4 +1867,80 @@ def config_not_readable(r, ctx) -> list:
         assessment_reason="the broker's configuration could not be read, so no configuration "
                           "rule could evaluate it",
         source_ref={"api": "DescribeConfigs", "broker": raw.get("id"), "signal": "config_error"},
+    )]
+
+
+# The rules whose ONLY evidence is the per-topic DescribeConfigs response — i.e. exactly what
+# goes unevaluated when that read fails. Declared next to the coverage rule so that adding a
+# topic-config rule without listing it here is a visible omission; a test asserts the two agree.
+_TOPIC_CONFIG_RULES = (
+    "KAFKA.TOPIC.RETENTION_UNBOUNDED",
+    "KAFKA.DURABILITY.MIN_INSYNC_REPLICAS_ONE",
+    "KAFKA.DURABILITY.UNCLEAN_LEADER_ELECTION",
+)
+
+
+@detector(kinds=["topic"], rule_id="KAFKA.SCAN.TOPIC_NOT_ASSESSABLE", severity="medium",
+          title="Kafka topic configuration could not be read")
+def topic_config_not_readable(r, ctx) -> list:
+    """The topic-scoped twin of KAFKA.SCAN.NOT_ASSESSABLE, and independently reachable.
+
+    The broker rule closed half the hole. The TOPIC path in connect/kafka.py recorded `{}` on a
+    failed read and nothing else, so the three rules in _TOPIC_CONFIG_RULES returned [] and an
+    unread topic was indistinguishable from a well-configured one. Granting broker-scope
+    DescribeConfigs while withholding topic-scope is an ordinary least-privilege setup, and in
+    exactly that case `config_error` on the broker is None — so the broker's coverage rule does
+    not fire either and nothing at all is reported.
+
+    Severity matches the twin: whether the blind spot spans 22 rules or 3, "we could not look"
+    is the same answer, and `assessable=False` is what actually routes it to coverage rather
+    than to a pass.
+
+    ONE finding, not one per topic per rule: findings are fingerprinted on (rule, resource), so
+    this elects a single owner (the first unread topic by name) the way the connector's
+    `cluster_scope` flag does for the cluster-wide ACL rules, and names the rest in the body. A
+    denied topic-scope grant is denied for every topic at once — N copies of that sentence is
+    the same one fact, N times.
+    """
+    if not (r.raw or {}).get("config_error"):
+        return []
+
+    unread = {t.name: (t.raw or {}).get("config_error")
+              for t in ctx.of_kind("topic") if (t.raw or {}).get("config_error")}
+    unread.setdefault(r.name, (r.raw or {}).get("config_error"))   # r owns itself if ctx lacks it
+    names = sorted(unread)
+    if names[0] != r.name:
+        return []   # another topic owns this finding
+
+    total = len(ctx.of_kind("topic")) or len(names)
+    shown = ", ".join(names[:20]) + (f", +{len(names) - 20} more" if len(names) > 20 else "")
+    errors = "; ".join(sorted({e for e in unread.values() if e}))
+    return [Hit(
+        observation=(
+            f"DescribeConfigs on the TOPIC resource failed for {len(names)} of {total} topic(s) "
+            f"[{shown}]: {errors}. The configuration of these topics was not read, so the "
+            f"stored config for each is empty because it is unknown, not because nothing is set."
+        ),
+        detail=(
+            "Every topic-scoped Kafka rule reads that response, so none of them evaluated these "
+            "topics and their posture is unknown rather than clean. Left unevaluated on these "
+            "topics: " + ", ".join(_TOPIC_CONFIG_RULES) + ". Reported once for the whole scan "
+            "rather than "
+            "per topic per rule: a denied topic-scope grant is one fact about the scanning "
+            "principal, not one fact per topic. Broker-scope DescribeConfigs can be granted "
+            "while topic-scope is not, in which case KAFKA.SCAN.NOT_ASSESSABLE is correctly "
+            "silent and this rule is the only signal that a gap exists."
+        ),
+        remediation=(
+            "Grant the scanning principal DESCRIBE_CONFIGS on the TOPIC resource — a "
+            "CLUSTER-scope grant does not cover it, topic configs are authorized per topic (a "
+            "prefixed or wildcard TOPIC ACL covers them all) — then re-scan. If the topics are "
+            "genuinely out of scope, exclude them so the gap is explicit rather than latent."
+        ),
+        assessable=False,
+        assessment_reason=("the topics' configuration could not be read, so no topic "
+                           "configuration rule could evaluate them"),
+        source_ref={"api": "DescribeConfigs", "resource_type": "TOPIC", "signal": "config_error",
+                    "topics": names[:50], "topics_unread": len(names),
+                    "rules_unevaluated": list(_TOPIC_CONFIG_RULES)},
     )]

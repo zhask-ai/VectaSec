@@ -11,14 +11,17 @@ Payload shapes are copied from docs/research/platform-apis.md §2.2-2.7 (capture
 
 No network, no DB — detectors are pure functions of (Resource, ScanContext).
 """
+import httpx
 import pytest
 
+from vectasec.connect.kong import _workspaces
 from vectasec.contracts import Resource, ScanContext
 from vectasec.detect.kong import (
     admin_listen_wildcard,
     admin_unauthenticated,
     rbac_disabled,
     admin_plaintext_listener,
+    workspaces_not_enumerated,
     route_no_auth_plugin,
     auth_anonymous_fallback,
     route_http_protocol_allowed,
@@ -92,7 +95,13 @@ def probes(origin="loopback", root_status=200, tagline="Welcome to kong",
 RBAC_ENFORCING = {"status": 401, "body_snippet": '{"message":"Invalid RBAC credentials"}'}
 
 
-def node(configuration=None, *, version="3.9.3", edition="community", probe=None):
+OSS_WORKSPACES = {"readable": None,
+                  "reason": "not attempted: workspaces are an Enterprise feature"}
+WORKSPACES_REFUSED = {"readable": False, "status": 403, "error": "http_403"}
+
+
+def node(configuration=None, *, version="3.9.3", edition="community", probe=None,
+         workspaces=None):
     cfg = {
         "admin_listen": LOOPBACK_ADMIN,
         "proxy_listen": PROXY_LISTEN,
@@ -109,7 +118,10 @@ def node(configuration=None, *, version="3.9.3", edition="community", probe=None
         raw={"version": version, "edition": edition, "hostname": "3a1b2c3d4e5f",
              "node_id": "8f0b2c1a-4e5d-4a9b-9c3e-1d2f3a4b5c6d",
              "configuration": cfg, "probes": probe or probes(),
-             "workspaces": [""], "consumer_credential_sweep": True},
+             # `workspaces` is [""] both on OSS and on an Enterprise node whose /workspaces was
+             # refused — the enumeration outcome is the only thing that tells them apart.
+             "workspaces": [""], "workspace_enumeration": workspaces or OSS_WORKSPACES,
+             "consumer_credential_sweep": True},
     )
 
 
@@ -411,6 +423,75 @@ def test_admin_plaintext_listener_corroborates_when_scanner_itself_used_plaintex
     n = node({"admin_listen": WILDCARD_ADMIN}, probe=probes(origin="remote"))
     h = one(admin_plaintext_listener(n, ctx(n, url="http://kong.internal:8001")))
     assert "directly corroborating this" in h.observation
+
+
+# ══ KONG.SCOPE.WORKSPACES_NOT_ENUMERATED ══════════════════════════════════
+class FakeAdminClient:
+    """Stands in for httpx.Client — hands back canned httpx.Response objects, touches no socket."""
+
+    def __init__(self, *responses):
+        self._responses = list(responses)
+        self.paths = []
+
+    def get(self, url):
+        self.paths.append(url)
+        return self._responses.pop(0)
+
+
+def _response(status, body=None):
+    return httpx.Response(status, json=body if body is not None else {},
+                          request=httpx.Request("GET", "http://kong.internal:8001/workspaces"))
+
+
+def test_workspace_enumeration_records_a_refusal_instead_of_swallowing_it():
+    # A 403 here narrows the scan to the default workspace. The fallback itself is correct — what
+    # was missing is any record that it happened.
+    client = FakeAdminClient(_response(403))
+    spaces, outcome = _workspaces(client, "http://kong.internal:8001", "enterprise")
+    assert spaces == [("", "")]
+    assert outcome == {"readable": False, "status": 403, "error": "http_403"}
+
+
+def test_workspace_enumeration_is_readable_when_the_list_answers():
+    client = FakeAdminClient(_response(200, {"data": [{"name": "default"}, {"name": "payments"}],
+                                             "next": None}))
+    spaces, outcome = _workspaces(client, "http://kong.internal:8001", "enterprise")
+    assert spaces == [("default", "/default"), ("payments", "/payments")]
+    assert outcome == {"readable": True, "count": 2}
+
+
+def test_workspace_enumeration_is_not_attempted_on_oss():
+    # None = never attempted, and correctly so: OSS has no workspace layer to enumerate.
+    spaces, outcome = _workspaces(None, "http://kong.internal:8001", "community")
+    assert spaces == [("", "")]
+    assert outcome["readable"] is None
+
+
+def test_workspaces_not_enumerated_fires_when_the_list_was_refused():
+    n = node({"database": "postgres"}, edition="enterprise", workspaces=WORKSPACES_REFUSED)
+    r, p = route(), plugin("key-auth", config=dict(KEY_AUTH_CONFIG))
+    h = one(workspaces_not_enumerated(n, ctx(n, r, p)))
+    assert "http_403" in h.observation
+    assert "1 route(s)" in h.observation and "1 plugin(s)" in h.observation
+    assert h.assessable is False
+    assert "workspace list was refused" in h.assessment_reason
+
+
+def test_workspaces_not_enumerated_does_not_fire_on_oss():
+    assert workspaces_not_enumerated(node(), ctx(node())) == []
+
+
+def test_workspaces_not_enumerated_does_not_fire_when_the_list_was_read():
+    n = node({"database": "postgres"}, edition="enterprise",
+             workspaces={"readable": True, "count": 3})
+    assert workspaces_not_enumerated(n, ctx(n)) == []
+
+
+def test_workspaces_not_enumerated_does_not_fire_without_an_enumeration_record():
+    # A node collected before the outcome was recorded: absence of the record is not a refusal.
+    n = node()
+    n.raw.pop("workspace_enumeration")
+    assert workspaces_not_enumerated(n, ctx(n)) == []
 
 
 # ══ KONG.ROUTE.NO_AUTH_PLUGIN ═════════════════════════════════════════════
@@ -1012,16 +1093,41 @@ def test_consumer_no_credentials_does_not_fire_when_ldap_auth_advanced_is_presen
     assert consumer_no_credentials(c, ctx(node(), c, ldap)) == []
 
 
-def test_consumer_no_credentials_does_not_fire_when_the_sweep_was_skipped():
-    c = consumer()                                   # no credentials key — nothing observed
-    assert consumer_no_credentials(c, ctx(node(), c)) == []
+def test_consumer_no_credentials_is_not_assessable_when_the_sweep_was_skipped():
+    # No credentials key — nothing was observed. Returning [] here renders as "checked, this
+    # consumer holds credentials", which is the opposite of what happened.
+    c = consumer()
+    h = one(consumer_no_credentials(c, ctx(node(), c)))
+    assert h.assessable is False
+    assert h.assessment_reason == "the per-consumer credential sweep did not run for this consumer"
+    assert "no credential endpoint was queried" in h.observation
 
 
-def test_consumer_no_credentials_does_not_fire_when_every_endpoint_errored():
+def test_consumer_no_credentials_is_not_assessable_when_every_endpoint_errored():
     # No endpoint answered 200 — absence of evidence is not evidence of absence.
     c = consumer(credentials={p: {"status": None, "error": "ReadTimeout: timed out"}
                               for p in CREDENTIAL_PATHS})
-    assert consumer_no_credentials(c, ctx(node(), c)) == []
+    h = one(consumer_no_credentials(c, ctx(node(), c)))
+    assert h.assessable is False
+    assert h.assessment_reason == "no credential endpoint answered 200 for this consumer"
+    assert "/key-auth → None" in h.observation
+
+
+def test_consumer_no_credentials_files_no_gap_for_a_consumer_the_config_references():
+    # The reference exemptions are decided before the credential evidence: this consumer is
+    # KONG.AUTH.ANONYMOUS_FALLBACK's to report whatever its credentials turn out to be, so an
+    # unread sweep costs this rule nothing on it.
+    c = consumer()
+    p = plugin("key-auth", config={**KEY_AUTH_CONFIG, "anonymous": CONSUMER_ID})
+    assert consumer_no_credentials(c, ctx(node(), c, p)) == []
+
+
+def test_consumer_no_credentials_files_no_gap_when_external_identity_mapping_is_present():
+    # Not a gap but a genuine N/A: openid-connect consumers legitimately carry zero credentials,
+    # so there is nothing this rule wanted to read.
+    c = consumer()
+    oidc = plugin("openid-connect", config={"issuer": "https://idp.example.com"})
+    assert consumer_no_credentials(c, ctx(node(), c, oidc)) == []
 
 
 def test_consumer_no_credentials_does_not_fire_for_the_anonymous_consumer_by_id():
@@ -1088,14 +1194,45 @@ def test_cve_2026_6338_does_not_fire_on_an_unlisted_minor_series():
     assert cve_2026_6338(n, ctx(n)) == []
 
 
-def test_cve_2026_6338_does_not_fire_on_an_unparseable_version():
+def test_cve_2026_6338_is_not_assessable_on_an_unparseable_version():
+    # An unknown version is not a clean bill of health. Silence renders in the console as "not
+    # vulnerable" — a claim this rule has no evidence for.
     n = node({"database": "postgres"}, version="3.10.0.5-rc1", edition="enterprise")
-    assert cve_2026_6338(n, ctx(n)) == []
+    h = one(cve_2026_6338(n, ctx(n)))
+    assert h.assessable is False
+    assert h.assessment_reason == ("Kong version string not parseable to a known Enterprise "
+                                   "release")
+    assert "'3.10.0.5-rc1'" in h.observation
+    assert "3.10.0.12" in h.observation                 # the floors it could not be placed against
 
 
-def test_cve_2026_6338_does_not_fire_when_version_is_absent():
+def test_cve_2026_6338_is_not_assessable_when_version_is_absent():
     n = node({"database": "postgres"}, version=None, edition="enterprise")
+    h = one(cve_2026_6338(n, ctx(n)))
+    assert h.assessable is False
+    assert ".version=None" in h.observation
+
+
+def test_cve_2026_6338_is_not_assessable_when_the_edition_is_unknown():
+    # Without .edition the advisory's applicability is itself undetermined: 3.4.3.9 is affected on
+    # Enterprise and the version scheme of no OSS release at all.
+    n = node({"database": "postgres"}, version="3.4.3.9", edition=None)
+    h = one(cve_2026_6338(n, ctx(n)))
+    assert h.assessable is False
+    assert ".edition=None" in h.observation
+
+
+def test_cve_2026_6338_files_no_gap_for_a_series_no_floor_covers():
+    # An old node that reports no edition is still ruled out by its version alone — 2.3.x is in no
+    # affected series, so nothing about it was left undetermined.
+    n = node({"database": "postgres"}, version="2.3.1", edition=None)
     assert cve_2026_6338(n, ctx(n)) == []
+
+
+def test_cve_2026_6338_is_not_assessable_on_an_enterprise_node_reporting_a_three_part_version():
+    # Enterprise versions are 4-part; a 3-part string cannot be compared against a 4-part floor.
+    n = node({"database": "postgres"}, version="3.10.0", edition="enterprise")
+    assert one(cve_2026_6338(n, ctx(n))).assessable is False
 
 
 def test_cve_2026_6338_compares_components_numerically_not_lexicographically():
@@ -1154,10 +1291,46 @@ def test_cve_2021_27306_does_not_fire_on_a_current_oss_node():
     assert cve_2021_27306(n, ctx(n, p)) == []
 
 
-def test_cve_2021_27306_does_not_fire_on_an_unparseable_version():
+def test_cve_2021_27306_is_not_assessable_on_an_unparseable_version():
+    # An enabled jwt plugin on a node whose version cannot be placed is precisely the combination
+    # this rule exists to catch; reporting nothing renders it as not vulnerable.
     n = node(version="2.3.1-alpha", edition="community")
     p = plugin("jwt", config={"anonymous": None}, service_id=SVC_ID)
+    h = one(cve_2021_27306(n, ctx(n, p)))
+    assert h.assessable is False
+    assert h.assessment_reason == "Kong version string not parseable to a known release"
+    assert "'2.3.1-alpha'" in h.observation
+    assert "2.3.2 (OSS)" in h.observation
+
+
+def test_cve_2021_27306_is_not_assessable_when_the_version_is_absent():
+    n = node(version=None, edition="community")
+    p = plugin("jwt", config={"anonymous": None}, service_id=SVC_ID)
+    assert one(cve_2021_27306(n, ctx(n, p))).assessable is False
+
+
+def test_cve_2021_27306_files_no_gap_when_no_jwt_plugin_is_enabled():
+    # Nothing was left undetermined: without the jwt plugin there is no bypass to have on any
+    # version, so an unreadable version costs this rule nothing.
+    n = node(version=None, edition="community")
+    p = plugin("key-auth", config=dict(KEY_AUTH_CONFIG), service_id=SVC_ID)
     assert cve_2021_27306(n, ctx(n, p)) == []
+
+
+def test_cve_2021_27306_files_no_gap_for_a_version_above_the_fix_in_both_schemes():
+    # 3.10.0.5 is 4-part on a node reporting no edition. The scheme is ambiguous, the verdict is
+    # not: it is above 2.3.2 and 2.3.2.0 alike.
+    n = node(version="3.10.0.5", edition=None)
+    p = plugin("jwt", config={"anonymous": None}, service_id=SVC_ID)
+    assert cve_2021_27306(n, ctx(n, p)) == []
+
+
+def test_cve_2021_27306_is_not_assessable_on_an_enterprise_node_reporting_a_three_part_version():
+    n = node({"database": "postgres"}, version="2.3.1", edition="enterprise")
+    p = plugin("jwt", config={"anonymous": None}, service_id=SVC_ID)
+    h = one(cve_2021_27306(n, ctx(n, p)))
+    assert h.assessable is False
+    assert "2.3.2.0 (Enterprise)" in h.observation
 
 
 def test_cve_2021_27306_states_its_unverified_preconditions():

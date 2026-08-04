@@ -36,6 +36,7 @@ from typing import Callable, Optional
 import httpx
 
 from .creds import resolve_secrets, runtime_config, store_secrets
+from .redact import safe_error
 
 log = logging.getLogger(__name__)
 
@@ -196,9 +197,66 @@ def ocsf_detection_finding(finding: dict, event: dict) -> dict:
 #    resource_ext_id}], error}
 # and raises NotifyError on any failure. `client` is injectable for tests (MockTransport).
 
+def allow_private_targets() -> bool:
+    """On-prem estates legitimately notify an internal Splunk/webhook on RFC1918. Off by default
+    because in the hosted topology every tenant admin would otherwise hold an HTTP request
+    primitive inside the engine's network."""
+    return os.environ.get("VECTASEC_ALLOW_PRIVATE_NOTIFY_TARGETS", "").strip().lower() in (
+        "1", "true", "yes")
+
+
+def guard_url(url: str, *, dest: str) -> None:
+    """Refuse destinations that are really the engine's own network.
+
+    The URLs here are TENANT-SUPPLIED. Handed straight to httpx they make the engine — the
+    process holding a BYPASSRLS database connection and the service-role key — issue arbitrary
+    POSTs to anything it can route to, with the response status (and formerly the body) handed
+    back through the API. That is a cloud-metadata and internal-port-scan primitive available to
+    any tenant admin.
+
+    Link-local is refused ALWAYS, including on-prem: 169.254.169.254 is the cloud metadata
+    endpoint and no notification destination is ever legitimately there. The private/loopback
+    ranges are refused by default and allowed by the on-prem opt-out, because an internal
+    collector on 10.x is the normal case there and blocking it would break the feature.
+
+    A hostname that does not resolve is allowed through to httpx, which will fail it with a
+    connection error: refusing here would turn a transient DNS outage into a configuration
+    error, and it cannot be used to reach anything.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise NotifyError(f"{dest}: only http and https destinations are allowed")
+    host = parts.hostname
+    if not host:
+        raise NotifyError(f"{dest}: destination URL has no host")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        return
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if ip.is_link_local or ip.is_multicast or ip.is_unspecified:
+            raise NotifyError(f"{dest}: destination resolves to a link-local or metadata address")
+        if (ip.is_private or ip.is_loopback or ip.is_reserved) and not allow_private_targets():
+            raise NotifyError(
+                f"{dest}: destination resolves to a private address. Set "
+                f"VECTASEC_ALLOW_PRIVATE_NOTIFY_TARGETS=1 if this engine is meant to notify "
+                f"systems on its own network.")
+
+
 def _post(client: Optional[httpx.Client], url: str, *, dest: str, **kwargs) -> httpx.Response:
     """POST with timeout + uniform error mapping. The URL is a secret for most destinations,
     so error text names the destination TYPE, never the URL."""
+    # `client` is injected only by tests (MockTransport), which never leave the process.
+    if client is None:
+        guard_url(url, dest=dest)
     try:
         if client is not None:
             res = client.post(url, **kwargs)
@@ -464,7 +522,11 @@ def _notify_scan(conn, tenant_id: str, scan_id: str) -> list[dict]:
                 deliver(itype, merged, event)
                 sent, err = "sent", None
             except Exception as e:          # per-destination isolation: record and continue
-                sent, err = "error", f"{type(e).__name__}: {e}"[:500]
+                # safe_error, not raw text. This column is readable by every viewer in the
+                # tenant, and not every exception is a NotifyError with its URL already
+                # stripped — httpx.InvalidURL, for one, is not an httpx.HTTPError, so it
+                # escapes _post's handler carrying the userinfo from the URL that caused it.
+                sent, err = "error", safe_error(e)
                 log.warning("notify: %s/%s failed for scan %s: %s", itype, iname, scan_id, err)
             cur.execute(
                 """insert into notification_deliveries

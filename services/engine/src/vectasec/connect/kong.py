@@ -99,20 +99,31 @@ def _paginate(client: httpx.Client, base: str, path: str, size: int = 1000) -> l
     return out
 
 
-def _workspaces(client: httpx.Client, base: str, edition) -> list:
+def _workspaces(client: httpx.Client, base: str, edition) -> tuple:
     """Enterprise scopes /plugins, /routes, /services and /consumers per workspace. Collecting
     routes from every workspace while collecting plugins from `default` alone would false-FAIL every
     "route has no auth plugin" rule, so all four are walked per workspace or none are. OSS has no
     workspaces and 404s here.
+
+    Returns (spaces, outcome). The outcome is three-valued and is the whole point of returning a
+    pair: `readable` None means the enumeration was never attempted (OSS has no workspaces to
+    enumerate), False means it was attempted and refused, True means the list was read. A refusal
+    silently narrows the scan to the default workspace — every route, service, consumer and plugin
+    in every other workspace is then never collected, and KONG.ROUTE.NO_AUTH_PLUGIN and its
+    siblings never run on them. Unrecorded, that scope is indistinguishable from an OSS node with
+    one workspace, which is why the status has to leave this function.
     """
     if edition != "enterprise":
-        return [("", "")]
+        return [("", "")], {"readable": None,
+                            "reason": "not attempted: workspaces are an Enterprise feature"}
     try:
         rows = _paginate(client, base, "/workspaces")
-    except httpx.HTTPStatusError:
-        return [("", "")]
+    except httpx.HTTPStatusError as e:
+        return [("", "")], {"readable": False, "status": e.response.status_code,
+                            "error": f"http_{e.response.status_code}"}
     names = [w.get("name") for w in rows if w.get("name")]
-    return [(n, f"/{n}") for n in names] or [("", "")]
+    return ([(n, f"/{n}") for n in names] or [("", "")],
+            {"readable": True, "count": len(names)})
 
 
 def _probe_unauthenticated(base: str, timeout: float, verify) -> dict:
@@ -218,7 +229,7 @@ def collect(config: dict) -> Collected:
 
         edition = node.get("edition")
         cfg = node.get("configuration") or {}
-        spaces = _workspaces(client, base, edition)
+        spaces, workspace_outcome = _workspaces(client, base, edition)
 
         plugins, routes, services, consumers = [], [], [], []
         for ws, prefix in spaces:
@@ -279,6 +290,9 @@ def collect(config: dict) -> Collected:
             "configuration": {k: cfg[k] for k in _CONFIG_KEYS if k in cfg},
             "probes": probes,
             "workspaces": [ws for ws, _ in spaces],
+            # `workspaces` alone cannot carry this: a refused /workspaces and an OSS node both
+            # leave it [""]. KONG.SCOPE.WORKSPACES_NOT_ENUMERATED reads the outcome, not the list.
+            "workspace_enumeration": workspace_outcome,
             "consumer_credential_sweep": sweep,
             # GET / reports the INSTALLED plugin set (available_on_server) alongside the
             # configured instances collected from /plugins. The delta matters both ways: a

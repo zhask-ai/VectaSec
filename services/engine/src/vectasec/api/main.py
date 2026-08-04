@@ -302,42 +302,12 @@ def _is_super_admin(user_id: str) -> bool:
 
 
 # ── Error text that is safe to persist and return ─────────────────────────
-# Connector exceptions carry whatever the underlying client library felt like saying, and those
-# libraries are invoked with VAULTED CREDENTIALS. psycopg echoes a malformed DSN verbatim
-# (`postgresql://user:pass@host`), httpx can include a URL with userinfo, and several SDKs put
-# the endpoint and token fragment in the message. That text was going into `audit_log.detail`
-# and `notification_deliveries.error` — both readable by every tenant member, including VIEWERS.
-#
-# `notify._post` already keeps URLs out of its error text and the action-layer migration's own
-# comment says these columns are "never a secret/URL value". This makes that true here too.
-_SECRET_PATTERNS = [
-    # scheme://user:pass@host  → keep the shape, drop the credential
-    (re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), r"\1<redacted>@"),
-    # Bearer FIRST. `Authorization: Bearer <jwt>` otherwise matches the key=value rule below,
-    # which consumes only the word "Bearer" as the value and leaves the token in the clear —
-    # verified: it leaked the JWT until this pair was reordered.
-    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+"), "bearer <redacted>"),
-    # password / token / secret / api-key = value
-    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|apikey|authorization)"
-                r"\s*[=:]\s*\S+"), r"\1=<redacted>"),
-]
-
-_ERROR_MAX = 300
-
-
-def safe_error(e: BaseException) -> str:
-    """A message safe to store and return: type name, redacted text, bounded length.
-
-    The type name is always exact — that is the part an operator debugs with — while the free
-    text is scrubbed and truncated. The full exception still reaches the server log, where the
-    audience is the operator rather than every viewer in the tenant.
-    """
-    text = str(e)
-    for pattern, replacement in _SECRET_PATTERNS:
-        text = pattern.sub(replacement, text)
-    if len(text) > _ERROR_MAX:
-        text = text[:_ERROR_MAX] + "… (truncated)"
-    return f"{type(e).__name__}: {text}" if text else type(e).__name__
+# Redaction moved to vectasec/redact.py so notify.py's scan-time delivery path shares ONE
+# implementation with this one. They had drifted: the rare path (a human clicking Test) redacted,
+# while the path that runs on EVERY scan wrote raw exception text into the same viewer-readable
+# column. Re-exported here because callers and tests import it from this module.
+from ..redact import ERROR_MAX as _ERROR_MAX  # noqa: E402,F401
+from ..redact import safe_error  # noqa: E402
 
 
 def _require_rank(p: Principal, min_rank: int) -> Principal:
@@ -575,6 +545,7 @@ class ConnectionRequest(BaseModel):
     name: str = Field(min_length=1)
     config: dict = Field(default_factory=dict)
     mode: Literal["cloud", "collector"] = "cloud"
+    collector_id: Optional[uuid.UUID] = None
 
     @field_validator("name")
     @classmethod
@@ -583,6 +554,65 @@ class ConnectionRequest(BaseModel):
         if not v:
             raise ValueError("name is required")
         return v
+
+
+@app.get("/collectors")
+def list_collectors(p: Principal = Depends(principal)) -> dict:
+    """The tenant's enrolled collectors. `online` mirrors the console's presence convention.
+
+    This exists because a collector-mode connection has to name the collector that runs it, and
+    a human cannot type a uuid they have never been shown.
+    """
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select id::text, name, status, version, last_heartbeat,
+                      last_heartbeat > now() - interval '2 minutes'
+                 from collectors where tenant_id = %s order by name""",
+            (p.tenant_id,),
+        )
+        rows = cur.fetchall()
+    return {"collectors": [
+        {"id": r[0], "name": r[1], "status": r[2], "version": r[3],
+         "last_heartbeat": r[4], "online": bool(r[5])} for r in rows]}
+
+
+def _resolve_collector(cur, tenant_id: str, mode: str,
+                       collector_id: Optional[uuid.UUID]) -> Optional[str]:
+    """Which collector runs this connection — validated against THIS tenant.
+
+    `connections.collector_id` is what GET /collector/jobs dispatches on, and until now nothing
+    ever wrote it: a collector-mode connection could be created but its scans could never reach
+    a collector, so they sat queued forever. That is why the round trip had never been observed.
+
+    Tenant validation is not a formality here. The id arrives in a request body, and a collector
+    id belonging to another tenant would hand that tenant's collector a job — and with it the
+    NAME of a target in someone else's estate.
+    """
+    if mode != "collector":
+        return None
+    if collector_id is not None:
+        cur.execute("select id::text from collectors where id=%s and tenant_id=%s",
+                    (str(collector_id), tenant_id))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(400, "no such collector for this tenant")
+        return row[0]
+
+    # No collector named. With exactly one enrolled there is no ambiguity to resolve, so bind it
+    # (the audit row records that we chose). With none or several, refusing beats guessing —
+    # silently picking one would send a target name to an operator who was never meant to see it.
+    cur.execute("select id::text, name from collectors where tenant_id=%s order by name",
+                (tenant_id,))
+    rows = cur.fetchall()
+    if len(rows) == 1:
+        return rows[0][0]
+    if not rows:
+        raise HTTPException(
+            400, "a collector-mode connection needs an enrolled collector to run it, and this "
+                 "tenant has none. Enroll one (see services/collector) or use mode='cloud'.")
+    raise HTTPException(
+        400, "collector_id is required when more than one collector is enrolled: "
+             + ", ".join(f"{name} ({cid})" for cid, name in rows))
 
 
 @app.post("/connections", status_code=201)
@@ -606,17 +636,25 @@ def create_connection(req: ConnectionRequest, p: Principal = Depends(editing)) -
                 (p.tenant_id, req.type, req.name),
             )
             existed = cur.fetchone() is not None
+            collector_id = _resolve_collector(cur, p.tenant_id, req.mode, req.collector_id)
             connection_id, public_config, _ref = ensure_connection_with_creds(
                 cur, p.tenant_id, req.type, req.name, req.config, mode=req.mode)
+            if collector_id:
+                cur.execute("update connections set collector_id=%s where id=%s and tenant_id=%s",
+                            (collector_id, str(connection_id), p.tenant_id))
             _audit(cur, p, "connection.updated" if existed else "connection.created",
                    str(connection_id),
                    {"type": req.type, "name": req.name, "mode": req.mode,
+                    "collector_id": collector_id,
+                    "collector_chosen_by": ("request" if req.collector_id
+                                            else "sole enrolled collector" if collector_id
+                                            else None),
                     "config_keys": sorted(req.config),
                     "secret_keys_vaulted": sorted(set(req.config) - set(public_config))})
         conn.commit()
 
     return {"connection_id": str(connection_id), "type": req.type, "name": req.name,
-            "created": not existed}
+            "created": not existed, "collector_id": collector_id}
 
 
 @app.post("/connections/{connection_id}/test")
@@ -1267,6 +1305,31 @@ def report_sbom(p: Principal = Depends(principal)) -> Response:
              "score": cvss, "fixed": [fixed_in] if fixed_in else [], "description": title}
             for cve, kind, ext, cvss, kev, fixed_in, src, title in cur.fetchall()]
 
+        # The third feed. NVD reaches the CPE-addressable components OSV cannot see (Kong,
+        # Pulsar), so omitting it here would leave the download claiming fewer vulnerabilities
+        # than the findings queue shows for exactly the products with the thinnest coverage.
+        cur.execute(
+            """select distinct on (o.source_ref->>'cve_id', r.kind, r.ext_id)
+                      o.source_ref->>'cve_id', r.kind, r.ext_id,
+                      o.source_ref->>'severity_band', o.source_ref->'cvss_score',
+                      o.source_ref->'version_end_excluding', o.source_ref->>'summary',
+                      o.source_ref->>'url'
+                 from findings f
+                 join observations o on o.finding_id = f.id
+                 join resources r on r.id = f.resource_id
+                where f.tenant_id = %s and f.rule_id = 'SUPPLY.NVD.KNOWN_VULNERABILITY'
+                  and f.status != 'resolved' and coalesce(r.stale, false) = false
+                  and o.source_ref->>'cve_id' is not null
+                order by o.source_ref->>'cve_id', r.kind, r.ext_id, o.seq desc
+                limit %s""",
+            (p.tenant_id, REPORT_MAX_FINDINGS),
+        )
+        vuln_entries += [
+            {"id": cve, "ref": f"{kind}/{ext}", "source_name": "NVD",
+             "url": url or f"https://nvd.nist.gov/vuln/detail/{cve}", "band": band,
+             "score": score, "fixed": ceilings or [], "description": summary}
+            for cve, kind, ext, band, score, ceilings, summary, url in cur.fetchall()]
+
     resources = [{"kind": k, "name": n, "ext_id": e, "labels": lab, "raw": raw,
                   "connection_type": t} for k, n, e, lab, raw, t, _cid in rows]
     # Any probe-derived component downgrades the whole document to `discovery`.
@@ -1291,6 +1354,210 @@ def report_sbom(p: Principal = Depends(principal)) -> Response:
         content=json.dumps(doc, indent=2),
         media_type="application/vnd.cyclonedx+json; version=1.6",
         headers={"Content-Disposition": 'attachment; filename="vectasec-sbom.cdx.json"'})
+
+
+@app.get("/licensing")
+def licensing(p: Principal = Depends(principal)) -> dict:
+    """Which licence terms bind each component actually running in the estate.
+
+    Middleware licensing is version-dependent — Redis 7.2 is BSD, 7.4 is source-available, 8.0
+    is AGPL — so this is derived from the version we READ, not from the product's current
+    LICENSE file. `osi_approved: false` is the answer legal actually needs; it is not a security
+    finding and is deliberately not filed as one, because a licence is a contractual fact rather
+    than a vulnerability. Components the table does not cover report `known: false` instead of a
+    guess: a wrong licence assertion travels straight into somebody's compliance report.
+    """
+    from .. import sbom
+
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select r.kind, r.name, r.ext_id, r.labels,
+                      jsonb_build_object(
+                        'product', r.raw->'product', 'version', r.raw->'version',
+                        'version_inferred', r.raw->'version_inferred',
+                        'redis_version', r.raw->'redis_version',
+                        'rabbitmq_version', r.raw->'rabbitmq_version',
+                        'broker_version', r.raw->'broker_version',
+                        'kafka_version', r.raw->'kafka_version',
+                        'etcdserver', r.raw->'etcdserver') as raw,
+                      c.type, c.name
+                 from resources r join connections c on c.id = r.connection_id
+                where r.tenant_id = %s and coalesce(r.stale, false) = false
+                limit %s""",
+            (p.tenant_id, REPORT_MAX_FINDINGS),
+        )
+        rows = cur.fetchall()
+
+    seen: dict[str, dict] = {}
+    for kind, name, ext_id, labels, raw, ctype, cname in rows:
+        comp = sbom.component_for({"kind": kind, "name": name, "ext_id": ext_id,
+                                   "labels": labels, "raw": raw, "connection_type": ctype})
+        if not comp:
+            continue
+        # Same rule as the SBOM: an inferred version is a floor, and the licence boundaries sit
+        # between adjacent minors, so it cannot support a licence claim either. It still appears
+        # in the list, marked unknown, rather than vanishing — the component IS running.
+        inferred = "evidence" in comp
+        lic = None if inferred else sbom.license_for(comp["name"], comp["version"])
+        # One row per (product, version): the same broker seen through two connections is one
+        # licensing obligation, not two.
+        key = f"{comp['name']}@{comp['version']}"
+        entry = seen.setdefault(key, {
+            "product": comp["name"], "version": comp["version"],
+            "known": lic is not None,
+            "licenses": lic["names"] if lic else [],
+            "osi_approved": lic["osi"] if lic else None,
+            "source_url": lic["source_url"] if lic else None,
+            "choice": lic["choice"] if lic else False,
+            "inferred_version": inferred,
+            "connections": [],
+        })
+        if cname and cname not in entry["connections"]:
+            entry["connections"].append(cname)
+
+    components = sorted(seen.values(), key=lambda c: (c["product"], c["version"]))
+    return {
+        "components": components,
+        "summary": {
+            "total": len(components),
+            "non_osi": sum(1 for c in components if c["osi_approved"] is False),
+            "unknown": sum(1 for c in components if not c["known"]),
+        },
+    }
+
+
+@app.get("/reports/vex")
+def report_vex(p: Principal = Depends(principal)) -> Response:
+    """CycloneDX 1.6 VEX — what this estate SAYS about the vulnerabilities in its SBOM.
+
+    Kept separate from /reports/sbom on purpose: the inventory changes when the estate changes,
+    while the assessments change whenever a human rules on something, and consumers ingest the
+    two on different cadences.
+
+    The claims are grounded in the product's own finding lifecycle rather than asserted in bulk:
+    an open finding is `in_triage` (we found it; we have not judged it), a suppressed one is
+    `not_affected` carrying the suppressing human's verbatim reason and — critically — the date
+    the suppression lapses, and a `not_assessable` finding is WITHHELD entirely, because a check
+    that could not run is not a not-affected claim. The withheld count is published in metadata
+    so the document cannot be mistaken for exhaustive.
+    """
+    from types import SimpleNamespace
+
+    from .. import sbom
+    from ..scan import _is_suppressed
+
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute("select name from tenants where id = %s", (p.tenant_id,))
+        row = cur.fetchone()
+        tenant_name = row[0] if row else "estate"
+        cur.execute("select id::text from scans where tenant_id = %s and status = 'done'",
+                    (p.tenant_id,))
+        scan_ids = [s[0] for s in cur.fetchall()]
+
+        # Suppressions carry the human reasoning the VEX claim is made of. Read them WITH their
+        # reason/expiry (unlike _active_suppressions, which only needs the predicate) so each
+        # not_affected claim can name who said what and until when.
+        cur.execute(
+            """select rule_id, scope, reason, expires_at::text
+                 from suppressions
+                where tenant_id = %s and (expires_at is null or expires_at > now())""",
+            (p.tenant_id,),
+        )
+        supps = [{"rule_id": r[0], "scope": r[1], "reason": r[2], "expires_at": r[3]}
+                 for r in cur.fetchall()]
+
+        # Every advisory this product has filed, with the finding's own lifecycle state. The
+        # three feeds are unioned because a VEX consumer cares about the CVE, not about which
+        # of our sources happened to find it first.
+        cur.execute(
+            """select distinct on (advisory, kind, ext_id)
+                      advisory, kind, ext_id, band, score, status, assessment, rule_id, src
+               from (
+                 select coalesce(o.source_ref->>'osv_id', o.source_ref->>'cve',
+                                 o.source_ref->>'cve_id')        as advisory,
+                        r.kind, r.ext_id,
+                        o.source_ref->>'severity_band'           as band,
+                        o.source_ref->'cvss_score'               as score,
+                        f.status, f.assessment, f.rule_id,
+                        o.source_ref->>'source'                  as src,
+                        o.seq
+                   from findings f
+                   join observations o on o.finding_id = f.id
+                   join resources r on r.id = f.resource_id
+                  where f.tenant_id = %s
+                    and f.rule_id in ('SUPPLY.OSV.KNOWN_VULNERABILITY',
+                                      'SUPPLY.NVD.KNOWN_VULNERABILITY',
+                                      'CVE.KNOWN_VULNERABILITY')
+                    and coalesce(r.stale, false) = false
+               ) q
+              where advisory is not null
+              order by advisory, kind, ext_id, seq desc
+              limit %s""",
+            (p.tenant_id, REPORT_MAX_FINDINGS),
+        )
+        rows = cur.fetchall()
+
+        cur.execute(
+            """select r.kind, r.name, r.ext_id, r.labels,
+                      jsonb_build_object(
+                        'product', r.raw->'product', 'version', r.raw->'version',
+                        'version_inferred', r.raw->'version_inferred',
+                        'redis_version', r.raw->'redis_version',
+                        'rabbitmq_version', r.raw->'rabbitmq_version',
+                        'broker_version', r.raw->'broker_version',
+                        'kafka_version', r.raw->'kafka_version',
+                        'etcdserver', r.raw->'etcdserver') as raw,
+                      c.type
+                 from resources r join connections c on c.id = r.connection_id
+                where r.tenant_id = %s and coalesce(r.stale, false) = false
+                limit %s""",
+            (p.tenant_id, REPORT_MAX_FINDINGS),
+        )
+        component_refs = set()
+        for kind, name, ext_id, labels, raw, ctype in cur.fetchall():
+            comp = sbom.component_for({"kind": kind, "name": name, "ext_id": ext_id,
+                                       "labels": labels, "raw": raw, "connection_type": ctype})
+            if comp:
+                component_refs.add(comp["bom-ref"])
+
+    entries = []
+    for advisory, kind, ext_id, band, score, status, assessment, rule_id, src in rows:
+        ref = f"{kind}/{ext_id}"
+        if ref not in component_refs:
+            continue          # same anti-dangling-ref rule the SBOM keeps
+        reason = expires = None
+        if status == "suppressed":
+            # Which suppression silenced it — tested one at a time with the SAME predicate that
+            # set the status, so the reason we publish is the reason that actually applied.
+            res = SimpleNamespace(ext_id=ext_id, kind=kind)
+            matched = [s for s in supps if _is_suppressed([s], rule_id, res)]
+            if len(matched) == 1:
+                reason, expires = matched[0]["reason"], matched[0]["expires_at"]
+            elif matched:
+                reason = (f"{len(matched)} suppressions apply to this rule; the earliest "
+                          f"lapse date governs. Reasons: "
+                          + " | ".join(str(m["reason"]) for m in matched[:3]))
+                dates = sorted(m["expires_at"] for m in matched if m["expires_at"])
+                expires = dates[0] if dates else None
+        entries.append({
+            "id": advisory, "ref": ref, "band": band, "score": score,
+            "status": status, "assessment": assessment,
+            "reason": reason, "expires_at": expires,
+            "source_name": ("OSV" if rule_id.startswith("SUPPLY.OSV")
+                            else "NVD" if rule_id.startswith("SUPPLY.NVD")
+                            else "VectaSec curated dataset"),
+            "url": (f"https://osv.dev/vulnerability/{advisory}"
+                    if rule_id.startswith("SUPPLY.OSV")
+                    else f"https://nvd.nist.gov/vuln/detail/{advisory}"
+                    if rule_id.startswith("SUPPLY.NVD") else src),
+        })
+
+    doc = sbom.to_vex(entries, tenant_name=tenant_name, tenant_id=str(p.tenant_id),
+                      scan_ids=scan_ids, timestamp=_now_iso())
+    return Response(
+        content=json.dumps(doc, indent=2),
+        media_type="application/vnd.cyclonedx+json; version=1.6",
+        headers={"Content-Disposition": 'attachment; filename="vectasec-vex.cdx.json"'})
 
 
 # ── Graph ─────────────────────────────────────────────────────────────────
@@ -1852,11 +2119,23 @@ def super_operator(p: Principal = Depends(acting)) -> Principal:
     trusts self-asserted identity wholesale, so a roster check against a made-up actor would be
     theatre. Every other path must present an actor that IS on the roster; a tenant admin, no
     matter how senior inside their org, is refused here.
+
+    On the SERVICE-token path the actor is the unverified `X-VectaSec-Actor` header: the engine
+    has authenticated the calling service, not the human it names. Checking the super-admin
+    roster against that header therefore turns one shared env-var secret into platform rank —
+    a token holder need only know a super admin's uuid, which `GET /members` hands out. That is
+    exactly the elevation `_role_for_actor` refuses to do without `VECTASEC_ALLOW_SERVICE_SUPERADMIN`,
+    and these three endpoints (delete any auth user, grant/revoke platform operator) are far more
+    destructive than the tenant-admin rank that gate was written to protect. Same gate, same
+    default: off.
     """
     if p.via == "dev":
         return p
     if p.via not in ("service", "jwt"):
         raise HTTPException(403, f"authentication path {p.via!r} cannot perform actions")
+    if p.via == "service" and not _allow_service_superadmin():
+        raise HTTPException(
+            403, "this action requires platform operator rank")
     if not _is_super_admin(p.actor):
         raise HTTPException(403, "this action requires platform operator rank")
     return p

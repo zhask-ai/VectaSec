@@ -305,8 +305,10 @@ def correlate_estate(conn, tenant_id: str, scan_id: str) -> dict:
                       -- _persist_scan, and for the same reason — it never overwrites a status
                       -- a HUMAN set (resolved/triaged/in_progress/accepted).
                       status = case
-                        when excluded.status = 'suppressed' then 'suppressed'
-                        when findings.status = 'suppressed' then 'open'
+                        when excluded.status = 'suppressed'
+                              and findings.status in ('open','suppressed') then 'suppressed'
+                        when findings.status = 'suppressed'
+                              and excluded.status <> 'suppressed' then 'open'
                         else findings.status
                       end
                    returning id""",

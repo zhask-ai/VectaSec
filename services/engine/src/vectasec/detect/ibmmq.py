@@ -7,6 +7,16 @@ decide what an inbound connection becomes and whether it is encrypted. These rul
 attributes straight from MQSC DISPLAY output (via the connector's parse layer) and state the
 attribute value as evidence, never a conclusion. They run on the distinct `ibmmq_*` kinds, so the
 Kafka/RabbitMQ/Redis packs never touch MQ resources.
+
+READ IT, OR DO NOT RULE ON IT. An MQWebAdminRO user commonly holds DISPLAY on channels but not on
+the queue manager (or the reverse), so a denied read is routine. Every rule below that reads a
+DISPLAY QMGR attribute gates on `qmgr_readable` first: without that gate an absent CONNAUTH is
+indistinguishable from a blank one and NO_OBJECT fabricates a CRITICAL against an attribute
+nobody ever read, while CHLAUTH.DISABLED and the CHCKCLNT rules report a hardened broker as
+clean. The flags are three-valued (None = not attempted, False = attempted and denied, True =
+read); anything but True means the rule stays silent and IBMMQ.SCAN.NOT_ASSESSABLE files the gap
+once for the whole queue manager, naming which reads were denied and which rules went
+unevaluated. Silence and not-assessable are different answers here, as everywhere.
 """
 from ..contracts import Hit
 from ..registry import detector
@@ -16,10 +26,23 @@ _CHCKCLNT_NONE = "NONE"
 _CHCKCLNT_OPTIONAL = "OPTIONAL"
 
 
+def _qmgr_read(raw: dict) -> bool:
+    """Did DISPLAY QMGR actually return this queue manager's attributes?
+
+    True only for an explicit True: a missing flag means no reader ever established that the
+    attributes were read, and a rule that fires on unread data states a fact that was never
+    observed. The connector's parse layer always sets it.
+    """
+    return (raw or {}).get("qmgr_readable") is True
+
+
 @detector(kinds=["ibmmq_qmgr"], rule_id="IBMMQ.CONNAUTH.NO_OBJECT", severity="critical",
           title="Queue manager has no connection authentication (CONNAUTH is blank)")
 def connauth_missing(r, ctx) -> list:
     raw = r.raw or {}
+    if not _qmgr_read(raw):
+        return []   # CONNAUTH was never read — SCAN.NOT_ASSESSABLE owns it, this rule must not
+                    # claim a blank one. An unread attribute is not an empty attribute.
     if str(raw.get("connauth") or "").strip():
         return []
     return [Hit(
@@ -38,6 +61,8 @@ def connauth_missing(r, ctx) -> list:
           title="Connection authentication does not check client credentials (CHCKCLNT NONE/OPTIONAL)")
 def connauth_chckclnt_open(r, ctx) -> list:
     raw = r.raw or {}
+    if not _qmgr_read(raw):
+        return []   # no DISPLAY QMGR → no CONNAUTH name → nothing to resolve or judge
     connauth = str(raw.get("connauth") or "").strip()
     if not connauth:
         return []   # NO_OBJECT owns the blank-CONNAUTH case
@@ -75,6 +100,9 @@ def connauth_chckclnt_open(r, ctx) -> list:
           title="Channel authentication records are disabled (CHLAUTH DISABLED)")
 def chlauth_disabled(r, ctx) -> list:
     raw = r.raw or {}
+    if not _qmgr_read(raw):
+        return []   # CHLAUTH unread — reporting nothing here would read as ENABLED, so the gap
+                    # is filed by SCAN.NOT_ASSESSABLE instead of being passed over in silence
     if str(raw.get("chlauth_records") or "").strip().upper() != "DISABLED":
         return []
     return [Hit(
@@ -93,6 +121,8 @@ def chlauth_disabled(r, ctx) -> list:
           title="Locally-bound applications are not authenticated (CHCKLOCL NONE)")
 def connauth_chcklocl_none(r, ctx) -> list:
     raw = r.raw or {}
+    if not _qmgr_read(raw):
+        return []
     if not raw.get("authinfo_readable"):
         return []
     if str(raw.get("chcklocl") or "").strip().upper() != _CHCKCLNT_NONE:
@@ -207,7 +237,9 @@ def system_svrconn_unprotected(r, ctx) -> list:
     qmgr = next((q for q in ctx.of_kind("ibmmq_qmgr")
                  if q.ext_id == raw.get("qmgr_ext_id")
                  or (q.raw or {}).get("qmgr_name") == raw.get("qmgr_name")), None)
-    if qmgr is None or str((qmgr.raw or {}).get("chlauth_records") or "").upper() != "DISABLED":
+    if qmgr is None or not _qmgr_read(qmgr.raw or {}):
+        return []   # the CHLAUTH half of this cross-resource rule was never read
+    if str((qmgr.raw or {}).get("chlauth_records") or "").upper() != "DISABLED":
         return []
     return [Hit(
         observation=(f"built-in channel {name} is a SVRCONN with MCAUSER('{mcauser or '(blank)'}') "
@@ -246,3 +278,70 @@ def queue_wide_authority(r, ctx) -> list:
             source_ref={"mqsc": f"DISPLAY AUTHREC PROFILE({raw.get('queue_name')})"},
         ))
     return hits
+
+
+# ══ Queue manager: the coverage-gap surface ═══════════════════════════════════
+# Which MQSC read each rule depends on. A denied read means those rules had nothing to read, so
+# their silence is "unknown", not "clean" — this table is what turns that into a stated fact.
+# DISPLAY AUTHINFO is deliberately absent: IBMMQ.CONNAUTH.CLIENT_CHECK_DISABLED already files its
+# own not-assessable for that one, and a gap should be reported once, not twice.
+_READ_GATES = (
+    # raw readability flag, errors[] key, MQSC command, the rules that read it
+    ("qmgr_readable", "qmgr", "DISPLAY QMGR",
+     ("IBMMQ.CHLAUTH.DISABLED", "IBMMQ.CONNAUTH.CLIENT_CHECK_DISABLED",
+      "IBMMQ.CONNAUTH.LOCAL_CHECK_DISABLED", "IBMMQ.CONNAUTH.NO_OBJECT",
+      "IBMMQ.CHANNEL.SYSTEM_SVRCONN_UNPROTECTED")),
+    ("channels_readable", "channel", "DISPLAY CHANNEL(*)",
+     ("IBMMQ.CHANNEL.MCAUSER_BLANK", "IBMMQ.CHANNEL.MCAUSER_PRIVILEGED",
+      "IBMMQ.CHANNEL.NO_TLS", "IBMMQ.CHANNEL.SSLCAUTH_OPTIONAL",
+      "IBMMQ.CHANNEL.SYSTEM_SVRCONN_UNPROTECTED")),
+    ("queues_readable", "queue", "DISPLAY QUEUE(*) TYPE(LOCAL)",
+     ("IBMMQ.QUEUE.WIDE_AUTHORITY",)),
+    ("authrecs_readable", "authrec", "DISPLAY AUTHREC",
+     ("IBMMQ.QUEUE.WIDE_AUTHORITY",)),
+)
+
+
+@detector(kinds=["ibmmq_qmgr"], rule_id="IBMMQ.SCAN.NOT_ASSESSABLE", severity="info",
+          title="Part of the IBM MQ rulepack was not evaluated (an MQSC DISPLAY was denied)")
+def scan_not_assessable(r, ctx) -> list:
+    """The honest third outcome at queue-manager scope. An mqweb user in MQWebAdminRO without
+    DISPLAY authority on the queue manager gets 403 on DISPLAY QMGR; the connector records that
+    instead of failing the scan, and this rule states it. One finding per queue manager naming
+    every denied read and every rule left unevaluated — not one per rule, and never a pass.
+
+    Fires only on False (attempted and denied). None means the read was never attempted, which
+    is a different thing and not this rule's business; True means the attributes were read.
+    """
+    raw = r.raw or {}
+    errors = raw.get("errors") or {}
+    denied: list[str] = []
+    keys: list[str] = []
+    commands: list[str] = []
+    unevaluated: set[str] = set()
+    for flag, err_key, command, rules in _READ_GATES:
+        if raw.get(flag) is not False:
+            continue
+        denied.append(f"{command} ({errors.get(err_key) or 'denied'})")
+        keys.append(err_key)
+        commands.append(command)
+        unevaluated.update(rules)
+    if not denied:
+        return []
+    rule_list = ", ".join(sorted(unevaluated))
+    return [Hit(
+        observation=(f"queue manager {raw.get('qmgr_name')} at {raw.get('base_url')}: "
+                     f"{len(denied)} administrative read(s) were refused for the scanning user — "
+                     f"{'; '.join(denied)} — so {len(unevaluated)} rule(s) had no attribute to "
+                     f"read and were not evaluated: {rule_list}"),
+        remediation=("Grant the scanning mqweb user DISPLAY authority on the refused objects "
+                     "(the MQWebAdminRO role plus, on the queue manager, SET AUTHREC "
+                     "PROFILE(SELF) OBJTYPE(QMGR) PRINCIPAL('<user>') AUTHADD(DSP,CONNECT) and "
+                     "AUTHADD(DSP) on CHANNEL/QUEUE/AUTHREC profiles), then re-scan. Until then "
+                     "the controls above are unknown, not clean — the rules listed produced no "
+                     "finding because they had nothing to read."),
+        detail=f"denied={','.join(keys)} unevaluated={len(unevaluated)}",
+        assessable=False,
+        assessment_reason=f"MQSC read(s) refused: {'; '.join(denied)}",
+        source_ref={"mqsc": ", ".join(commands)},
+    )]

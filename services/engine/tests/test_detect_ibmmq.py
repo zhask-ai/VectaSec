@@ -1,13 +1,20 @@
-"""IBM MQ connector parse-layer + detector + NHI tests. Fully offline: no httpx client is ever
-constructed, no mqweb server is touched. The golden fixture holds MQSC runCommandJSON `parameters`
-dicts shaped exactly as the connector consumes them, so a shape drift between the connector's
-parse layer and the rulepack fails here first."""
+"""IBM MQ connector parse-layer + collect-wiring + detector + NHI tests. Fully offline: no httpx
+client is ever constructed, no mqweb server is touched (collect() runs with `_run_mqsc` scripted
+per MQSC qualifier). The golden fixture holds MQSC runCommandJSON `parameters` dicts shaped
+exactly as the connector consumes them, so a shape drift between the connector's parse layer and
+the rulepack fails here first.
+
+The coverage-gap section is load-bearing: a queue manager that answers 403 to DISPLAY QMGR must
+produce no finding from the rules that read its attributes and exactly one IBMMQ.SCAN.NOT_ASSESSABLE
+naming them, because an unread attribute is neither blank nor clean."""
 import json
 import pathlib
+import types
 
 from vectasec.contracts import ScanContext, Collected
 from vectasec.identity import IDENTITY_EXTRACTORS, derive_identities
-from vectasec.registry import CONNECTOR_FIELDS, CONNECTORS
+from vectasec.registry import CONNECTOR_FIELDS, CONNECTORS, DETECTORS
+from vectasec.connect import ibmmq as conn
 from vectasec.connect.ibmmq import (
     parse_qmgr, parse_channel, parse_queue, parse_authrec, _attr,
 )
@@ -137,8 +144,15 @@ def test_chcklocl_none_low():
                    FIX["chckclnt_optional"]["authinfo"], True)      # chcklocl=none
     assert det.connauth_chcklocl_none(q, _ctx([]))
     assert det.connauth_chcklocl_none(qmgr("hardened"), _ctx([])) == []   # OPTIONAL → clean
-    # authinfo unreadable → not evaluated (returns [], the NOT_ASSESSABLE is owned by CLIENT_CHECK)
+    # blank CONNAUTH → there is no AUTHINFO object to hold a CHCKLOCL, so this rule has nothing to
+    # judge and CONNAUTH.NO_OBJECT (a critical) is what reports the queue manager.
     assert det.connauth_chcklocl_none(qmgr("insecure"), _ctx([])) == []
+    assert det.connauth_missing(qmgr("insecure"), _ctx([]))
+    # CONNAUTH named but its AUTHINFO denied → silent here, because CLIENT_CHECK_DISABLED files
+    # the one not-assessable for that gap. Silence with the gap stated elsewhere, never alone.
+    q_denied = parse_qmgr("QMx", "u", {"connectionAuthentication": "A.INFO"}, None, False)
+    assert det.connauth_chcklocl_none(q_denied, _ctx([])) == []
+    assert det.connauth_chckclnt_open(q_denied, _ctx([]))[0].assessable is False
 
 
 # ── channel detectors ────────────────────────────────────────────────────────
@@ -188,6 +202,193 @@ def test_queue_wide_authority():
     assert len(hits) == 1 and "mqm" in hits[0].observation and hits[0].severity in (None, "high")
     safe = queues("hardened")[0]           # APP.PAYMENTS: appuser +put/+get only
     assert det.queue_wide_authority(safe, _ctx([])) == []
+
+
+# ── coverage gaps: a denied DISPLAY is not a hardened broker ─────────────────
+# An MQWebAdminRO user without DISPLAY authority on the queue manager gets 403 on DISPLAY QMGR.
+# Every attribute the qmgr rules read is then absent, and absent must behave as "unknown": no
+# rule may fire on it, and the gap must be stated once rather than passed over.
+DENIED = {"ok": False, "status": 403, "error": "http_403"}
+
+
+def one(hits):
+    assert len(hits) == 1, hits
+    return hits[0]
+
+
+def denied_qmgr(**kw):
+    """The qmgr resource the connector builds when DISPLAY QMGR answers 403."""
+    return parse_qmgr("QMRO", "https://mq.example:9443", {}, None, False,
+                      errors={"qmgr": "http_403"}, qmgr_readable=False, **kw)
+
+
+def test_denied_display_qmgr_fabricates_no_connauth_critical():
+    q = denied_qmgr()
+    assert q.raw["qmgr_readable"] is False
+    assert q.raw["connauth"] is None and q.raw["chlauth_records"] is None   # absent, not blank
+    assert det.connauth_missing(q, _ctx([])) == []          # the fabricated CRITICAL is gone
+    assert det.connauth_chckclnt_open(q, _ctx([])) == []
+    assert det.chlauth_disabled(q, _ctx([])) == []
+    assert det.connauth_chcklocl_none(q, _ctx([])) == []
+
+
+def test_denied_display_qmgr_files_one_not_assessable_naming_the_unevaluated_rules():
+    h = one(det.scan_not_assessable(denied_qmgr(), _ctx([])))   # one per qmgr, not one per rule
+    assert h.assessable is False and h.assessment_reason        # or it scores as a passed info
+    assert "QMRO" in h.observation and "DISPLAY QMGR" in h.observation and "http_403" in h.observation
+    for rule_id in ("IBMMQ.CONNAUTH.NO_OBJECT", "IBMMQ.CONNAUTH.CLIENT_CHECK_DISABLED",
+                    "IBMMQ.CONNAUTH.LOCAL_CHECK_DISABLED", "IBMMQ.CHLAUTH.DISABLED",
+                    "IBMMQ.CHANNEL.SYSTEM_SVRCONN_UNPROTECTED"):
+        assert rule_id in h.observation, rule_id
+    assert h.remediation.strip()
+
+
+def test_a_recorded_error_alone_marks_the_read_unreadable():
+    # Even without the explicit flag, an errors={"qmgr": ...} entry means nothing was read: the
+    # connector's own record is never contradicted by a coerced default.
+    q = parse_qmgr("QMRO", "u", {}, None, False, errors={"qmgr": "http_403"})
+    assert q.raw["qmgr_readable"] is False
+    assert det.connauth_missing(q, _ctx([])) == [] and det.scan_not_assessable(q, _ctx([]))
+
+
+def test_denied_channel_read_is_not_assessable_not_silence():
+    q = parse_qmgr("QMSAFE", "u", FIX["hardened"]["qmgr"], FIX["hardened"]["authinfo"], True,
+                   errors={"channel": "http_403"}, channels_readable=False)
+    h = one(det.scan_not_assessable(q, _ctx([])))
+    assert h.assessable is False
+    assert "DISPLAY CHANNEL(*)" in h.observation and "http_403" in h.observation
+    for rule_id in ("IBMMQ.CHANNEL.NO_TLS", "IBMMQ.CHANNEL.MCAUSER_BLANK",
+                    "IBMMQ.CHANNEL.MCAUSER_PRIVILEGED", "IBMMQ.CHANNEL.SSLCAUTH_OPTIONAL",
+                    "IBMMQ.CHANNEL.SYSTEM_SVRCONN_UNPROTECTED"):
+        assert rule_id in h.observation, rule_id
+    # the qmgr half WAS read, so its rules ran and must not be claimed as unevaluated
+    assert "IBMMQ.CHLAUTH.DISABLED" not in h.observation
+
+
+def test_a_qmgr_with_no_channels_is_distinguishable_from_a_denied_channel_read():
+    none_at_all = parse_qmgr("QMSAFE", "u", FIX["hardened"]["qmgr"], FIX["hardened"]["authinfo"],
+                             True, channels_readable=True, channel_count=0)
+    assert none_at_all.raw["channels_readable"] is True and none_at_all.raw["channel_count"] == 0
+    assert det.scan_not_assessable(none_at_all, _ctx([])) == []      # genuinely empty ≠ denied
+    denied = parse_qmgr("QMSAFE", "u", FIX["hardened"]["qmgr"], FIX["hardened"]["authinfo"], True,
+                        errors={"channel": "http_403"}, channels_readable=False)
+    assert denied.raw["channel_count"] is None and det.scan_not_assessable(denied, _ctx([]))
+
+
+def test_a_read_that_was_never_attempted_is_not_reported_as_denied():
+    q = qmgr("hardened")            # parse layer called without any collection flags
+    assert q.raw["channels_readable"] is None and q.raw["queues_readable"] is None
+    assert det.scan_not_assessable(q, _ctx([])) == []
+
+
+def test_system_svrconn_does_not_fire_against_an_unread_qmgr():
+    q = denied_qmgr()
+    chan = parse_channel("QMRO", {"channelName": "SYSTEM.DEF.SVRCONN", "channelType": "svrconn",
+                                  "messageChannelAgentUserIdentifier": ""})
+    assert det.system_svrconn_unprotected(chan, _ctx([q, chan])) == []   # CHLAUTH never read
+    assert "IBMMQ.CHANNEL.SYSTEM_SVRCONN_UNPROTECTED" in one(
+        det.scan_not_assessable(q, _ctx([q, chan]))).observation
+
+
+def test_readable_broker_findings_are_untouched_by_the_readability_gates():
+    bad, safe = qmgr("insecure"), qmgr("hardened")
+    assert bad.raw["qmgr_readable"] is True and safe.raw["qmgr_readable"] is True
+    assert det.connauth_missing(bad, _ctx([])) and det.chlauth_disabled(bad, _ctx([]))
+    assert det.connauth_missing(safe, _ctx([])) == [] and det.chlauth_disabled(safe, _ctx([])) == []
+    # nothing was denied on either → no coverage finding at all
+    assert det.scan_not_assessable(bad, _ctx([])) == []
+    assert det.scan_not_assessable(safe, _ctx([])) == []
+
+
+def test_coverage_rule_is_registered_and_names_only_real_rule_ids():
+    rules = {d.rule_id: d for d in DETECTORS}
+    cov = rules["IBMMQ.SCAN.NOT_ASSESSABLE"]
+    assert cov.severity == "info" and cov.kinds == ("ibmmq_qmgr",)
+    for _flag, _err_key, _command, gated in det._READ_GATES:
+        for rule_id in gated:
+            assert rule_id in rules, rule_id     # a typo here would silently under-report
+
+
+# ── connector wiring: which read failed, and what the qmgr resource says ─────
+def _collect(monkeypatch, **outcomes):
+    """collect() with every MQSC call scripted by qualifier. No httpx client, no socket."""
+    class _NoClient:
+        def __init__(self, *a, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(conn, "httpx", types.SimpleNamespace(Client=_NoClient, HTTPError=Exception))
+    monkeypatch.setattr(conn, "_run_mqsc",
+                        lambda client, qm, command, qualifier, **kw: outcomes[qualifier])
+    return conn.collect({"base_url": "https://mq.example:9443", "username": "ro",
+                         "password": "x", "qmgr": "QM1"})
+
+
+def _ok(rows):
+    return {"ok": True, "status": 200, "responses": list(rows)}
+
+
+def test_collect_records_a_denied_qmgr_read_and_still_assesses_the_channels(monkeypatch):
+    col = _collect(monkeypatch, qmgr=DENIED,
+                   channel=_ok(FIX["insecure"]["channels"]),
+                   queue=_ok(FIX["insecure"]["queues"]), authrec=_ok(FIX["insecure"]["authrecs"]))
+    q = next(r for r in col.resources if r.kind == "ibmmq_qmgr")
+    ctx = _ctx(col.resources)
+    assert q.raw["qmgr_readable"] is False and q.raw["errors"]["qmgr"] == "http_403"
+    assert q.raw["channels_readable"] is True and q.raw["channel_count"] == 4
+    assert det.connauth_missing(q, ctx) == []                    # no fabricated CRITICAL
+    assert "DISPLAY QMGR" in one(det.scan_not_assessable(q, ctx)).observation
+    # the reads that DID succeed are still assessed on their real evidence
+    app = next(r for r in col.resources if r.name == "APP.SVRCONN")
+    assert det.channel_mcauser_blank(app, ctx) and det.channel_no_tls(app, ctx)
+
+
+def test_collect_records_a_denied_channel_read_rather_than_an_empty_broker(monkeypatch):
+    col = _collect(monkeypatch, qmgr=_ok([FIX["insecure"]["qmgr"]]), channel=DENIED,
+                   queue=_ok([]), authrec=_ok([]))
+    q = next(r for r in col.resources if r.kind == "ibmmq_qmgr")
+    ctx = _ctx(col.resources)
+    assert [r for r in col.resources if r.kind == "ibmmq_channel"] == []
+    assert q.raw["channels_readable"] is False and q.raw["channel_count"] is None
+    assert "DISPLAY CHANNEL(*)" in one(det.scan_not_assessable(q, ctx)).observation
+    assert det.chlauth_disabled(q, ctx)          # the readable half still reports its findings
+
+
+def test_collect_treats_an_empty_display_qmgr_response_as_unread(monkeypatch):
+    col = _collect(monkeypatch, qmgr=_ok([]), channel=_ok([]), queue=_ok([]), authrec=_ok([]))
+    q = next(r for r in col.resources if r.kind == "ibmmq_qmgr")
+    assert q.raw["qmgr_readable"] is False and q.raw["errors"]["qmgr"] == "empty"
+    assert det.connauth_missing(q, _ctx(col.resources)) == []
+    assert det.scan_not_assessable(q, _ctx(col.resources))
+
+
+def test_collect_on_a_fully_readable_broker_files_no_coverage_gap(monkeypatch):
+    col = _collect(monkeypatch, qmgr=_ok([FIX["hardened"]["qmgr"]]),
+                   authinfo=_ok([FIX["hardened"]["authinfo"]]),
+                   channel=_ok(FIX["hardened"]["channels"]), queue=_ok(FIX["hardened"]["queues"]),
+                   authrec=_ok(FIX["hardened"]["authrecs"]))
+    q = next(r for r in col.resources if r.kind == "ibmmq_qmgr")
+    ctx = _ctx(col.resources)
+    assert q.raw["qmgr_readable"] is True and q.raw["authinfo_readable"] is True
+    assert q.raw["channels_readable"] and q.raw["queues_readable"] and q.raw["authrecs_readable"]
+    assert q.raw["errors"] == {}
+    assert det.scan_not_assessable(q, ctx) == []
+    for rule in (det.connauth_missing, det.chlauth_disabled, det.connauth_chckclnt_open,
+                 det.connauth_chcklocl_none):
+        assert rule(q, ctx) == []                # a genuinely hardened broker is still clean
+
+
+def test_collect_records_a_denied_authrec_read(monkeypatch):
+    """Without authority records the queue rule has nothing to read — "no wide grant" would
+    otherwise be indistinguishable from "DISPLAY AUTHREC was refused"."""
+    col = _collect(monkeypatch, qmgr=_ok([FIX["insecure"]["qmgr"]]),
+                   channel=_ok([]), queue=_ok(FIX["insecure"]["queues"]), authrec=DENIED)
+    q = next(r for r in col.resources if r.kind == "ibmmq_qmgr")
+    queue_res = next(r for r in col.resources if r.kind == "ibmmq_queue")
+    assert q.raw["authrecs_readable"] is False
+    assert det.queue_wide_authority(queue_res, _ctx(col.resources)) == []
+    h = one(det.scan_not_assessable(q, _ctx(col.resources)))
+    assert "DISPLAY AUTHREC" in h.observation and "IBMMQ.QUEUE.WIDE_AUTHORITY" in h.observation
 
 
 # ── NHI ──────────────────────────────────────────────────────────────────────

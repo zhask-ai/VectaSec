@@ -224,16 +224,27 @@ jobs:
                   for e in errors:
                       print(f"  {e}")
 
-              if set(fired) != EXPECTED:
+              # Scoped to KAFKA.* deliberately. This gate exists to prove the KAFKA rulepack
+              # still fires against a real broker; asserting over EVERY rule that happens to
+              # declare the `broker`/`topic` kinds made it fail whenever an unrelated
+              # cross-cutting pack shipped. It did exactly that: SUPPLY.LIFECYCLE.NOT_ASSESSABLE
+              # landed and this job started reporting a Kafka regression that was not one.
+              # Cross-cutting packs have their own offline tests; this is the live-broker gate.
+              kafka_fired = {r for r in fired if r.startswith("KAFKA.")}
+              if kafka_fired != EXPECTED:
                   ok = False
-                  print(f"\nFAIL: the rule set changed against the live broker."
-                        f"\n  missing:    {sorted(EXPECTED - set(fired))}"
-                        f"\n  unexpected: {sorted(set(fired) - EXPECTED)}")
+                  print(f"\nFAIL: the KAFKA rule set changed against the live broker."
+                        f"\n  missing:    {sorted(EXPECTED - kafka_fired)}"
+                        f"\n  unexpected: {sorted(kafka_fired - EXPECTED)}")
+              other = sorted(r for r in fired if not r.startswith("KAFKA."))
+              if other:
+                  print(f"\nnote: {len(other)} cross-cutting rule(s) also fired "
+                        f"(not asserted here): {other}")
 
-              n_hits = sum(len(v) for v in fired.values())
+              n_hits = sum(len(v) for r, v in fired.items() if r.startswith("KAFKA."))
               if n_hits != EXPECTED_HITS:
                   ok = False
-                  print(f"\nFAIL: expected {EXPECTED_HITS} hits, got {n_hits} "
+                  print(f"\nFAIL: expected {EXPECTED_HITS} KAFKA hits, got {n_hits} "
                         f"(LISTENER.PLAINTEXT fires once per client listener)")
 
               topics = {r.name for r in collected.resources if r.kind == "topic"}

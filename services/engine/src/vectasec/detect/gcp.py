@@ -209,20 +209,42 @@ def subscription_no_dead_letter(r, ctx) -> list:
           title="Apigee proxy target does not use TLS to its backend")
 def apigee_target_no_tls(r, ctx) -> list:
     raw = r.raw or {}
-    if not raw.get("deployments"):
+    deployments_readable = raw.get("deployments_readable", True)
+    if not raw.get("deployments") and deployments_readable:
         return []   # an undeployed proxy has no live traffic path to assess
-    if not raw.get("targets_readable", True):
-        return [Hit(
+    hits = []
+    if not deployments_readable:
+        # Reading a failed deployments list as "deployed nothing" would send this proxy down
+        # the undeployed branch above — a denied read silently retiring a live proxy.
+        hits.append(Hit(
+            observation=(f"the deployment state of Apigee proxy '{r.name}' could not be read, "
+                         f"so whether it is live — and with it every target-endpoint TLS "
+                         f"question about its backends — is unknown"),
+            remediation=("Grant the scan principal apigee.deployments.list (covered by "
+                         "roles/apigee.readOnlyAdmin) so deployed proxies can be told apart "
+                         "from parked ones and their backend TLS assessed."),
+            detail="deployments_readable=False",
+            assessable=False,
+            assessment_reason="organization deployments GET was denied or failed",
+            source_ref={"api": "apigee organizations/deployments GET"},
+        ))
+    elif not raw.get("targets_readable", True):
+        unreadable = raw.get("unreadable_targets") or []
+        hits.append(Hit(
             observation=(f"target endpoint configs of deployed Apigee proxy '{r.name}' could "
-                         f"not be read, so whether its backend traffic uses TLS is unknown"),
+                         f"not be read, so whether its backend traffic uses TLS is unknown"
+                         + (f" — {unreadable!r} were named by the revision but their configs "
+                            f"were refused, so they are absent from the target list the rules "
+                            f"below ran on" if unreadable else "")),
             remediation=("Grant the scan principal apigee.proxyrevisions.get (covered by "
                          "roles/apigee.readOnlyAdmin) so target TLS posture can be assessed."),
-            detail="targets_readable=False",
+            detail=f"targets_readable=False unreadable_targets={unreadable}",
             assessable=False,
             assessment_reason="revision targets GET was denied or failed",
-            source_ref={"api": "apigee revisions/targets GET"},
-        )]
-    hits = []
+            source_ref={"api": "apigee revisions/targets GET", "targets": unreadable},
+        ))
+    # The targets that WERE read are still assessed: a sibling's refused config must not
+    # suppress a real plaintext backend that is sitting right there in the list.
     for t in raw.get("targets") or []:
         url = str(t.get("url") or "")
         plaintext_url = url.lower().startswith("http://")
@@ -251,8 +273,10 @@ _LEGACY_TLS_PROTOCOLS = ("TLSv1", "TLSv1.0", "TLSv1.1", "SSLv3")
           title="Apigee proxy target allows TLS below 1.2")
 def apigee_target_legacy_tls(r, ctx) -> list:
     raw = r.raw or {}
-    if not raw.get("deployments") or not raw.get("targets_readable", True):
-        return []   # the unreadable-targets gap is already filed by GCP.APIGEE.TARGET_NO_TLS
+    if not raw.get("deployments") and raw.get("deployments_readable", True):
+        return []   # an undeployed proxy has no live traffic path to assess
+    # The unreadable-target / unknown-deployment gap is filed once, by GCP.APIGEE.TARGET_NO_TLS;
+    # the targets that WERE read still get assessed here rather than being written off.
     hits = []
     for t in raw.get("targets") or []:
         legacy = [p for p in t.get("protocols") or [] if p in _LEGACY_TLS_PROTOCOLS]
@@ -311,17 +335,55 @@ def project_audit_logging(r, ctx) -> list:
     )]
 
 
+_MAX_NAMED_GAPS = 8
+
+
+def _named_gaps(gaps: list) -> str:
+    """'envgroups of organization acme (http_403); …' — capped so one denied permission
+    across a thousand resources cannot produce an unreadable observation."""
+    named = [f"{g.get('child')} of {g.get('parent')} ({g.get('error')})"
+             for g in gaps[:_MAX_NAMED_GAPS]]
+    rest = len(gaps) - len(named)
+    return "; ".join(named) + (f"; and {rest} more" if rest > 0 else "")
+
+
 @detector(kinds=["gcp_project"], rule_id="GCP.PROJECT.SERVICE_NOT_ASSESSED", severity="info",
           title="A GCP service could not be assessed with the granted permissions")
 def project_service_not_assessed(r, ctx) -> list:
     """The third honest outcome at project scope: a service whose list call answered 403 —
     or whose API is not enabled on the project — is a COVERAGE GAP the connector recorded
-    instead of failing the scan; surfaced here as not-assessable, never a clean pass."""
+    instead of failing the scan; surfaced here as not-assessable, never a clean pass.
+
+    The same is true one level down. A service that listed fine can still have lost whole
+    child collections (an org's proxy list, its environment groups), and those children leave
+    NO resource behind to carry the gap: every rule keyed to them simply has nothing to run
+    on. Those are the connector's child_gaps records, reported here too so a partially
+    collected service is never counted as fully assessed."""
     raw = r.raw or {}
     hits = []
     for service, rec in sorted((raw.get("collection") or {}).items()):
-        outcome = (rec or {}).get("outcome")
+        rec = rec or {}
+        outcome = rec.get("outcome")
         if outcome not in ("access_denied", "api_disabled"):
+            gaps = rec.get("child_gaps") or []
+            if not gaps:
+                continue
+            hits.append(Hit(
+                observation=(f"the {service} surface of project '{raw.get('project_id')}' "
+                             f"listed successfully, but {len(gaps)} read(s) beneath it were "
+                             f"denied or failed, so those resources were never collected and "
+                             f"every rule keyed to them had nothing to run on: "
+                             f"{_named_gaps(gaps)}"),
+                remediation=("Grant the scan service account the missing read-only "
+                             "permissions for the reads named above (roles/viewer, or "
+                             "pubsub.viewer / apigee.readOnlyAdmin per surface). The parent "
+                             "resources were assessed; the children named here were not, so "
+                             "their posture is unknown, not clean."),
+                detail=f"service={service} child_gaps={len(gaps)}",
+                assessable=False,
+                assessment_reason=f"{len(gaps)} child read(s) under {service} were denied or failed",
+                source_ref={"service": service, "child_gaps": gaps},
+            ))
             continue
         if outcome == "api_disabled":
             observation = (f"the {service} API is not enabled on project "

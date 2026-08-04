@@ -12,9 +12,10 @@ import pathlib
 from vectasec.contracts import Resource, ScanContext
 from vectasec.identity import IDENTITY_EXTRACTORS
 from vectasec.registry import CONNECTOR_FIELDS, DETECTORS
+import vectasec.connect.gcp as connect_gcp
 import vectasec.detect.gcp  # noqa: F401  — import registers the rulepack
 from vectasec.connect.gcp import (
-    parse_apigee_org, parse_apigee_proxy, parse_project, parse_pubsub_subscription,
+    _Denied, parse_apigee_org, parse_apigee_proxy, parse_project, parse_pubsub_subscription,
     parse_pubsub_topic,
 )
 
@@ -56,10 +57,13 @@ def sub(name: str, policy="fixture") -> Resource:
     return parse_pubsub_subscription(PROJECT, s, p)
 
 
-def proxy(name: str, targets="fixture") -> Resource:
-    deps = [d for d in FIX["apigee"]["deployments"] if d["apiProxy"] == name]
+def proxy(name: str, targets="fixture", deployments="fixture",
+          unreadable_targets=()) -> Resource:
+    deps = ([d for d in FIX["apigee"]["deployments"] if d["apiProxy"] == name]
+            if deployments == "fixture" else deployments)
     t = FIX["apigee"]["targets"].get(name) if targets == "fixture" else targets
-    return parse_apigee_proxy(PROJECT, name, deps, t)
+    return parse_apigee_proxy(PROJECT, name, deps, t,
+                              unreadable_targets=unreadable_targets)
 
 
 def project(iam="fixture", collection=None) -> Resource:
@@ -193,6 +197,40 @@ def test_apigee_unreadable_targets_not_assessable_filed_once():
     assert fire("GCP.APIGEE.TARGET_LEGACY_TLS", gap) == []
 
 
+def test_apigee_one_unreadable_target_clears_the_flag_and_keeps_its_siblings():
+    """Dropping an unreadable target while leaving targets_readable True is the worst shape
+    available: the detector believes the list is complete, so a target whose config was
+    refused simply vanishes. The flag must fall, and the targets that WERE read must still be
+    assessed — a refused sibling cannot suppress a plaintext backend sitting in the list."""
+    partial = proxy("orders-proxy", unreadable_targets=["billing-backend"])
+    assert partial.raw["targets_readable"] is False
+    hits = fire("GCP.APIGEE.TARGET_NO_TLS", partial)
+    gaps = [h for h in hits if not h.assessable]
+    real = [h for h in hits if h.assessable]
+    assert len(gaps) == 1 and "billing-backend" in gaps[0].observation
+    assert len(real) == 1 and "http://internal-api.example.com" in real[0].observation
+
+
+def test_apigee_unreadable_deployments_do_not_read_as_an_undeployed_proxy():
+    """deployments=[] is what a parked proxy looks like, and parked proxies are skipped — so
+    a denied deployments list would silently retire the whole Apigee surface."""
+    unknown = proxy("orders-proxy", targets=None, deployments=None)
+    assert unknown.labels["deployed"] == "unknown"
+    hits = fire("GCP.APIGEE.TARGET_NO_TLS", unknown)
+    assert len(hits) == 1 and hits[0].assessable is False
+    assert "deployment state" in hits[0].observation
+    # filed once: the targets gap is subsumed and the legacy-TLS rule stays quiet
+    assert "targets_readable" not in hits[0].detail
+    assert fire("GCP.APIGEE.TARGET_LEGACY_TLS", unknown) == []
+
+
+def test_apigee_org_records_whether_the_proxy_list_was_readable():
+    assert parse_apigee_org(FIX["apigee"]["org"], []).raw["proxies_readable"] is True
+    denied = parse_apigee_org(FIX["apigee"]["org"], None, proxies_readable=False)
+    assert denied.raw["proxies_readable"] is False
+    assert denied.raw["envgroups_readable"] is False
+
+
 # ── project posture ───────────────────────────────────────────────────────────
 def test_audit_logging_missing_fires_and_configured_passes():
     hits = fire("GCP.PROJECT.AUDIT_LOGGING_DISABLED", project())
@@ -222,6 +260,92 @@ def test_denied_and_disabled_services_are_gaps_never_passes():
 def test_clean_collection_reports_nothing():
     p = project(collection={"pubsub": {"outcome": "ok", "error": None}})
     assert fire("GCP.PROJECT.SERVICE_NOT_ASSESSED", p) == []
+
+
+def test_denied_child_read_under_an_ok_service_is_a_coverage_gap():
+    """The surface listed fine, so outcome stays 'ok' — but children under it were never
+    collected and left no resource behind to carry the gap. Reporting nothing here is exactly
+    how a partial collection scores as full coverage."""
+    p = project(collection={
+        "pubsub": {"outcome": "ok", "error": None, "resources": 5},
+        "apigee": {"outcome": "ok", "error": None, "resources": 1,
+                   "child_gaps": [{"parent": "organization acme-prod",
+                                   "child": "apis (proxy list)", "error": "http_403"}]},
+    })
+    hits = fire("GCP.PROJECT.SERVICE_NOT_ASSESSED", p)
+    assert len(hits) == 1 and hits[0].assessable is False
+    assert hits[0].source_ref["service"] == "apigee"
+    assert "apis (proxy list) of organization acme-prod" in hits[0].observation
+
+
+# ── collection: a denied CHILD read inside a surface that listed fine ─────────
+# httpx never appears here either: _gget is the seam, so a stub keyed on the URL path drives
+# the real except branches offline.
+def _apigee_gget(deny=()):
+    fx = FIX["apigee"]
+
+    def _get(_client, _headers, url, params=None):
+        path = url.split(f"/organizations/{PROJECT}", 1)[-1].lstrip("/")
+        if path in deny:
+            raise _Denied(403, "IAM_PERMISSION_DENIED")
+        if not path:
+            return fx["org"]
+        if path == "envgroups":
+            return {"environmentGroups": fx["envgroups"]}
+        if path == "apis":
+            return {"proxies": fx["proxies"]}
+        if path == "deployments":
+            return {"deployments": fx["deployments"]}
+        parts = path.split("/")        # apis/<proxy>/revisions/<rev>/targets[/<name>]
+        details = fx["targets"].get(parts[1]) or []
+        if len(parts) == 5:
+            return [d["name"] for d in details]
+        return next(d for d in details if d["name"] == parts[5])
+    return _get
+
+
+def _collect_apigee(monkeypatch, deny=()):
+    monkeypatch.setattr(connect_gcp, "_gget", _apigee_gget(deny))
+    return connect_gcp._collect_apigee(None, {}, PROJECT)
+
+
+def test_collect_apigee_fully_readable_records_no_gap(monkeypatch):
+    resources, _edges, gaps = _collect_apigee(monkeypatch)
+    assert gaps == []
+    proxies = {r.name: r for r in resources if r.kind == "gcp_apigee_proxy"}
+    assert set(proxies) == {"orders-proxy", "secure-proxy", "parked-proxy"}
+    assert proxies["orders-proxy"].raw["targets_readable"] is True
+    assert proxies["orders-proxy"].labels["deployed"] == "true"
+    assert proxies["parked-proxy"].labels["deployed"] == "false"
+
+
+def test_collect_apigee_denied_proxy_list_and_envgroups_are_recorded(monkeypatch):
+    resources, _edges, gaps = _collect_apigee(monkeypatch, deny={"apis", "envgroups"})
+    org = next(r for r in resources if r.kind == "gcp_apigee_org")
+    assert org.raw["proxies_readable"] is False and org.raw["envgroups_readable"] is False
+    # not one proxy resource exists, so every Apigee proxy rule is silent for want of a subject
+    assert [r for r in resources if r.kind == "gcp_apigee_proxy"] == []
+    assert {g["child"] for g in gaps} == {"apis (proxy list)", "envgroups"}
+
+
+def test_collect_apigee_denied_deployments_leave_every_proxy_unknown(monkeypatch):
+    resources, _edges, gaps = _collect_apigee(monkeypatch, deny={"deployments"})
+    proxies = [r for r in resources if r.kind == "gcp_apigee_proxy"]
+    assert proxies and all(p.raw["deployments_readable"] is False for p in proxies)
+    assert all(p.labels["deployed"] == "unknown" for p in proxies)
+    # filed once, per proxy, by GCP.APIGEE.TARGET_NO_TLS — not restated at project scope
+    assert gaps == []
+
+
+def test_collect_apigee_one_denied_target_config_is_named_not_dropped(monkeypatch):
+    resources, _edges, _gaps = _collect_apigee(
+        monkeypatch, deny={"apis/orders-proxy/revisions/3/targets/default"})
+    orders = next(r for r in resources if r.name == "orders-proxy")
+    assert orders.raw["targets_readable"] is False
+    assert orders.raw["unreadable_targets"] == ["default"]
+    # the sibling proxy is untouched by its neighbour's denial
+    secure = next(r for r in resources if r.name == "secure-proxy")
+    assert secure.raw["targets_readable"] is True and len(secure.raw["targets"]) == 1
 
 
 # ── NHI derivation ────────────────────────────────────────────────────────────

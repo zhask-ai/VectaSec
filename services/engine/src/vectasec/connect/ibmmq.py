@@ -24,6 +24,15 @@ packs never run against MQ resources by accident. IBM's runCommandJSON attribute
 across MQ versions (long camelCase names vs. the raw MQSC keyword), so the parse layer looks each
 attribute up through a small alias set and is case-insensitive — a name it cannot find becomes
 "unreadable" (→ not-assessable), never a silent default.
+
+DENIED READS ARE RECORDED, NOT SMOOTHED OVER. An MQWebAdminRO user is routinely granted DISPLAY
+on some objects and not others, so a 403 on one command is the normal case, not a scan failure.
+Each administrative read therefore carries its own three-valued flag on the queue manager
+resource — `qmgr_readable`, `authinfo_readable`, `channels_readable`, `queues_readable`,
+`authrecs_readable` — where None means the read was never attempted, False means it was attempted
+and denied, and True means the attributes in this `raw` came off the wire. The rulepack gates on
+those flags and IBMMQ.SCAN.NOT_ASSESSABLE reports the gap; without them an absent attribute
+coerces to "" and a hardened broker reads as CONNAUTH-blank (fabricated) or as clean (silent).
 """
 from urllib.parse import urlparse
 
@@ -94,9 +103,23 @@ def _run_mqsc(client: httpx.Client, qmgr: str, command: str, qualifier: str,
 # ── pure parse layer (httpx stays out of tests) ────────────────────────────────
 def parse_qmgr(qmgr_name: str, base_url: str, qmgr_params: dict,
                authinfo: dict | None, authinfo_readable: bool, *,
-               tls: bool = False, errors: dict | None = None) -> Resource:
+               tls: bool = False, errors: dict | None = None,
+               qmgr_readable: bool | None = None,
+               channels_readable: bool | None = None, channel_count: int | None = None,
+               queues_readable: bool | None = None,
+               authrecs_readable: bool | None = None) -> Resource:
     """The queue manager resource. `authinfo` is the DISPLAY AUTHINFO parameters for the object
-    CONNAUTH names (None when CONNAUTH is blank or the object could not be read)."""
+    CONNAUTH names (None when CONNAUTH is blank or the object could not be read).
+
+    The `*_readable` flags are three-valued — None = the read was never attempted, False =
+    attempted and denied, True = the attributes here were actually read. `qmgr_readable` is
+    inferred when not supplied: a DISPLAY QMGR that recorded an error, or that returned no
+    parameters at all, did not read anything, and the CONNAUTH/CHLAUTH keys below are then None
+    (absent) rather than "" (read as blank) — the difference between the two is the difference
+    between a fabricated CRITICAL and an honest coverage gap.
+    """
+    if qmgr_readable is None:
+        qmgr_readable = bool(qmgr_params) and not (errors or {}).get("qmgr")
     connauth = str(_attr(qmgr_params, "connectionAuthentication", "connauth", default="") or "").strip()
     chlauth = _norm(_attr(qmgr_params, "channelAuthenticationRecords", "chlauth"))
     sslkeyr = str(_attr(qmgr_params, "sslKeyRepository", "sslkeyr", default="") or "").strip()
@@ -106,21 +129,31 @@ def parse_qmgr(qmgr_name: str, base_url: str, qmgr_params: dict,
         kind="ibmmq_qmgr",
         name=qmgr_name,
         ext_id=f"ibmmq-qmgr-{qmgr_name}",
-        labels={"connauth": connauth or "(none)", "chlauth": chlauth or "?"},
+        labels={"connauth": (connauth or "(none)") if qmgr_readable else "(unread)",
+                "chlauth": (chlauth or "?") if qmgr_readable else "(unread)"},
         raw={
             "qmgr_name": qmgr_name,
             "base_url": base_url,
             "connected_via_tls": bool(tls),
-            "connauth": connauth,
-            "chlauth_records": chlauth,          # ENABLED | DISABLED | ""
-            "sslkeyr": sslkeyr,
-            "authinfo_name": connauth,
+            # An unreadable DISPLAY QMGR yields None for every attribute below it: absent, not
+            # blank. Every rule that reads one gates on qmgr_readable first.
+            "qmgr_readable": bool(qmgr_readable),
+            "connauth": connauth if qmgr_readable else None,
+            "chlauth_records": chlauth if qmgr_readable else None,   # ENABLED|DISABLED|""|None
+            "sslkeyr": sslkeyr if qmgr_readable else None,
+            "authinfo_name": connauth if qmgr_readable else None,
             "authinfo_readable": bool(authinfo_readable),
             "authinfo_authtype": _norm(_attr(ai, "authenticationMethod", "authenticationInformationType",
                                               "authtype", "type")) or None,
             "chckclnt": _norm(_attr(ai, "checkClient", "clientChecking", "chckclnt")) or None,
             "chcklocl": _norm(_attr(ai, "checkLocal", "localChecking", "chcklocl")) or None,
             "adoptctx": _norm(_attr(ai, "adoptContext", "adoptctx")) or None,
+            # Sibling collections. channels_readable=False (denied) is a different fact from
+            # channels_readable=True with channel_count=0 (this qmgr genuinely has no channels).
+            "channels_readable": channels_readable,
+            "channel_count": channel_count,
+            "queues_readable": queues_readable,
+            "authrecs_readable": authrecs_readable,
             "errors": errors or {},
         },
     )
@@ -231,9 +264,12 @@ def collect(config: dict) -> Collected:
     with httpx.Client(base_url=base, timeout=timeout, verify=bool(verify),
                       follow_redirects=False, auth=auth) as client:
         qmgr_res = _run_mqsc(client, qmgr, "display", "qmgr")
-        qmgr_params = (qmgr_res.get("responses") or [{}])[0] if qmgr_res.get("ok") else {}
-        if not qmgr_res.get("ok"):
-            errors["qmgr"] = qmgr_res.get("error")
+        # "ok but no response rows" is not a read either: DISPLAY QMGR always answers with one
+        # row, so an empty set means nothing came back and every attribute below is unknown.
+        qmgr_ok = bool(qmgr_res.get("ok") and qmgr_res.get("responses"))
+        qmgr_params = qmgr_res["responses"][0] if qmgr_ok else {}
+        if not qmgr_ok:
+            errors["qmgr"] = qmgr_res.get("error") or "empty"
 
         # Resolve CONNAUTH → the AUTHINFO object that actually holds CHCKCLNT.
         connauth = str(_attr(qmgr_params, "connectionAuthentication", "connauth", default="") or "").strip()
@@ -253,18 +289,28 @@ def collect(config: dict) -> Collected:
         if not queue_res.get("ok"):
             errors["queue"] = queue_res.get("error")
         authrec_res = _run_mqsc(client, qmgr, "display", "authrec")   # optional; may be denied
+        if not authrec_res.get("ok"):
+            # Recorded, not swallowed: with no authority records the queue rule has nothing to
+            # read, and "no wide grant found" would otherwise be indistinguishable from "denied".
+            errors["authrec"] = authrec_res.get("error")
 
     resources: list = []
     edges: list = []
 
+    # Channels are parsed before the queue manager so its resource can carry an honest count.
+    channels = [c for c in (parse_channel(qmgr, cp) for cp in (chan_res.get("responses") or []))
+                if c.name]
+    channels_readable = bool(chan_res.get("ok"))
+
     qmgr_resource = parse_qmgr(qmgr, base, qmgr_params, authinfo, authinfo_readable,
-                               tls=tls, errors=errors)
+                               tls=tls, errors=errors, qmgr_readable=qmgr_ok,
+                               channels_readable=channels_readable,
+                               channel_count=len(channels) if channels_readable else None,
+                               queues_readable=bool(queue_res.get("ok")),
+                               authrecs_readable=bool(authrec_res.get("ok")))
     resources.append(qmgr_resource)
 
-    for cp in (chan_res.get("responses") or []):
-        chan = parse_channel(qmgr, cp)
-        if not chan.name:
-            continue
+    for chan in channels:
         resources.append(chan)
         edges.append(Edge(src_ext_id=qmgr_resource.ext_id, dst_ext_id=chan.ext_id, kind="hosts"))
 

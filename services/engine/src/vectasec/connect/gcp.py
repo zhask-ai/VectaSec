@@ -18,7 +18,11 @@ Three disciplines carried over from connect/aws.py:
     own try/except: a 403 records {"outcome": "access_denied"} — or "api_disabled" when the
     error says the API is not enabled on the project — on the gcp_project resource instead of
     voiding the whole scan. detect/gcp.py turns those records into not-assessable
-    coverage-gap findings — never a pass, never a failure.
+    coverage-gap findings — never a pass, never a failure. Isolation alone is not enough: a
+    CHILD read that fails inside a surface that otherwise succeeded is recorded too — as a
+    *_readable flag on the parent resource, or as a child_gaps entry in the service's outcome
+    record when the child leaves no resource behind. Collapsing one to []/None makes "denied"
+    indistinguishable from "none exists", which is the secure state.
   • IAM policies are OBSERVATIONS, not secrets. A binding names principals and roles — the
     exact evidence a posture finding must cite — so bindings are stored in Resource.raw and
     quoted by detectors. No credential material appears in any IAM read.
@@ -65,6 +69,21 @@ def _outcome_for(exc) -> dict:
             return {"outcome": "api_disabled", "error": str(exc)}
         return {"outcome": "access_denied", "error": str(exc)}
     return {"outcome": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _error_text(exc) -> str:
+    return str(exc) if isinstance(exc, _Denied) else f"{type(exc).__name__}: {exc}"
+
+
+def _gap(parent, child: str, exc) -> dict:
+    """A CHILD read that failed inside a service whose own list call succeeded.
+
+    Per-service isolation alone is not enough: swallowing a child failure to []/None leaves
+    outcomes[service] reading {"outcome": "ok"}, so GCP.PROJECT.SERVICE_NOT_ASSESSED reports
+    full coverage over resources that were never collected. These records are what that rule
+    names. Only failures NOT already visible on a collected resource are recorded here — a
+    gap some per-resource rule already files must stay filed exactly once."""
+    return {"parent": str(parent), "child": child, "error": _error_text(exc)}
 
 
 def _short(name) -> str:
@@ -208,33 +227,47 @@ def _parse_ssl(detail: dict) -> tuple:
         [str(p) for p in ssl.get("protocols") or []]
 
 
-def parse_apigee_proxy(org: str, name: str, deployments: list, targets) -> Resource:
-    """One API proxy. `deployments` are this proxy's rows from the org deployments list;
-    `targets` is a list of TargetEndpoint detail dicts for the deployed revision, or None
-    when target configs could not be read (recorded → not-assessable, not 'no targets')."""
+def parse_apigee_proxy(org: str, name: str, deployments, targets,
+                       unreadable_targets=()) -> Resource:
+    """One API proxy. `deployments` are this proxy's rows from the org deployments list, or
+    None when the deployments list itself could not be read; `targets` is a list of
+    TargetEndpoint detail dicts for the deployed revision, or None when target configs could
+    not be read (recorded → not-assessable, not 'no targets').
+
+    `unreadable_targets` names the individual targets whose detail GET failed while siblings
+    succeeded. Dropping one silently while leaving targets_readable True is the worst shape
+    available: the detector believes the list is complete, so a target with ssl_enabled=False
+    simply disappears from the assessment. Any unreadable target therefore clears the flag,
+    and the targets that WERE read stay in the list so their real defects still fire."""
     items = None if targets is None else []
     for detail in targets or []:
         url, ssl_enabled, protocols = _parse_ssl(detail or {})
         items.append({"name": (detail or {}).get("name"), "url": url,
                       "ssl_enabled": ssl_enabled, "protocols": protocols})
+    unreadable = [str(t) for t in unreadable_targets or ()]
+    if deployments is None:
+        deployed = "unknown"
+    else:
+        deployed = "true" if deployments else "false"
     return Resource(
         kind="gcp_apigee_proxy", name=name,
         ext_id=f"organizations/{org}/apis/{name}",
         namespace=org,
-        labels={"service": "apigee", "org": org,
-                "deployed": "true" if deployments else "false"},
+        labels={"service": "apigee", "org": org, "deployed": deployed},
         raw={
             "org": org,
             "proxy": name,
+            "deployments_readable": deployments is not None,
             "deployments": [{"environment": d.get("environment"),
                              "revision": d.get("revision")} for d in deployments or []],
-            "targets_readable": items is not None,
+            "targets_readable": items is not None and not unreadable,
+            "unreadable_targets": unreadable,
             "targets": items or [],
         },
     )
 
 
-def parse_apigee_org(org: dict, envgroups) -> Resource:
+def parse_apigee_org(org: dict, envgroups, proxies_readable: bool = True) -> Resource:
     name = _short(org.get("name"))
     return Resource(
         kind="gcp_apigee_org", name=name,
@@ -244,6 +277,9 @@ def parse_apigee_org(org: dict, envgroups) -> Resource:
         raw={
             "org": name,
             "runtime_type": org.get("runtimeType"),
+            # False means the proxy listing failed: NO gcp_apigee_proxy resource exists for
+            # this org, so every Apigee proxy rule is silent for want of a subject.
+            "proxies_readable": proxies_readable,
             "envgroups_readable": envgroups is not None,
             "envgroups": [{"name": g.get("name"),
                            "hostnames": [str(h) for h in g.get("hostnames") or []]}
@@ -299,36 +335,49 @@ def _collect_pubsub(client, headers, project: str) -> tuple:
         # "_deleted-topic_" marks a detached subscription — no edge to a resource we hold.
         if topic in topic_exts:
             edges.append(Edge(src_ext_id=topic, dst_ext_id=sub.ext_id, kind="delivers_to"))
-    return resources, edges
+    # No gap records: iam_policy.readable=False rides on each resource and
+    # GCP.PUBSUB.IAM_NOT_READABLE files it per resource.
+    return resources, edges, []
 
 
 def _collect_apigee(client, headers, org: str) -> tuple:
-    resources, edges = [], []
+    resources, edges, gaps = [], [], []
     org_body = _gget(client, headers, f"{_APIGEE}/organizations/{org}")
     try:
         envgroups = _gget(client, headers, f"{_APIGEE}/organizations/{org}/envgroups"
                           ).get("environmentGroups") or []
-    except Exception:
+    except Exception as e:
+        # envgroups_readable lands on the org resource, but no rule reads it — without a gap
+        # record the org's hostname surface silently reads as "no environment groups".
         envgroups = None
-    org_res = parse_apigee_org(org_body if org_body.get("name") else {"name": org}, envgroups)
-    resources.append(org_res)
+        gaps.append(_gap(f"organization {org}", "envgroups", e))
 
+    proxies = None
     try:
         proxies = [p.get("name") for p in
                    (_gget(client, headers, f"{_APIGEE}/organizations/{org}/apis")
                     .get("proxies") or []) if p.get("name")]
-    except Exception:
-        proxies = []
+    except Exception as e:
+        gaps.append(_gap(f"organization {org}", "apis (proxy list)", e))
+    deployments = None
     try:
         deployments = (_gget(client, headers, f"{_APIGEE}/organizations/{org}/deployments")
                        .get("deployments") or [])
     except Exception:
-        deployments = []
+        # Filed by GCP.APIGEE.TARGET_NO_TLS off deployments_readable. Defaulting to [] here
+        # would label every proxy deployed="false", and the TLS rules skip undeployed
+        # proxies — a denied read would silently retire the whole Apigee surface.
+        pass
 
-    for name in proxies:
-        deps = [d for d in deployments if d.get("apiProxy") == name]
-        targets = None
-        revisions = sorted({str(d.get("revision")) for d in deps if d.get("revision")})
+    org_res = parse_apigee_org(org_body if org_body.get("name") else {"name": org}, envgroups,
+                               proxies_readable=proxies is not None)
+    resources.append(org_res)
+
+    for name in proxies or []:
+        deps = (None if deployments is None
+                else [d for d in deployments if d.get("apiProxy") == name])
+        targets, unreadable = None, []
+        revisions = sorted({str(d.get("revision")) for d in deps or [] if d.get("revision")})
         if revisions:
             rev = revisions[-1]
             base = f"{_APIGEE}/organizations/{org}/apis/{name}/revisions/{rev}/targets"
@@ -342,14 +391,17 @@ def _collect_apigee(client, headers, org: str) -> tuple:
                     try:
                         targets.append(_gget(client, headers, f"{base}/{tn}"))
                     except Exception:
-                        pass
+                        # Named, not dropped: a target that vanishes from a list the detector
+                        # believes is complete takes its ssl_enabled=False with it.
+                        unreadable.append(str(tn))
             except Exception:
                 targets = None   # target configs unreadable — recorded, not raised
-        proxy_res = parse_apigee_proxy(org, name, deps, targets)
+        proxy_res = parse_apigee_proxy(org, name, deps, targets,
+                                       unreadable_targets=unreadable)
         resources.append(proxy_res)
         edges.append(Edge(src_ext_id=org_res.ext_id, dst_ext_id=proxy_res.ext_id,
                           kind="exposes"))
-    return resources, edges
+    return resources, edges, gaps
 
 
 @connector("gcp", fields=[
@@ -398,10 +450,15 @@ def collect(config: dict) -> Collected:
         for service, fn, arg in (("pubsub", _collect_pubsub, project),
                                  ("apigee", _collect_apigee, org)):
             try:
-                rs, es = fn(client, headers, arg)
+                rs, es, gaps = fn(client, headers, arg)
                 resources.extend(rs)
                 edges.extend(es)
                 outcomes[service] = {"outcome": "ok", "error": None, "resources": len(rs)}
+                if gaps:
+                    # The service listed, but not everything under it did. Without this the
+                    # record reads {"outcome": "ok"} and the coverage rule claims a service
+                    # was fully assessed over children that were never collected.
+                    outcomes[service]["child_gaps"] = gaps
             except Exception as e:
                 outcomes[service] = _outcome_for(e)
 

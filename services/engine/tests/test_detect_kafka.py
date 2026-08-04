@@ -29,6 +29,7 @@ RULES = {d.rule_id: d for d in DETECTORS if d.rule_id.startswith("KAFKA.")}
 # fails a test rather than quietly shrinking coverage.
 EXPECTED_RULES = {
     "KAFKA.SCAN.NOT_ASSESSABLE",
+    "KAFKA.SCAN.TOPIC_NOT_ASSESSABLE",
     "KAFKA.LISTENER.PLAINTEXT",
     "KAFKA.LISTENER.SASL_PLAINTEXT",
     "KAFKA.INTERBROKER.PLAINTEXT",
@@ -100,12 +101,21 @@ def broker(cfg=None, *, bid=1, outcome="ok", bindings=(), cluster_scope=True,
     )
 
 
-def topic(name="orders", *, cfg=None, rf=3, internal=False, partitions=3) -> Resource:
+def topic(name="orders", *, cfg=None, rf=3, internal=False, partitions=3,
+          config_error=None) -> Resource:
+    """`config_error=None` is "DescribeConfigs answered"; a string is "the read failed", and the
+    empty cfg that comes with it means unknown, not empty. Mirrors the broker resource's key
+    exactly — the two paths must read alike."""
     return Resource(
         kind="topic", name=name, ext_id=f"topic-{name}", labels={"partitions": str(partitions)},
         raw={"partitions": partitions, "replication_factor": rf,
-             "internal": internal, "config": cfg or {}},
+             "internal": internal, "config": cfg or {}, "config_error": config_error},
     )
+
+
+def unread_topic(name="orders", *, error="KafkaError: TOPIC_AUTHORIZATION_FAILED", **kw):
+    """A topic whose config the scan was refused — the shape connect/kafka.py now emits."""
+    return topic(name, cfg={}, config_error=error, **kw)
 
 
 def scan(*resources) -> ScanContext:
@@ -182,7 +192,7 @@ def test_all_expected_rules_are_registered():
 
 def test_rule_ids_are_unique():
     ids = [d.rule_id for d in DETECTORS if d.rule_id.startswith("KAFKA.")]
-    assert len(ids) == len(set(ids)) == 24
+    assert len(ids) == len(set(ids)) == 25
 
 
 def test_every_rule_declares_severity_and_title():
@@ -911,9 +921,28 @@ def test_auto_create_does_not_fire_when_false():
 
 
 def test_auto_create_does_not_fire_when_the_key_is_absent():
-    """A managed platform that restricts DescribeConfigs on BROKER leaves this unknown, not failed."""
+    """A managed platform that restricts DescribeConfigs on BROKER leaves this unknown, not failed.
+
+    auto.create.topics.enable defaults to TRUE, so absence looks like a dangerous default going
+    unreported — the convention connect/flink.py applies to web.submit.enable. It does not
+    transfer: Flink's /jobmanager/config returns only keys that were explicitly SET, whereas
+    Kafka's DescribeConfigs enumerates the whole broker config space and hands back unset keys
+    with is_default=true. On any broker this scan can actually read, the shipped default arrives
+    as a readable value (asserted directly below), so absence never means "unset, therefore
+    true" — it means the response was filtered, and firing would be a false positive on the
+    managed platforms that most often disable auto-create in the first place.
+    """
     b, ctx = fixture_scan(config({"auto.create.topics.enable": DELETE}))
     assert fire("KAFKA.TOPIC.AUTO_CREATE_ENABLED", b, ctx) == []
+
+
+def test_auto_create_fires_on_the_readable_shipped_default():
+    """The reason absence is not a false negative: a real DescribeConfigs returns the default
+    explicitly, is_default=true and all, and that path is a finding."""
+    b, ctx = fixture_scan(config({
+        "auto.create.topics.enable": entry("true", source=5, is_default=True)}))
+    hits = fire("KAFKA.TOPIC.AUTO_CREATE_ENABLED", b, ctx)
+    assert len(hits) == 1 and "is_default=True" in hits[0].observation
 
 
 def test_auto_create_is_only_low_when_an_authorizer_enforces_create():
@@ -999,8 +1028,20 @@ def test_retention_unbounded_does_not_fire_on_a_compacted_topic():
     assert fire("KAFKA.TOPIC.RETENTION_UNBOUNDED", t) == []
 
 
-def test_retention_unbounded_does_not_fire_when_topic_config_is_unreadable():
+def test_retention_unbounded_is_silent_on_a_topic_that_was_read_and_has_no_config():
+    """An empty config with NO error is a fact: DescribeConfigs answered, nothing is set. That
+    is the only case where silence is the right answer — see the unreadable case below."""
     assert fire("KAFKA.TOPIC.RETENTION_UNBOUNDED", topic("orders", cfg={})) == []
+
+
+def test_an_unreadable_topic_config_is_a_coverage_gap_not_a_pass():
+    """This test used to assert `== []` for a topic its own name called unreadable — silence,
+    i.e. indistinguishable from a well-configured topic. The retention rule itself is still
+    quiet (the coverage rule owns the gap and files ONE finding), but the SCAN must not be."""
+    t = unread_topic("orders")
+    ctx = scan(t)
+    assert fire("KAFKA.TOPIC.RETENTION_UNBOUNDED", t, ctx) == []
+    assert sweep(ctx) == [("KAFKA.SCAN.TOPIC_NOT_ASSESSABLE", "medium")]
 
 
 def test_retention_unbounded_is_info_with_tiered_storage():
@@ -1032,9 +1073,29 @@ def test_min_insync_replicas_one_does_not_fire_on_an_unreplicated_topic():
     assert fire("KAFKA.DURABILITY.MIN_INSYNC_REPLICAS_ONE", t) == []
 
 
-def test_min_insync_replicas_one_does_not_fire_when_replication_factor_is_unknown():
+def test_min_insync_replicas_one_stays_silent_when_replication_factor_is_unknown():
+    """Deliberate silence, not the unreadable-config bug — the two look alike and are not.
+
+    Here the config WAS read and misr=1 WAS observed; only the disambiguator is missing. That
+    disambiguator is not separately deniable: `replication_factor` comes from the same
+    list_topics() metadata call that produced this resource at all, so None means the partition
+    list came back empty — and a topic with no partitions has no replicas to fall out of sync,
+    which makes the finding vacuous exactly where it would fire. misr=1 is also Kafka's shipped
+    default, so speaking up on unknown-rf would emit a finding for every topic on any scan with
+    partial metadata. Contrast the config-unreadable case, where nothing was observed at all and
+    KAFKA.SCAN.TOPIC_NOT_ASSESSABLE does speak up.
+    """
     t = topic("payments", cfg={"min.insync.replicas": entry("1")}, rf=None)
     assert fire("KAFKA.DURABILITY.MIN_INSYNC_REPLICAS_ONE", t) == []
+    assert sweep(scan(t)) == []
+
+
+def test_min_insync_replicas_one_is_silent_but_covered_when_the_config_is_unreadable():
+    """The other half: rf is known, but nothing was read, so silence alone would be a false pass."""
+    t = unread_topic("payments", rf=3)
+    ctx = scan(t)
+    assert fire("KAFKA.DURABILITY.MIN_INSYNC_REPLICAS_ONE", t, ctx) == []
+    assert [r for r, _ in sweep(ctx)] == ["KAFKA.SCAN.TOPIC_NOT_ASSESSABLE"]
 
 
 def test_min_insync_replicas_one_is_low_on_an_internal_topic():
@@ -1446,3 +1507,98 @@ def test_a_broker_whose_config_was_read_files_no_gap():
                            "config_error": None})
     assert config_not_readable(broker, ScanContext(connection_id="c", tenant_id="t",
                                                    resources=[broker])) == []
+
+
+# ═══ KAFKA.SCAN.TOPIC_NOT_ASSESSABLE ══════════════════════════════════════
+# The other half of the same hole. The broker rule above closed the broker path; the TOPIC path
+# in connect/kafka.py still recorded `{}` with no error on a failed read, so the topic rules
+# returned [] and an unread topic was indistinguishable from a well-configured one. It is
+# reachable on its own: topic-scope DescribeConfigs can be denied while broker-scope is granted,
+# and then the broker's config_error is None and KAFKA.SCAN.NOT_ASSESSABLE is correctly silent.
+TOPIC_GAP = "KAFKA.SCAN.TOPIC_NOT_ASSESSABLE"
+
+
+def test_the_reproduced_defect_topic_scope_denied_while_broker_scope_is_fine():
+    """The exact reproduction: broker config reads fine (so the broker coverage rule does not
+    fire), topic config does not. Before the fix this scan reported NOTHING about those topics."""
+    b = broker(hardened_config(), bindings=[acl()])
+    b.raw["config_error"] = None
+    ctx = scan(b, unread_topic("orders", rf=3), unread_topic("payments", rf=3))
+    assert fire("KAFKA.SCAN.NOT_ASSESSABLE", b, ctx) == []
+    assert sweep(ctx) == [(TOPIC_GAP, "medium")]
+
+
+def test_topic_gap_files_one_finding_naming_every_unread_topic():
+    """One finding for the whole scan, not one per topic per rule — a denied topic-scope grant
+    is one fact about the scanning principal."""
+    ctx = scan(*[unread_topic(n, rf=3) for n in ("orders", "payments", "audit-events")])
+    hits = [h for t in ctx.resources for h in fire(TOPIC_GAP, t, ctx)]
+    assert len(hits) == 1
+    obs = hits[0].observation
+    assert all(n in obs for n in ("orders", "payments", "audit-events"))
+    assert "3 of 3 topic(s)" in obs
+    assert "TOPIC_AUTHORIZATION_FAILED" in obs
+
+
+def test_topic_gap_is_not_assessable_never_a_pass():
+    """A coverage rule missing assessable=False scores as a PASSED info finding — the sibling
+    bug. `assessment_reason` is what the console renders in its place."""
+    t = unread_topic("orders")
+    hits = fire(TOPIC_GAP, t, scan(t))
+    assert hits[0].assessable is False and hits[0].assessment_reason
+    assert hits[0].remediation.strip() and hits[0].source_ref
+
+
+def test_topic_gap_names_the_rules_it_left_unevaluated():
+    t = unread_topic("orders")
+    hits = fire(TOPIC_GAP, t, scan(t))
+    assert "KAFKA.TOPIC.RETENTION_UNBOUNDED" in hits[0].detail
+    assert set(hits[0].source_ref["rules_unevaluated"]) == {
+        "KAFKA.TOPIC.RETENTION_UNBOUNDED",
+        "KAFKA.DURABILITY.MIN_INSYNC_REPLICAS_ONE",
+        "KAFKA.DURABILITY.UNCLEAN_LEADER_ELECTION",
+    }
+
+
+def test_the_rules_it_claims_to_cover_are_the_rules_that_read_topic_config():
+    """Keeps the advertised list honest: a new kinds=['topic'] rule that reads `raw.config` must
+    be added to _TOPIC_CONFIG_RULES, or this finding lies about what went unevaluated."""
+    from vectasec.detect.kafka import _TOPIC_CONFIG_RULES
+
+    topic_rules = {rid for rid, d in RULES.items() if "topic" in d.kinds} - {TOPIC_GAP}
+    assert set(_TOPIC_CONFIG_RULES) == topic_rules
+
+
+def test_topic_gap_is_silent_on_topics_whose_config_was_read():
+    """Including the empty-but-read case — that is knowledge, not a gap."""
+    read_ok = topic("orders", cfg=hardened_topic_config(), rf=3)
+    empty_but_read = topic("audit-events", cfg={}, rf=3)
+    ctx = scan(read_ok, empty_but_read)
+    assert sweep(ctx) == []
+
+
+def test_topic_gap_covers_only_the_unread_topics_in_a_mixed_scan():
+    ctx = scan(topic("orders", cfg=hardened_topic_config(), rf=3),
+               unread_topic("customer-pii", rf=3))
+    hits = [h for t in ctx.resources for h in fire(TOPIC_GAP, t, ctx)]
+    assert len(hits) == 1
+    assert "1 of 2 topic(s)" in hits[0].observation
+    assert "customer-pii" in hits[0].observation and "orders" not in hits[0].observation
+
+
+def test_readable_topics_behave_exactly_as_before_alongside_an_unread_one():
+    """A true positive must not move because a sibling topic was unreadable."""
+    t = topic("customer-pii", cfg=unbounded_topic_config(), rf=3)
+    alone = fire("KAFKA.TOPIC.RETENTION_UNBOUNDED", t, scan(t))
+    with_gap = fire("KAFKA.TOPIC.RETENTION_UNBOUNDED", t, scan(t, unread_topic("orders")))
+    assert len(alone) == 1
+    assert [(h.observation, h.detail, h.severity) for h in alone] == \
+           [(h.observation, h.detail, h.severity) for h in with_gap]
+
+
+def test_unclean_leader_election_topic_arm_is_silent_but_covered_when_unreadable():
+    """The third topic-config reader — an unread topic must not read as 'no override set'."""
+    t = unread_topic("orders", rf=3)
+    ctx = scan(t)
+    assert fire("KAFKA.DURABILITY.UNCLEAN_LEADER_ELECTION", t, ctx) == []
+    assert [r for r, _ in sweep(ctx)] == [TOPIC_GAP]

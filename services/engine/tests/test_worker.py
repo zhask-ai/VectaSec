@@ -301,7 +301,10 @@ def test_process_message_failure_at_cap_is_archived_as_poison(monkeypatch):
 
 def test_process_message_swallows_systemexit_from_run_scan(monkeypatch):
     """run_scan raises SystemExit for 'no such connector' / 'scan not found for tenant'. SystemExit
-    is NOT an Exception, so if the worker did not catch it explicitly it would kill the loop."""
+    is NOT an Exception, so if the worker did not catch it explicitly it would kill the loop.
+
+    It is also a CONFIGURATION error, so it is terminal on the first attempt rather than
+    redelivered — no amount of waiting registers a connector that does not exist."""
     def sysexit(*a, **k):
         raise SystemExit("no connector registered for type 'bogus'")
 
@@ -310,7 +313,77 @@ def test_process_message_swallows_systemexit_from_run_scan(monkeypatch):
 
     # Must return an outcome, not propagate SystemExit.
     outcome = process_message(FakeConn(), _msg(read_ct=1))
+    assert outcome == "permanent"
+
+
+# ── Fast-tracked permanent failures ───────────────────────────────────────────
+# The retry ladder is deliberately slow (MAX_READS × vt ≈ 40 minutes) so a flapping broker does
+# not page anyone. A rejected credential is not flapping: it is refused identically every time,
+# so it must be reported on the FIRST attempt instead of after 40 minutes of silence.
+class _HTTPish(Exception):
+    """Shaped like httpx.HTTPStatusError: carries .response.status_code."""
+
+    def __init__(self, status):
+        super().__init__(f"Client error '{status}' for url 'https://broker.example/api/overview'")
+        self.response = type("R", (), {"status_code": status})()
+
+
+@pytest.mark.parametrize("exc", [
+    _HTTPish(401),
+    _HTTPish(403),
+    RuntimeError("Authentication failed for user 'vectasec'"),
+    RuntimeError('KafkaError{code=_AUTHENTICATION,val=-169,str="SASL authentication error"}'),
+    type("AuthenticationError", (Exception,), {})("nope"),
+    SystemExit("bootstrap is required"),
+])
+def test_permanent_failures_are_terminal_on_the_first_attempt(monkeypatch, exc):
+    monkeypatch.setattr(worker, "run_scan", lambda *a, **k: (_ for _ in ()).throw(exc))
+    archived, notified = [], []
+    monkeypatch.setattr(worker, "archive", lambda conn, msg_id: archived.append(msg_id))
+    monkeypatch.setattr(worker, "_notify_scan_failed", lambda conn, job: notified.append(job))
+
+    outcome = process_message(FakeConn(), _msg(read_ct=1))
+
+    assert outcome == "permanent"
+    assert archived == [99], "a failure retrying cannot fix must not stay on the queue"
+    assert len(notified) == 1, "the operator must hear about it now, not after the ladder"
+
+
+@pytest.mark.parametrize("exc", [
+    RuntimeError("Connection refused"),
+    RuntimeError('KafkaError{code=_TRANSPORT,str="Failed to get metadata: Broker transport failure"}'),
+    TimeoutError("timed out"),
+    _HTTPish(503),
+    # Everything below was misclassified as PERMANENT by the first version of the classifier,
+    # which matched a bare "401"/"403" anywhere in the message. librdkafka appends
+    # `(after %ldms in state %s)` to every broker failure, so ~1% of ordinary Kafka transport
+    # errors carried those digits by luck of the millisecond counter; uuids, ports, byte counts
+    # and timeout values hit them too. Each of these would have skipped the retry ladder and
+    # paged somebody for a broker that was about to come back.
+    RuntimeError('KafkaError{code=_TRANSPORT,val=-195,str="broker-1:9092: Disconnected '
+                 '(after 20403ms in state UP)"}'),
+    RuntimeError('KafkaError{code=_AUTHENTICATION,str="SASL authentication error: Broker '
+                 'closed the connection"}'),
+    RuntimeError("deadlock detected DETAIL: Process 8891 waits for ShareLock on transaction 74031"),
+    RuntimeError("duplicate key value violates unique constraint "
+                 '"findings_tenant_id_fingerprint_key" Key (fingerprint)=(9f2c403ab71e) exists.'),
+    RuntimeError("NoBrokersAvailable: kafka-403.prod.svc.cluster.local:9092"),
+    RuntimeError("ConnectTimeout: connecting to broker-401.internal:9092 timed out"),
+    RuntimeError("Connection reset by peer after 1401 ms"),
+    RuntimeError("ReadTimeout on https://es.example.com:9200/_cluster/health?timeout=403s"),
+])
+def test_transient_failures_keep_the_patient_retry_ladder(monkeypatch, exc):
+    """The other half of the contract: an unreachable target must NOT be fast-tracked, or every
+    broker restart pages somebody."""
+    monkeypatch.setattr(worker, "run_scan", lambda *a, **k: (_ for _ in ()).throw(exc))
+    archived, notified = [], []
+    monkeypatch.setattr(worker, "archive", lambda conn, msg_id: archived.append(msg_id))
+    monkeypatch.setattr(worker, "_notify_scan_failed", lambda conn, job: notified.append(job))
+
+    outcome = process_message(FakeConn(), _msg(read_ct=1))
+
     assert outcome == "retry"
+    assert archived == [] and notified == []
 
 
 def test_process_message_never_raises_even_when_archive_fails(monkeypatch):

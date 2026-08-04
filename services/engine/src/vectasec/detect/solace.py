@@ -9,6 +9,13 @@ A finding is fingerprinted on (tenant, rule_id, ext_id), so each detector return
 per resource; rules that can match many ACL profiles aggregate into a single Hit that lists every
 match.
 
+The third outcome is SOLACE.BROKER.VPN_READS_DENIED. A SEMP credential can list the Message VPNs
+and still be refused /msgVpns/{v}/clientUsernames or /aclProfiles — SEMP authorises per VPN. When
+that happens the per-VPN lists arrive empty and four rules below go quiet, which is
+indistinguishable from a broker that is genuinely clean. The connector records every read's status
+in broker.raw['outcomes'], and that one broker-scoped rule reports the gap: assessable=False, so
+the console shows "Not assessed" and compliance maps it to unknown rather than pass.
+
 House severities:
   critical  a Message VPN with basic auth set to 'none' (password accepted but never checked)
   high      built-in 'default' username enabled, ACL default-allow, plaintext messaging, open ACL
@@ -16,6 +23,25 @@ House severities:
 """
 from ..contracts import Hit
 from ..registry import detector
+
+# Which rules each SEMP read gates. Read by SOLACE.BROKER.VPN_READS_DENIED to name what a refusal
+# actually cost — a coverage finding that does not say which rules stopped running is not
+# actionable. OPEN_ACL appears twice on purpose: it needs the username AND the ACL profile it
+# references (build_resources resolves acl_profile_is_default_allow from both), so either refusal
+# leaves it unevaluated.
+_RULES_GATED_BY = {
+    "about": (),                # only the version label; no rule in this pack turns on it
+    "msgVpns": ("SOLACE.VPN.BASIC_AUTH_TYPE_NONE", "SOLACE.VPN.BASIC_AUTH_NO_CLIENT_CERT",
+                "SOLACE.VPN.PLAINTEXT_MESSAGING", "SOLACE.VPN.TLS_DOWNGRADE_ALLOWED",
+                "SOLACE.VPN.ACL_DEFAULT_ALLOW", "SOLACE.CLIENT_USERNAME.DEFAULT_ENABLED",
+                "SOLACE.CLIENT_USERNAME.OPEN_ACL", "SOLACE.CLIENT_USERNAME.ENDPOINT_OVERRIDE"),
+    "clientUsernames": ("SOLACE.CLIENT_USERNAME.DEFAULT_ENABLED",
+                        "SOLACE.CLIENT_USERNAME.OPEN_ACL",
+                        "SOLACE.CLIENT_USERNAME.ENDPOINT_OVERRIDE"),
+    "aclProfiles": ("SOLACE.VPN.ACL_DEFAULT_ALLOW", "SOLACE.CLIENT_USERNAME.OPEN_ACL"),
+}
+
+_READ_PATHS = {"about": "/about/api", "msgVpns": "/msgVpns"}
 
 
 def _true(v) -> bool:
@@ -42,6 +68,68 @@ def semp_plaintext(r, ctx) -> list:
                      "plaintext are recoverable by anyone on-path."),
         detail=f"semp_scheme={raw.get('semp_scheme')}",
         source_ref={"api": "/SEMP/v2/config"},
+    )]
+
+
+@detector(kinds=["solace_broker"], rule_id="SOLACE.BROKER.VPN_READS_DENIED", severity="medium",
+          title="A SEMP config read was refused, so part of this broker was not assessed")
+def vpn_reads_denied(r, ctx) -> list:
+    """The third honest outcome at broker scope.
+
+    SEMP authorises per Message VPN, so a management user that can list /msgVpns is routinely
+    refused /msgVpns/{vpn}/clientUsernames or /aclProfiles. The connector records each read's
+    status rather than failing the scan; without this rule the refusal arrives as an empty list
+    and four rules below simply never fire — silence that renders as a clean broker.
+
+    ONE Hit per broker, naming every refused read and every rule left unevaluated. A finding is
+    fingerprinted on (tenant, rule_id, ext_id), so one Hit per refused read would collapse into a
+    single row anyway, and one gap finding per unevaluated rule would file the same fact eight
+    times.
+    """
+    raw = r.raw or {}
+    outcomes = raw.get("outcomes") or {}
+    if not outcomes:
+        # No coverage record at all (a resource built before outcomes existed, or by a caller that
+        # passed none). Absence of the record is not evidence of a refusal — say nothing.
+        return []
+
+    denied = []                                  # (path, read kind, status)
+    for kind in ("about", "msgVpns"):
+        if kind in outcomes and outcomes[kind] != 200:
+            denied.append((_READ_PATHS[kind], kind, outcomes[kind]))
+    for vpn, reads in sorted((outcomes.get("per_vpn") or {}).items()):
+        for kind in ("clientUsernames", "aclProfiles"):
+            status = (reads or {}).get(kind)
+            if status != 200:
+                denied.append((f"/msgVpns/{vpn}/{kind}", kind, status))
+    if not denied:
+        return []
+
+    listed = "; ".join(f"{path} → {'HTTP ' + str(st) if st is not None else 'no response'}"
+                       for path, _, st in denied)
+    gated = sorted({rid for _, kind, _ in denied for rid in _RULES_GATED_BY.get(kind, ())})
+    return [Hit(
+        observation=(
+            f"{len(denied)} SEMP config read(s) against broker {r.name!r} did not return 200: "
+            f"{listed}. The objects those reads would have returned are therefore absent from "
+            f"this scan"
+            + (f", and these rules were left unevaluated on this broker: {', '.join(gated)} — "
+               f"each returned nothing because it had nothing to read, not because the broker is "
+               f"clean." if gated else ", though no rule in this pack is gated on that read.")
+        ),
+        remediation=(
+            "Grant the SEMP management user read access to the refused endpoints and re-scan: a "
+            "global access level of `read-only` covers /about, /msgVpns and every per-VPN "
+            "sub-collection, or give the user a per-Message-VPN access level of `read-only` on "
+            "each VPN that must be assessed. Until then the posture behind these reads is "
+            "unknown, not clean."
+        ),
+        detail=f"denied_reads={[path for path, _, _ in denied]}",
+        assessable=False,
+        assessment_reason=(f"{len(denied)} SEMP config read(s) were refused, so the rules that "
+                           f"depend on them did not run"),
+        source_ref={"api": "/SEMP/v2/config",
+                    "denied": {path: st for path, _, st in denied}},
     )]
 
 
@@ -196,7 +284,10 @@ def username_open_acl(r, ctx) -> list:
     if not _true(raw.get("enabled")):
         return []
     if raw.get("acl_profile_is_default_allow") is not True:
-        return []   # None (profile unreadable) or False are not this finding
+        # None (profile unreadable) or False are not this finding. The unreadable case is not
+        # silence any more: the refused /aclProfiles read is recorded in the broker's outcomes and
+        # filed once, at broker scope, by SOLACE.BROKER.VPN_READS_DENIED.
+        return []
     return [Hit(
         observation=(f"clientUsername {raw.get('client_username')!r} in Message VPN "
                      f"{raw.get('msg_vpn_name')!r} is enabled and references ACL profile "

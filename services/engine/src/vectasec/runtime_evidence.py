@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import NamedTuple
 
 from .scan import _active_suppressions, _is_suppressed, fingerprint
 
@@ -41,6 +42,72 @@ RULE_UNUSED_TITLE = "Declared identity has never been observed in use"
 # Kinds that represent "an identity that could be used", per connector. Compared against the
 # principals runtime evidence actually saw.
 _IDENTITY_KINDS = ("user", "redis_user", "identity")
+
+# Which connector types can produce runtime evidence AT ALL, and what they read to get it.
+#
+# This is a CAPABILITY statement, deliberately separate from the empirical "has this connection
+# ever produced a runtime_client" check below. The two answer different questions, and an empty
+# evidence table renders them identically: a Kong connection has no live-client source in the
+# product at all, while a Kafka connection with no consumer groups genuinely observed nothing.
+# "Cannot see" and "saw nothing" are opposite claims, and a UI that shows one blank panel for
+# both is telling the operator something false about their coverage.
+#
+# Each entry states the read AND its scope limit, because the limits are load-bearing: Kafka's
+# consumer-group view cannot see producers, so "no clients observed" from Kafka never means
+# "nothing is talking to this cluster".
+#
+# `attributes` is the load-bearing flag for RUNTIME.GRANT.NEVER_OBSERVED. It answers one narrow
+# question — does this source name an AUTHENTICATED principal? — and only a source that does can
+# support a claim of the form "identity X was never seen". Kafka's DescribeConsumerGroups
+# reports a `client.id` that any client may assert freely; treating that as an identity would
+# make both halves wrong (a session attributed to whoever claimed the name, and every real
+# principal reported unused).
+class RuntimeSource(NamedTuple):
+    reads: str
+    attributes: bool
+
+
+RUNTIME_SOURCES: dict[str, RuntimeSource] = {
+    "rabbitmq": RuntimeSource(
+        "GET /api/connections — every live AMQP/management connection, with its "
+        "principal, vhost, peer address, SASL mechanism and TLS state.", attributes=True),
+    "redis": RuntimeSource(
+        "CLIENT LIST + ACL LOG — connected clients and the ACL denials they triggered.",
+        attributes=True),
+    "nats": RuntimeSource(
+        "GET /connz?auth=1 — live connections with their authenticated account.",
+        attributes=True),
+    "pgbouncer": RuntimeSource(
+        "SHOW CLIENTS — every pooled client session and the user it authenticated as.",
+        attributes=True),
+    "kafka": RuntimeSource(
+        "DescribeConsumerGroups — consumer group members only. Producers are invisible to "
+        "this API, per-client transport is not reported, and the reported client.id is "
+        "self-asserted rather than an authenticated identity.", attributes=False),
+}
+
+
+def runtime_source_for(connector_type: str) -> str | None:
+    """What this connector type reads for runtime evidence, or None when it has no source.
+
+    None is a real, publishable answer — "this system cannot tell us who is connected" is a
+    coverage fact the operator needs, not a blank to be filled in later.
+    """
+    source = RUNTIME_SOURCES.get((connector_type or "").lower())
+    return source.reads if source else None
+
+
+def runtime_source_attributes(connector_type: str) -> bool | None:
+    """Can this source attribute a session to an authenticated principal? None = no source.
+
+    Declared here rather than inferred from the data on purpose. Inferring it — "have we ever
+    seen a non-null principal on this connection?" — fails OPEN: one anomalous row (a manual
+    insert, a connector that changes what it emits, evidence left behind by an older version)
+    would re-enable an unused-identity claim on a source that can never support one. A guard
+    against fabricated findings has to fail closed, so the capability is stated, not observed.
+    """
+    source = RUNTIME_SOURCES.get((connector_type or "").lower())
+    return source.attributes if source else None
 
 
 def record_runtime(conn, tenant_id: str, connection_id: str, scan_id: str) -> dict:
@@ -132,14 +199,22 @@ def assess_unused(conn, tenant_id: str, connection_id: str, scan_id: str) -> dic
         connection reads as "not yet known" instead of silently clean.
     """
     stats = {"declared": 0, "observed": 0, "never_observed": 0, "window_days": None,
-             "assessable": False, "runtime_source": False}
+             "assessable": False, "runtime_source": False, "runtime_capable": None}
     with conn.cursor() as cur:
-        # Only some connectors can observe runtime at all — today RabbitMQ's management API and
-        # Redis' CLIENT LIST. For Kafka, Kong, MCP and the rest, identity.py still derives
-        # `identity` resources, so without this guard every one of those connections files
-        # "runtime observation has not started" on EVERY scan, forever, with no path to ever
-        # becoming assessable. A finding nobody can ever close is noise that teaches people to
-        # ignore the rule; silence is the honest answer where no runtime source exists.
+        # Record the CAPABILITY separately from the observation, so a scan's stats can tell the
+        # console which of the two silences this is. Without it, "Kong has no live-client API"
+        # and "Kafka has one and saw nobody" both surface as an empty panel.
+        cur.execute("select type from connections where id = %s", (connection_id,))
+        ctype = (cur.fetchone() or [None])[0]
+        stats["runtime_capable"] = runtime_source_for(ctype) is not None
+        stats["connector_type"] = ctype
+
+        # Only some connectors can observe runtime at all — see RUNTIME_SOURCES above. For Kong,
+        # MCP and the rest, identity.py still derives `identity` resources, so without this
+        # guard every one of those connections files "runtime observation has not started" on
+        # EVERY scan, forever, with no path to ever becoming assessable. A finding nobody can
+        # ever close is noise that teaches people to ignore the rule; silence is the honest
+        # answer where no runtime source exists.
         cur.execute(
             """select exists (
                  select 1 from runtime_evidence
@@ -175,24 +250,65 @@ def assess_unused(conn, tenant_id: str, connection_id: str, scan_id: str) -> dic
         observed = {str(r[0]).lower() for r in cur.fetchall()}
         stats["observed"] = len(observed)
 
+        # ATTRIBUTABLE evidence is a stricter requirement than evidence, and the difference is
+        # the whole claim. Kafka's DescribeConsumerGroups reports a self-asserted `client.id`,
+        # never an authenticated principal, so a Kafka connection accumulates real runtime rows
+        # whose `principal` is permanently NULL. Left unguarded, such a connection satisfies the
+        # window and then reports EVERY declared ACL identity as "never observed in use" — a
+        # confident claim built on a source that structurally cannot support it, about identities
+        # that may well be in constant use. Where nothing is attributable, the honest output is
+        # the coverage gap, not the accusation.
+        #
+        # TWO separate gates, because they are different facts with different remedies:
+        #   * `can_attribute` is DECLARED (RUNTIME_SOURCES). It fails closed — no row in the
+        #     evidence table can talk a non-attributing source into supporting the claim.
+        #   * `attributable` is OBSERVED. It covers an attributing source that has genuinely not
+        #     seen a principal yet, which is a gap that closes on its own.
+        cur.execute(
+            """select count(*) from runtime_evidence
+                where tenant_id = %s and connection_id = %s""",
+            (tenant_id, connection_id),
+        )
+        evidence_rows = int((cur.fetchone() or [0])[0])
+        can_attribute = runtime_source_attributes(ctype)
+        attributable = bool(observed) or evidence_rows == 0
+        stats["source_attributes"] = can_attribute
+        stats["attributable"] = attributable and can_attribute is not False
+
         supps = _active_suppressions(cur, tenant_id)
         days, scans = _window(cur, connection_id)
         stats["window_days"] = round(days, 1) if days is not None else None
-        assessable = days is not None and days >= MIN_WINDOW_DAYS and scans >= MIN_SCANS
+        assessable = (stats["attributable"] and days is not None
+                      and days >= MIN_WINDOW_DAYS and scans >= MIN_SCANS)
         stats["assessable"] = assessable
 
         never = [(rid, ext, kind, name) for rid, ext, kind, name in declared
                  if str(name).lower() not in observed]
-        stats["never_observed"] = len(never)
+        stats["never_observed"] = len(never) if assessable else 0
 
         if not assessable:
             # ONE honest gap, not N confident claims. Filed against the connection's own
             # identity set so it appears next to them in the console.
             rid, ext, _kind, _name = declared[0]
-            why = ("runtime observation has not started on this connection"
-                   if days is None else
-                   f"the observation window is {days:.1f} day(s) over {scans} completed scan(s), "
-                   f"short of the {MIN_WINDOW_DAYS}-day / {MIN_SCANS}-scan minimum")
+            # `structural` is the permanent kind: the API itself does not name a principal, so
+            # no amount of watching converts this into evidence about an identity.
+            structural = can_attribute is False
+            if structural:
+                why = (f"this connector's runtime source cannot attribute a session to an "
+                       f"authenticated identity — {runtime_source_for(ctype) or 'the source'} "
+                       f"So silence about a principal here is a property of the API, not "
+                       f"evidence about that principal"
+                       + (f" ({evidence_rows} client session(s) recorded, none attributable)"
+                          if evidence_rows else ""))
+            elif not attributable:
+                why = (f"{evidence_rows} client session(s) have been recorded on this connection "
+                       f"but none has yet named a principal, so there is nothing to compare the "
+                       f"declared identities against")
+            elif days is None:
+                why = "runtime observation has not started on this connection"
+            else:
+                why = (f"the observation window is {days:.1f} day(s) over {scans} completed "
+                       f"scan(s), short of the {MIN_WINDOW_DAYS}-day / {MIN_SCANS}-scan minimum")
             _write_finding(
                 cur, tenant_id, scan_id, connection_id, rid, ext,
                 severity="info",
@@ -202,14 +318,30 @@ def assess_unused(conn, tenant_id: str, connection_id: str, scan_id: str) -> dic
                 detail=("Absence of evidence is not evidence of absence. A principal that has "
                         "not been seen may simply run on a schedule longer than our window, or "
                         "during a period when collection was failing. This finding records the "
-                        "coverage that exists so far, and nothing more."),
-                remediation=("Keep this connection scanning on a schedule. Once the window "
-                             f"reaches {MIN_WINDOW_DAYS} days across {MIN_SCANS} scans, "
-                             "never-observed identities will be reported individually."),
+                        "coverage that exists so far, and nothing more."
+                        + (" This particular gap does NOT close with time: the limit is what the "
+                           "system's API discloses, not how long we have watched it."
+                           if structural else "")),
+                # Telling someone to keep scanning would be a lie where the ceiling is the API
+                # itself — the gap would never close and the advice would never stop repeating.
+                # Only the STRUCTURAL case gets that treatment: a source that can attribute and
+                # simply has not yet is exactly the case where waiting is the right advice.
+                remediation=(
+                    ("Unused-identity analysis needs authenticated per-client attribution, which "
+                     "this system's runtime API does not provide. To get it, enable an "
+                     "authenticated listener whose audit or connection log names the principal "
+                     "(for Kafka, broker authorizer logs), or review these identities against "
+                     "the grants and ownership records instead.")
+                    if structural else
+                    ("Keep this connection scanning on a schedule. Once the window "
+                     f"reaches {MIN_WINDOW_DAYS} days across {MIN_SCANS} scans, "
+                     "never-observed identities will be reported individually.")),
                 assessment="not_assessable",
                 reason=why,
                 extra={"declared": len(declared), "observed": len(observed),
-                       "window_days": stats["window_days"], "scans": scans},
+                       "window_days": stats["window_days"], "scans": scans,
+                       "source_attributes": can_attribute,
+                       "evidence_rows": evidence_rows},
                 supps=supps,
             )
             return stats
@@ -266,8 +398,10 @@ def _write_finding(cur, tenant_id, scan_id, connection_id, resource_id, ext_id, 
                       -- _persist_scan, and for the same reason — it never overwrites a status
                       -- a HUMAN set (resolved/triaged/in_progress/accepted).
                       status = case
-                        when excluded.status = 'suppressed' then 'suppressed'
-                        when findings.status = 'suppressed' then 'open'
+                        when excluded.status = 'suppressed'
+                              and findings.status in ('open','suppressed') then 'suppressed'
+                        when findings.status = 'suppressed'
+                              and excluded.status <> 'suppressed' then 'open'
                         else findings.status
                       end
            returning id""",

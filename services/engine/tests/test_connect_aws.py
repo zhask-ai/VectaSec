@@ -9,10 +9,13 @@ detector tests build on, so a shape drift between connector and rulepack fails H
 import json
 import pathlib
 
+import pytest
+
 from vectasec.contracts import Collected, Resource
 from vectasec.identity import IDENTITY_EXTRACTORS, derive_identities
 from vectasec.registry import CONNECTOR_FIELDS, CONNECTORS
 from vectasec.connect.aws import (
+    _collect_apigw_v1, _collect_events, _collect_sns,
     arn_account, has_wildcard_action, is_public_statement, parse_api_v1, parse_api_v2,
     parse_bus, parse_msk_cluster, parse_queue, parse_rule, parse_subscription, parse_topic,
     policy_statements, principal_entries,
@@ -145,6 +148,7 @@ def test_parse_topic_and_subscription():
     t = topic("alerts")
     assert t.kind == "aws_sns_topic" and t.ext_id.endswith(":alerts")
     assert t.raw["kms_master_key_id"] is None
+    assert t.raw["subscriptions_readable"] is True
     assert t.raw["policy"]["Statement"][0]["Action"] == "sns:*"
 
     subs = [parse_subscription(REGION, s) for s in FIX["sns"]["subscriptions"]["alerts"]]
@@ -155,11 +159,46 @@ def test_parse_topic_and_subscription():
     assert subs[1].ext_id != subs[0].ext_id and "pending" in subs[1].ext_id
 
 
+def test_parse_topic_subscription_listing_denied_is_recorded():
+    """An empty subscription list is what a topic with no delivery endpoints looks like, so a
+    denied ListSubscriptionsByTopic must be visible on the topic itself."""
+    a = as_boto(FIX["sns"]["attributes"]["alerts"])
+    denied = parse_topic(REGION, a["TopicArn"], a, subscriptions_readable=False)
+    assert denied.raw["subscriptions_readable"] is False
+    # everything else about the topic is still assessed — the failure is isolated
+    assert denied.raw["attributes_readable"] is True
+    assert denied.raw["policy"]["Statement"][0]["Action"] == "sns:*"
+
+
 # ── EventBridge ───────────────────────────────────────────────────────────────
 def test_parse_bus_policy_string():
     b = bus("default")
     assert b.kind == "aws_event_bus"
+    assert b.raw["policy_readable"] is True
     assert is_public_statement(policy_statements(b.raw["policy"])[0])
+
+
+def test_parse_bus_unread_policy_is_not_an_absent_policy():
+    """policy=None is byte-identical to 'this bus has no resource policy' — the SECURE state.
+    Only the flag distinguishes a denied read from a genuinely open-to-nobody bus."""
+    b = next(x for x in FIX["events"]["buses"] if x["Name"] == "default")
+    denied = parse_bus(REGION, b, None, policy_readable=False)
+    absent = parse_bus(REGION, b, None, policy_readable=True)
+    assert denied.raw["policy"] == absent.raw["policy"] is None
+    assert denied.raw["policy_readable"] is False and absent.raw["policy_readable"] is True
+
+
+def test_parse_rule_unread_targets_are_not_an_empty_target_list():
+    b = bus("default")
+    rule = as_boto(FIX["events"]["rules"]["default"][0])
+    denied, denied_edges = parse_rule(REGION, b.ext_id, rule, None)
+    none_at_all, _ = parse_rule(REGION, b.ext_id, rule, [])
+    assert denied[0].raw["targets_readable"] is False
+    assert none_at_all[0].raw["targets_readable"] is True
+    # both carry an empty target list; only the flag says which one was actually read
+    assert denied[0].raw["targets"] == none_at_all[0].raw["targets"] == []
+    assert [r for r in denied if r.kind == "aws_event_target"] == []
+    assert [e.kind for e in denied_edges] == ["routes_to"]
 
 
 def test_parse_rule_targets_and_edges():
@@ -226,6 +265,9 @@ def test_parse_api_v1_routes_stages_edges():
     assert routes[("GET", "/opaque")]["details_readable"] is False
     assert routes[("GET", "/opaque")]["authorization_type"] is None
 
+    assert api.raw["routes_readable"] and api.raw["stages_readable"]
+    assert api.raw["authorizers_readable"]
+
     stages = {r.name: r for r in resources if r.kind == "aws_api_stage"}
     assert stages["prod"].raw["access_log_enabled"] is False
     assert stages["prod"].raw["waf_supported"] is True
@@ -233,6 +275,21 @@ def test_parse_api_v1_routes_stages_edges():
     assert stages["hardened"].raw["web_acl_arn"]
     assert {(e.src_ext_id, e.dst_ext_id, e.kind) for e in edges} == {
         (api.ext_id, s.ext_id, "exposes") for s in stages.values()}
+
+
+@pytest.mark.parametrize("parse", [parse_api_v1, parse_api_v2])
+def test_parse_api_denied_child_lists_are_distinguishable_from_empty_ones(parse):
+    """A denied get_stages emits NO aws_api_stage resource, so every stage rule has nothing to
+    run on and the API scores clean. The flags on the aws_api are the only trace left."""
+    fx = FIX["apigw_v1" if parse is parse_api_v1 else "apigw_v2"]
+    denied, denied_edges = parse(REGION, fx["api"], None, None, None)
+    empty, _ = parse(REGION, fx["api"], [], [], [])
+    for key in ("stages_readable", "routes_readable", "authorizers_readable"):
+        assert denied[0].raw[key] is False, key
+        assert empty[0].raw[key] is True, key
+    assert denied[0].raw["routes"] == empty[0].raw["routes"] == []
+    assert [r for r in denied if r.kind == "aws_api_stage"] == []
+    assert denied_edges == []
 
 
 def test_parse_api_v2_route_keys_and_waf_unsupported():
@@ -249,6 +306,129 @@ def test_parse_api_v2_route_keys_and_waf_unsupported():
     stage = next(r for r in resources if r.kind == "aws_api_stage")
     assert stage.raw["waf_supported"] is False       # WAF cannot attach to HTTP APIs
     assert any(e.kind == "exposes" for e in edges)
+
+
+# ── collection: a denied CHILD read inside a service that listed fine ─────────
+# boto3 never appears here either: the collectors take a session, so a stub session with
+# stub clients drives the real except branches offline.
+class _Denied(Exception):
+    """What botocore raises: an exception carrying an AWS error code."""
+    response = {"Error": {"Code": "AccessDeniedException"}}
+
+
+def _pages(*pages):
+    class _Paginator:
+        def paginate(self, **_kw):
+            for p in pages:
+                if isinstance(p, Exception):
+                    raise p
+                yield p
+    return _Paginator()
+
+
+class _Client:
+    """Stub boto3 client: a mapped value that is an Exception is raised, else returned."""
+    def __init__(self, **calls):
+        self._calls = calls
+
+    def __getattr__(self, name):
+        value = self._calls[name]
+
+        def _call(**_kw):
+            if isinstance(value, Exception):
+                raise value
+            return value
+        return _call
+
+    def get_paginator(self, name):
+        return self._calls[f"paginate_{name}"]
+
+
+class _Session:
+    def __init__(self, client):
+        self._client = client
+
+    def client(self, _service, **_kw):
+        return self._client
+
+
+def test_collect_sns_denied_subscription_listing_is_recorded_not_swallowed():
+    arn = FIX["sns"]["attributes"]["alerts"]["TopicArn"]
+    session = _Session(_Client(
+        paginate_list_topics=_pages({"Topics": [{"TopicArn": arn}]}),
+        get_topic_attributes={"Attributes": as_boto(FIX["sns"]["attributes"]["alerts"])},
+        paginate_list_subscriptions_by_topic=_pages(_Denied()),
+    ))
+    resources, edges, gaps = _collect_sns(session, REGION)
+    topic_res = next(r for r in resources if r.kind == "aws_sns_topic")
+    assert topic_res.raw["subscriptions_readable"] is False
+    assert [r for r in resources if r.kind == "aws_sns_subscription"] == [] and edges == []
+    # the topic survives, and the missing subscriptions leave a record behind
+    assert gaps == [{"parent": arn, "child": "subscriptions",
+                     "error": "AccessDeniedException"}]
+
+
+def test_collect_sns_readable_topic_records_no_gap():
+    arn = FIX["sns"]["attributes"]["alerts"]["TopicArn"]
+    session = _Session(_Client(
+        paginate_list_topics=_pages({"Topics": [{"TopicArn": arn}]}),
+        get_topic_attributes={"Attributes": as_boto(FIX["sns"]["attributes"]["alerts"])},
+        paginate_list_subscriptions_by_topic=_pages(
+            {"Subscriptions": FIX["sns"]["subscriptions"]["alerts"]}),
+    ))
+    resources, edges, gaps = _collect_sns(session, REGION)
+    assert gaps == []
+    assert len([r for r in resources if r.kind == "aws_sns_subscription"]) == 2
+    assert next(r for r in resources
+                if r.kind == "aws_sns_topic").raw["subscriptions_readable"] is True
+    assert all(e.kind == "delivers_to" for e in edges)
+
+
+def test_collect_events_denied_policy_and_rules_are_recorded_not_swallowed():
+    session = _Session(_Client(
+        list_event_buses={"EventBuses": FIX["events"]["buses"][:1]},
+        describe_event_bus=_Denied(),
+        list_rules=_Denied(),
+    ))
+    resources, _edges, gaps = _collect_events(session, REGION)
+    bus_res = next(r for r in resources if r.kind == "aws_event_bus")
+    # a denied DescribeEventBus must not render as "this bus has no resource policy"
+    assert bus_res.raw["policy_readable"] is False and bus_res.raw["policy"] is None
+    assert gaps == [{"parent": "bus default", "child": "rules",
+                     "error": "AccessDeniedException"}]
+
+
+def test_collect_events_denied_targets_ride_on_the_rule_not_a_gap_record():
+    session = _Session(_Client(
+        list_event_buses={"EventBuses": FIX["events"]["buses"][:1]},
+        describe_event_bus={"Policy": json.dumps(FIX["events"]["bus_policies"]["default"])},
+        list_rules={"Rules": [as_boto(FIX["events"]["rules"]["default"][0])]},
+        list_targets_by_rule=_Denied(),
+    ))
+    resources, _edges, gaps = _collect_events(session, REGION)
+    rule_res = next(r for r in resources if r.kind == "aws_event_rule")
+    assert rule_res.raw["targets_readable"] is False and rule_res.raw["targets"] == []
+    assert next(r for r in resources if r.kind == "aws_event_bus").raw["policy_readable"] is True
+    # filed once: the rule resource carries the gap, so no duplicate account-scope record
+    assert gaps == []
+
+
+def test_collect_apigw_v1_denied_children_leave_flags_and_gap_records():
+    fx = FIX["apigw_v1"]
+    session = _Session(_Client(
+        paginate_get_rest_apis=_pages({"items": [fx["api"]]}),
+        get_stages=_Denied(),
+        get_authorizers=_Denied(),
+        paginate_get_resources=_pages(_Denied()),
+    ))
+    resources, edges, gaps = _collect_apigw_v1(session, REGION)
+    api = next(r for r in resources if r.kind == "aws_api")
+    assert api.raw["stages_readable"] is False and api.raw["routes_readable"] is False
+    assert api.raw["authorizers_readable"] is False
+    # no stage resource exists, so STAGE_LOGGING_DISABLED / STAGE_NO_WAF never run at all
+    assert [r for r in resources if r.kind == "aws_api_stage"] == [] and edges == []
+    assert {(g["child"], g["parent"]) for g in gaps} == {
+        ("stages", "api abc123"), ("authorizers", "api abc123")}
 
 
 # ── NHI extraction ────────────────────────────────────────────────────────────

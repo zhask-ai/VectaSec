@@ -22,8 +22,8 @@ Two scoping notes for this revision, stated up front because the contract demand
 Phases refer to [vectasec-build-plan.md](vectasec-build-plan.md) §18; the forward plan is
 [vectasec-v4-blueprint.md](vectasec-v4-blueprint.md).
 
-**One-line summary:** the deterministic core is real, provable, and now *broad* — 7 connectors /
-129 detectors including an agentless AWS path and a Kubernetes/mesh connector — with verified-token
+**One-line summary:** the deterministic core is real, provable, and now *broad* — 39 connectors /
+448 detectors including an agentless AWS path and a Kubernetes/mesh connector — with verified-token
 API auth, Vault-held credentials, DB-side continuous scheduling, a hash-chained evidence ledger,
 and compliance evaluation actually wired in. What is still unproven: the collector round trip,
 the on-prem stack, CI on GitHub, and everything involving a second human (SSO/SAML/SCIM, a design
@@ -61,9 +61,11 @@ uv run vectasec findings
 Misconfigured Kafka, RabbitMQ, Redis → read-only collection → deterministic detectors → findings
 and cited observations in one transaction, deduped by fingerprint, idempotent on re-run.
 
-**Verified today (2026-07-23):** `uv run vectasec rules` → **129 rules across 9 packs, 7
-connectors** (AWS 21, MCP 24, KAFKA 20, K8S 18, RABBITMQ 18, KONG 16, REDIS 6, NHI 4, DATA 2).
-`uv run pytest`: **914 passed** in `services/engine`, **55 passed** in `services/collector`. (The
+**Verified 2026-08-03:** the live registry reports **448 detectors across 39 connectors**
+(`import vectasec.connect, vectasec.detect; len(DETECTORS)`). The 07-23 figure of 129/7 stood in
+this document for eleven days after it stopped being true, which meant `vectasec doctor` printed
+numbers a new operator would read as a broken install.
+`uv run pytest`: **2408 passed** in `services/engine`, **55 passed** in `services/collector`. (The
 counts will drift; run them yourself. They are recorded here as *observed on this date*, not as a
 contract.)
 
@@ -98,7 +100,7 @@ Rows added or materially changed since the 07-17 revision are marked **new**. "P
 | Contracts + registry | `contracts.py`, `registry.py` | Unchanged: `@connector`/`@detector` auto-registration; `Hit` grew `assessable`/`assessment_reason`. |
 | Scan loop | `scan.py` | collect → detect → persist, one transaction, fingerprint dedup, stale-marking, per-detector error isolation, suppressions, and now compliance recompute + Vault merge. |
 | Connectors (7) / Detectors (129) | `connect/`, `detect/` | Counted from the registry 2026-07-23 (`uv run vectasec rules`). Per-pack breakdown and caveats: [coverage-matrix.md](coverage-matrix.md). |
-| NHI / identity model | `identity.py`, `detect/identity.py`, `/identities` | All 7 connectors now feed it — `@identity_extractor` for kafka/rabbitmq/kong/redis/mcp in `identity.py`, aws/k8s inline in their connectors. Credentials remain metadata-only. |
+| NHI / identity model | `identity.py`, `detect/identity.py`, `/identities` | All 39 connectors now feed it — `@identity_extractor` for kafka/rabbitmq/kong/redis/mcp in `identity.py`, aws/k8s inline in their connectors. Credentials remain metadata-only. |
 | Data classification (DSPM) | `classify.py`, `detect/data.py` | Unchanged; "named like" honesty intact. |
 | Posture score + dashboard | `lib/posture.ts`, `app/page.tsx`, `vectasec posture` | Unchanged formula — now duplicated in the snapshot trigger (see the lockstep warning above). |
 | Grounded AI triage | `ai.py` | Citation-gated as before. Gap #14 (single pinned model) is closed: a model *chain* (`MODELS`, primary overridable via `VECTASEC_AI_MODEL`) hands off on unavailability before falling back to deterministic. |
@@ -133,7 +135,7 @@ Rows added or materially changed since the 07-17 revision are marked **new**. "P
 
 | Item | State |
 |---|---|
-| Collector round trip | ⚠️ Both ends exist (`collector/main.py` ↔ `/collector/*` in `api/main.py`, HMAC service tokens, tenant-scoped job claiming, raw-free results path). **A real collector completing enroll → poll → scan → push against a live engine has still not been observed.** (Migration 008's header mentions a "collector round-trip's cleanup" surfacing a bug — evidence someone exercised parts of it; the tree contains no artifact proving the full loop, so the claim stays: unproven.) |
+| Collector round trip | ✅ **Observed end to end on 2026-08-03**, and the reason it never had been was a real defect, not a lack of trying: `GET /collector/jobs` dispatches on `connections.collector_id`, both collector endpoints read that column, and **nothing in the product ever wrote it** — no API field, no UI, no engine path. A collector-mode connection could be created and scanned, and its scans sat `queued` forever with no collector able to claim them. Fixed by `GET /collectors` (you cannot type a uuid you have never been shown) plus a `collector_id` on the connection request, tenant-validated in `_resolve_collector` — a collector id arrives in a request body, and another tenant's id would hand that tenant's operator a job carrying the NAME of a target in someone else's estate. With exactly one collector enrolled it binds without being named; with several it refuses and lists them. Proven live against the dev Redis: enroll → heartbeat → long-poll → claim → local scan → push, **9 findings over 3 resources**, including the previously-stranded queued job. The privacy claim was checked rather than assumed: every resource that arrived has an EMPTY `raw`, so findings and metadata travelled and broker config did not. |
 | Compliance | ✅ Evaluated per scan; attestation flow exists (006 + `/attest`). No OSCAL export, no Article 28 register, no evidence bundle export. |
 | Findings workflow | ✅ Status/assign/suppress-with-expiry/triage via the engine API. |
 | Continuous scanning | ✅ DB-side (working tree); cron execution on the live project + the console setter route not verified at read time (see DONE). |
@@ -145,9 +147,15 @@ Rows added or materially changed since the 07-17 revision are marked **new**. "P
 ### Phases 2–3 — Breadth + identity, MCP + enterprise
 The 07-17 verdicts are mostly obsolete in the good direction: mesh posture (via K8s), an
 agentless cloud path (AWS), MCP current-spec coverage, and cross-connector NHI all exist now.
-Supply chain is now built end to end (SBOM/VEX, the live OSV feed, plugin inventory, and
-integration-as-code static analysis), and the agentless runtime half spans four sources
-(RabbitMQ, Redis, NATS, PgBouncer). Still absent from those phase lists: iPaaS connectors
+Supply chain is now built end to end on BOTH identifier axes (SBOM, a live OSV feed on PURLs
+and a live NVD feed on CPEs, per-version licence inventory, an end-of-support rulepack, plugin
+inventory, integration-as-code static analysis, and a real `GET /reports/vex` export). The
+agentless runtime half spans five sources (RabbitMQ, Redis, NATS, PgBouncer, Kafka) and now
+publishes its own coverage: which connections have a runtime source, and which produce evidence
+that cannot be attributed to an identity. Two correctness bugs were found and fixed while
+verifying this against the live feeds: `nats:nats_server` and OpenSearch's borrowed
+`elastic:elasticsearch` CPE both matched ZERO NVD records, which renders as a clean bill of
+health rather than an error. Still absent from those phase lists: iPaaS connectors
 (any), NHI usage/staleness telemetry, registry/rug-pull detection, the OPTIONAL in-cluster
 runtime sensor, enterprise on-prem hardening, billing/metering (`usage` table still written
 by nothing), SIEM export, public read API.
@@ -190,8 +198,11 @@ model pin, #15 hash chain, #19 assessability); their history is in git.
    but the engine cannot distinguish that from a compromised token-holder forging any actor into
    the audit trail. Transitional by design; the end state is per-user JWTs on every console call.
 
-3. **Collector round trip unobserved; on-prem never booted; CI never seen green on GitHub.**
-   Three standing "exists but unproven" items — each is one session of running things, not code.
+3. **On-prem never booted; CI never seen green on GitHub.** Two standing "exists but unproven"
+   items. The collector round trip has now been observed (see PARTIAL) — and it turned out NOT
+   to be "one session of running things": nothing could write `connections.collector_id`, so the
+   dispatch query could never match. Treat the remaining two as possibly the same shape: an
+   unproven path is unproven because nobody has run it, or because it does not work.
 
 4. **`verify_ledger()` is never called.** The hash chain is only as good as someone checking it:
    no CLI command, endpoint, or cron invokes it. Add `vectasec doctor --verify-ledger` or a

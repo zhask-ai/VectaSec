@@ -60,6 +60,11 @@ def build_resources(*, about: dict | None, vpns: list, usernames_by_vpn: dict,
             # HTTP Basic over plaintext exposes the admin credential; https+verified suppresses it.
             "semp_plaintext": scheme != "https",
             "msg_vpn_count": len(vpns or []),
+            # {"about": 200, "msgVpns": 200,
+            #  "per_vpn": {"<vpn>": {"clientUsernames": 403, "aclProfiles": 403}}}
+            # Every SEMP read this scan attempted, with the status it answered. This is the
+            # broker's coverage record: a rule that finds an empty list has to be able to tell
+            # "the broker has none" from "we were not allowed to look".
             "outcomes": outcomes or {},
         },
     )]
@@ -177,6 +182,12 @@ def collect(config: dict) -> Collected:
 
         usernames_by_vpn: dict = {}
         acls_by_vpn: dict = {}
+        # Per-VPN reads are recorded PER VPN, not folded into one broker-wide number: a management
+        # user is routinely scoped per Message VPN, so /clientUsernames can answer 200 on one VPN
+        # and 403 on the next. A denied read leaves the list empty, which is indistinguishable from
+        # a VPN that genuinely has no usernames or no ACL profiles — so the status is what
+        # SOLACE.BROKER.VPN_READS_DENIED reads to name which VPN was not covered.
+        per_vpn: dict = {}
         for vpn in vpns:
             name = vpn.get("msgVpnName")
             cu_res = _get(client, f"/msgVpns/{name}/clientUsernames?count=100", auth)
@@ -185,6 +196,9 @@ def collect(config: dict) -> Collected:
             acl_res = _get(client, f"/msgVpns/{name}/aclProfiles?count=100", auth)
             acls_by_vpn[name] = acl_res.get("data") if acl_res.get("ok") and isinstance(
                 acl_res.get("data"), list) else []
+            per_vpn[str(name)] = {"clientUsernames": cu_res.get("status"),
+                                  "aclProfiles": acl_res.get("status")}
+        outcomes["per_vpn"] = per_vpn
 
     return build_resources(
         about=about_res.get("data") if about_res.get("ok") and isinstance(about_res.get("data"), dict) else None,

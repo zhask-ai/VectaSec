@@ -32,7 +32,7 @@ import logging
 import time
 from typing import NamedTuple, Optional
 
-from .scan import run_scan   # module-level so it is monkeypatchable in tests
+from .scan import permanent_failure_reason, run_scan   # module-level: monkeypatchable in tests
 
 log = logging.getLogger(__name__)
 
@@ -227,12 +227,22 @@ def process_message(conn, msg: ClaimedMessage, max_reads: int = MAX_READS) -> st
         stats = run_scan(job.type_, job.config, tenant_id=job.tenant_id,
                          connection_name=job.connection_name, scan_id=job.scan_id)
     except (Exception, SystemExit) as e:
-        if is_poison(msg.read_ct, max_reads):
-            log.error("msg %s scan %s: failed %d time(s), archiving as poison: %s",
-                      msg.msg_id, job.scan_id, msg.read_ct, e)
+        # Two ways to be terminal: the retry ladder is exhausted, or the failure is one that
+        # retrying cannot fix (scan.permanent_failure_reason — a rejected credential is
+        # rejected every time). Fast-tracking the second kind is the difference between an
+        # operator hearing "credentials rejected" now and hearing it after the full
+        # MAX_READS × visibility-timeout ladder has run its ~40 minutes of silence.
+        permanent = permanent_failure_reason(e)
+        if permanent or is_poison(msg.read_ct, max_reads):
+            if permanent:
+                log.error("msg %s scan %s: %s — not retryable, archiving after %d attempt(s): %s",
+                          msg.msg_id, job.scan_id, permanent, msg.read_ct, e)
+            else:
+                log.error("msg %s scan %s: failed %d time(s), archiving as poison: %s",
+                          msg.msg_id, job.scan_id, msg.read_ct, e)
             _safe_archive(conn, msg.msg_id)
             _notify_scan_failed(conn, job)   # terminal failure → scan-failed routing rules
-            return "poison"
+            return "permanent" if permanent else "poison"
         log.warning("msg %s scan %s: failed (attempt %d/%d), leaving for redelivery: %s",
                     msg.msg_id, job.scan_id, msg.read_ct, max_reads, e)
         return "retry"

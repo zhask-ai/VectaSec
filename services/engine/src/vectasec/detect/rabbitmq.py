@@ -1256,5 +1256,11 @@ def scan_not_assessable(resource, ctx) -> list:
         ),
         detail=("Not a defect in the broker: this finding records the scan's own coverage so a "
                 "clean report is not mistaken for a clean broker."),
+        # The rule whose entire job is to stop a coverage gap reading as a pass was itself
+        # filed as `assessed`, so scan.py stored assessment='assessed' and every consumer that
+        # counts coverage gaps — the CLI's not-assessable tally, compliance's 'unknown' mapping —
+        # skipped it. It was visible in the findings list and scored as a passed info finding.
+        assessable=False,
+        assessment_reason="parts of the management surface were not readable by this credential",
         source_ref={"api": "/api/overview"},
     )]

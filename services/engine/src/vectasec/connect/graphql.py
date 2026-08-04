@@ -171,16 +171,23 @@ def _probe_batching(client, url, headers):
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
         return out
+    # A request the server REFUSED teaches us nothing about batching. Reporting `enabled=False`
+    # for it — as this did for any non-JSON body — turns a WAF block page or a 403 into the
+    # secure answer, and the detector's own not-assessable branch (which reads `enabled is None`)
+    # could never be reached. Only a 2xx that came back parseable is evidence either way.
+    if r.status_code >= 400:
+        out["error"] = f"HTTP {r.status_code}"
+        return out
     try:
         doc = r.json()
     except ValueError:
-        out["enabled"] = False
+        out["error"] = f"HTTP {r.status_code} body was not JSON"
         return out
     if isinstance(doc, list):
         out["enabled"] = len(doc) == 2
         out["count_echoed"] = len(doc)
     else:
-        out["enabled"] = False
+        out["enabled"] = False        # answered, and did not honour the array — a real negative
     return out
 
 

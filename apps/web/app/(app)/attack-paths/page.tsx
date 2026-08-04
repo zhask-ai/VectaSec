@@ -290,11 +290,15 @@ function buildPath(f: FindingRow, obs: ObservationRow[], resById: Map<string, Re
 export default async function AttackPathsPage() {
   const supabase = await createClient();
 
+  // `.eq('status','open')` on all three: without it the "Attack paths" and "Critical — full
+  // triad" tiles counted resolved and suppressed rows and rendered them tone="bad", so
+  // suppressing a path left the alarming number unchanged. The per-card StatusPill was the
+  // only honest signal on the page.
   const [countRes, triadRes, resourceCountRes, findingsRes] = await Promise.all([
-    supabase.from('findings').select('*', { count: 'exact', head: true }).like('rule_id', 'ATTACKPATH.%'),
-    supabase.from('findings').select('*', { count: 'exact', head: true }).eq('rule_id', 'ATTACKPATH.EXPOSED_NHI_SENSITIVE'),
+    supabase.from('findings').select('*', { count: 'exact', head: true }).like('rule_id', 'ATTACKPATH.%').eq('status', 'open'),
+    supabase.from('findings').select('*', { count: 'exact', head: true }).eq('rule_id', 'ATTACKPATH.EXPOSED_NHI_SENSITIVE').eq('status', 'open'),
     supabase.from('resources').select('*', { count: 'exact', head: true }),
-    supabase.from('findings').select('*').like('rule_id', 'ATTACKPATH.%').limit(ROW_CAP),
+    supabase.from('findings').select('*').like('rule_id', 'ATTACKPATH.%').eq('status', 'open').limit(ROW_CAP),
   ]);
 
   if (findingsRes.error) {

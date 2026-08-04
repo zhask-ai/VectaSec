@@ -20,6 +20,11 @@ Three disciplines carried over from connect/aws.py:
     denied Microsoft.ApiManagement/read records {"outcome": "access_denied"} on the
     azure_subscription resource instead of voiding the whole scan. detect/azure.py turns those
     records into not-assessable coverage-gap findings — never a pass, never a failure.
+    Isolation alone is not enough: a CHILD read that fails inside a service that otherwise
+    succeeded is recorded too — as a *_readable flag on the parent resource, or as a
+    child_gaps entry in the service's outcome record when the child leaves no resource behind.
+    Collapsing one to []/None makes "denied" indistinguishable from "none exists", which is
+    the secure state.
   • The parse layer (parse_sb_namespace, parse_event_hub, …) is pure: ARM response dicts in,
     Resources out. Tests exercise detectors against parse-layer output from golden fixtures,
     so httpx (and a live tenant) stays out of the test suite and a shape drift between
@@ -55,6 +60,21 @@ def _outcome_for(exc) -> dict:
     if isinstance(exc, _Denied):
         return {"outcome": "access_denied", "error": str(exc)}
     return {"outcome": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _error_text(exc) -> str:
+    return str(exc) if isinstance(exc, _Denied) else f"{type(exc).__name__}: {exc}"
+
+
+def _gap(parent, child: str, exc) -> dict:
+    """A CHILD read that failed inside a service whose own list call succeeded.
+
+    Per-service isolation alone is not enough: swallowing a child failure to []/None leaves
+    outcomes[service] reading {"outcome": "ok"}, so AZURE.SUBSCRIPTION.SERVICE_NOT_ASSESSED
+    reports full coverage over resources that were never collected. These records are what
+    that rule names. Only failures NOT already visible on a collected resource are recorded
+    here — a gap some per-resource rule already files must stay filed exactly once."""
+    return {"parent": str(parent), "child": child, "error": _error_text(exc)}
 
 
 def _ext(arm_id, fallback: str) -> str:
@@ -130,8 +150,15 @@ def _namespace_raw(ns: dict, auth_rules, service: str) -> dict:
     }
 
 
-def parse_sb_namespace(ns: dict, auth_rules) -> Resource:
+def parse_sb_namespace(ns: dict, auth_rules, queues_readable: bool = True,
+                       topics_readable: bool = True) -> Resource:
+    """One Service Bus namespace. `queues_readable` / `topics_readable` False mean that child
+    listing failed: NO azure_sb_queue / azure_sb_topic resource exists for this namespace, so
+    every entity rule is silent for want of a subject and the namespace would otherwise read
+    as an empty — that is, clean — one."""
     raw = _namespace_raw(ns, auth_rules, "servicebus")
+    raw["queues_readable"] = queues_readable
+    raw["topics_readable"] = topics_readable
     raw["endpoint"] = (ns.get("properties") or {}).get("serviceBusEndpoint")
     return Resource(
         kind="azure_servicebus_namespace", name=str(ns.get("name")),
@@ -177,8 +204,12 @@ def parse_sb_topic(ns_ext: str, t: dict) -> Resource:
     )
 
 
-def parse_eh_namespace(ns: dict, auth_rules) -> Resource:
+def parse_eh_namespace(ns: dict, auth_rules, event_hubs_readable: bool = True) -> Resource:
+    """One Event Hubs namespace. `event_hubs_readable` False means the hub listing failed: no
+    azure_event_hub resource exists under this namespace, so the capture rules have nothing to
+    run on and the namespace would otherwise read as an empty — that is, clean — one."""
     raw = _namespace_raw(ns, auth_rules, "eventhub")
+    raw["event_hubs_readable"] = event_hubs_readable
     p = ns.get("properties") or {}
     raw["kafka_enabled"] = bool(p.get("kafkaEnabled"))
     return Resource(
@@ -236,10 +267,12 @@ def parse_capture_storage(sa) -> dict:
     }
 
 
-def parse_apim(svc: dict, named_values, subscriptions) -> Resource:
+def parse_apim(svc: dict, named_values, subscriptions, apis_readable: bool = True) -> Resource:
     """One API Management service. `named_values` and `subscriptions` are metadata-only lists
     (None = unreadable): named-value VALUES and subscription KEYS are never fetched — reading
-    them requires /listValue and /listSecrets POSTs this connector never issues."""
+    them requires /listValue and /listSecrets POSTs this connector never issues.
+    `apis_readable` False means the API listing failed: no azure_api resource exists under
+    this gateway, so the per-API auth rules have nothing to run on."""
     p = svc.get("properties") or {}
     nv = None if named_values is None else [
         {"name": v.get("name"),
@@ -267,6 +300,7 @@ def parse_apim(svc: dict, named_values, subscriptions) -> Resource:
             "gateway_url": p.get("gatewayUrl"),
             "public_ip_addresses": p.get("publicIPAddresses") or [],
             "custom_properties": p.get("customProperties") or {},
+            "apis_readable": apis_readable,
             "named_values_readable": nv is not None,
             "named_values": nv or [],
             "subscriptions_readable": subs is not None,
@@ -330,49 +364,64 @@ def parse_logic_app(wf: dict) -> Resource:
 
 # ── collection: httpx in, per-service isolation ───────────────────────────────
 def _collect_servicebus(client, headers, sub: str) -> tuple:
-    resources, edges = [], []
+    resources, edges, gaps = [], [], []
     base = f"/subscriptions/{sub}/providers/Microsoft.ServiceBus/namespaces"
     for ns in _arm_list(client, headers, base, _SB_API):
         nsid = ns.get("id")
         try:
             rules = _arm_list(client, headers, f"{nsid}/authorizationRules", _SB_API)
         except Exception:
-            rules = None   # rule listing denied for THIS namespace — recorded, not raised
-        ns_res = parse_sb_namespace(ns, rules)
+            # rule listing denied for THIS namespace — recorded, not raised. No gap record:
+            # authorization_rules_readable rides on the namespace and AZURE.*.MANAGE_SAS_RULE
+            # files it there.
+            rules = None
+        # Children are listed BEFORE the namespace is parsed so their readability is part of
+        # the namespace resource rather than a fact lost in a `continue`.
+        children, readable = {}, {}
+        for sub_path in ("queues", "topics"):
+            try:
+                children[sub_path] = _arm_list(client, headers, f"{nsid}/{sub_path}", _SB_API)
+                readable[sub_path] = True
+            except Exception as e:
+                children[sub_path], readable[sub_path] = [], False
+                gaps.append(_gap(ns.get("name"), sub_path, e))
+        ns_res = parse_sb_namespace(ns, rules, queues_readable=readable["queues"],
+                                    topics_readable=readable["topics"])
         resources.append(ns_res)
         for sub_path, parse in (("queues", parse_sb_queue), ("topics", parse_sb_topic)):
-            try:
-                items = _arm_list(client, headers, f"{nsid}/{sub_path}", _SB_API)
-            except Exception:
-                continue   # children denied leaves the namespace itself intact
-            for item in items:
+            for item in children[sub_path]:
                 child = parse(ns_res.ext_id, item)
                 resources.append(child)
                 edges.append(Edge(src_ext_id=ns_res.ext_id, dst_ext_id=child.ext_id,
                                   kind="contains"))
-    return resources, edges
+    return resources, edges, gaps
 
 
 def _collect_eventhub(client, headers, sub: str) -> tuple:
-    resources, edges = [], []
+    resources, edges, gaps = [], [], []
     base = f"/subscriptions/{sub}/providers/Microsoft.EventHub/namespaces"
     for ns in _arm_list(client, headers, base, _EH_API):
         nsid = ns.get("id")
         try:
             rules = _arm_list(client, headers, f"{nsid}/authorizationRules", _EH_API)
         except Exception:
-            rules = None
-        ns_res = parse_eh_namespace(ns, rules)
-        resources.append(ns_res)
+            rules = None   # filed by AZURE.EVENTHUB.MANAGE_SAS_RULE
         try:
             hubs = _arm_list(client, headers, f"{nsid}/eventhubs", _EH_API)
-        except Exception:
-            hubs = []
+            hubs_readable = True
+        except Exception as e:
+            hubs, hubs_readable = [], False
+            gaps.append(_gap(ns.get("name"), "eventhubs", e))
+        ns_res = parse_eh_namespace(ns, rules, event_hubs_readable=hubs_readable)
+        resources.append(ns_res)
         for hub in hubs:
             try:
                 groups = _arm_list(client, headers, f"{hub.get('id')}/consumergroups", _EH_API)
-            except Exception:
+            except Exception as e:
+                # consumer_groups_readable lands on the hub, but no rule reads it — without a
+                # gap record the hub's consumer surface reads as "no consumer groups".
                 groups = None
+                gaps.append(_gap(hub.get("name"), "consumergroups", e))
             capture_storage = None
             sa_id = (((hub.get("properties") or {}).get("captureDescription") or {})
                      .get("destination") or {}).get("properties", {}).get("storageAccountResourceId")
@@ -386,34 +435,40 @@ def _collect_eventhub(client, headers, sub: str) -> tuple:
             resources.append(hub_res)
             edges.append(Edge(src_ext_id=ns_res.ext_id, dst_ext_id=hub_res.ext_id,
                               kind="contains"))
-    return resources, edges
+    return resources, edges, gaps
 
 
 def _collect_apim(client, headers, sub: str) -> tuple:
-    resources, edges = [], []
+    resources, edges, gaps = [], [], []
     base = f"/subscriptions/{sub}/providers/Microsoft.ApiManagement/service"
     for svc in _arm_list(client, headers, base, _APIM_API):
         sid = svc.get("id")
         try:
             named_values = _arm_list(client, headers, f"{sid}/namedValues", _APIM_API)
-        except Exception:
+        except Exception as e:
+            # named_values_readable lands on the service, but no rule reads it — without a gap
+            # record an unreadable list reads as "this gateway holds no named values".
             named_values = None
+            gaps.append(_gap(svc.get("name"), "namedValues", e))
         try:
             subscriptions = _arm_list(client, headers, f"{sid}/subscriptions", _APIM_API)
-        except Exception:
+        except Exception as e:
             subscriptions = None
-        svc_res = parse_apim(svc, named_values, subscriptions)
-        resources.append(svc_res)
+            gaps.append(_gap(svc.get("name"), "subscriptions", e))
         try:
             apis = _arm_list(client, headers, f"{sid}/apis", _APIM_API)
-        except Exception:
-            apis = []
+            apis_readable = True
+        except Exception as e:
+            apis, apis_readable = [], False
+            gaps.append(_gap(svc.get("name"), "apis", e))
+        svc_res = parse_apim(svc, named_values, subscriptions, apis_readable=apis_readable)
+        resources.append(svc_res)
         for api in apis:
             api_res = parse_apim_api(svc_res.ext_id, api)
             resources.append(api_res)
             edges.append(Edge(src_ext_id=svc_res.ext_id, dst_ext_id=api_res.ext_id,
                               kind="exposes"))
-    return resources, edges
+    return resources, edges, gaps
 
 
 def _collect_logic(client, headers, sub: str) -> tuple:
@@ -425,7 +480,9 @@ def _collect_logic(client, headers, sub: str) -> tuple:
         except Exception:
             full = wf   # definition unreadable — parse records triggers_readable=False
         resources.append(parse_logic_app(full))
-    return resources, []
+    # No gap records: triggers_readable=False rides on the workflow and
+    # AZURE.LOGICAPP.HTTP_TRIGGER_OPEN files it there.
+    return resources, [], []
 
 
 _SERVICES = (
@@ -468,10 +525,15 @@ def collect(config: dict) -> Collected:
         # Per-service isolation: a denied provider records honestly and the scan goes on.
         for service, fn in _SERVICES:
             try:
-                rs, es = fn(client, headers, sub)
+                rs, es, gaps = fn(client, headers, sub)
                 resources.extend(rs)
                 edges.extend(es)
                 outcomes[service] = {"outcome": "ok", "error": None, "resources": len(rs)}
+                if gaps:
+                    # The provider listed, but not everything under it did. Without this the
+                    # record reads {"outcome": "ok"} and the coverage rule claims a service
+                    # was fully assessed over children that were never collected.
+                    outcomes[service]["child_gaps"] = gaps
             except Exception as e:
                 outcomes[service] = _outcome_for(e)
 

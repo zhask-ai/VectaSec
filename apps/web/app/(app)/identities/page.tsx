@@ -46,7 +46,14 @@ type ResourceRow = {
   connections?: { type: string; name: string } | null;
 };
 
-type FindingRow = { rule_id: string; severity: Severity; status: string; resource_id: string | null };
+type FindingRow = {
+  rule_id: string; severity: Severity; status: string;
+  // `not_assessable` is a value of `assessment`, NOT of `status` — filtering `status` for it
+  // matched nothing, so the "Not assessable" panel below could never render and four live
+  // coverage gaps were shown as real medium-severity findings instead.
+  assessment: string | null;
+  resource_id: string | null;
+};
 
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
@@ -166,12 +173,30 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
   // full CREDENTIAL.LIFECYCLE.* set (any status) so the lens can honour not_assessable.
   const nhiIds = [...identities, ...creds, ...grants].map((r) => r.id);
   const [openRes, lifecycleRes] = await Promise.all([
-    supabase.from('findings').select('rule_id, severity, status, resource_id').eq('status', 'open').in('resource_id', nhiIds).limit(ROW_CAP),
-    supabase.from('findings').select('rule_id, severity, status, resource_id').like('rule_id', 'CREDENTIAL.LIFECYCLE.%').limit(ROW_CAP),
+    supabase.from('findings').select('rule_id, severity, status, assessment, resource_id').eq('status', 'open').in('resource_id', nhiIds).limit(ROW_CAP),
+    supabase.from('findings').select('rule_id, severity, status, assessment, resource_id').like('rule_id', 'CREDENTIAL.LIFECYCLE.%').limit(ROW_CAP),
   ]);
 
   const nameById = new Map<string, string>();
   for (const r of [...identities, ...creds, ...grants]) nameById.set(r.id, r.name);
+
+  // Without this, a failed findings read prints the literal word "clean" in the Risk column for
+  // every identity in the estate. It is not hypothetical: the query sends `.in('resource_id', …)`
+  // with up to 3×ROW_CAP uuids — a ~110KB URL that PostgREST and proxies answer with 414 — and
+  // the page's response to being unable to see any findings was to declare there were none.
+  if (openRes.error || lifecycleRes.error) {
+    const e = openRes.error ?? lifecycleRes.error!;
+    return (
+      <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+        <Card>
+          <CardBody>
+            <EmptyState tone="error" title="Could not load identity risk"
+              description={`${e.message} — no identity can be shown as clean while its findings are unreadable.`} />
+          </CardBody>
+        </Card>
+      </div>
+    );
+  }
 
   const openByResource = new Map<string, FindingRow[]>();
   for (const f of (openRes.data ?? []) as unknown as FindingRow[]) {
@@ -259,8 +284,10 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
 
   // Lifecycle lens: split real findings (open) from not-assessable (a coverage gap, not a result).
   const lifecycle = (lifecycleRes.data ?? []) as unknown as FindingRow[];
-  const lifeOpen = aggregate(lifecycle.filter((f) => f.status === 'open'), nameById);
-  const lifeNA = aggregate(lifecycle.filter((f) => f.status === 'not_assessable'), nameById);
+  const lifeOpen = aggregate(
+    lifecycle.filter((f) => f.status === 'open' && f.assessment !== 'not_assessable'), nameById);
+  const lifeNA = aggregate(
+    lifecycle.filter((f) => f.assessment === 'not_assessable'), nameById);
 
   return (
     <Page>

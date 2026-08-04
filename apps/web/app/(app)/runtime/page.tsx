@@ -26,6 +26,27 @@ export const metadata = { title: 'Runtime · VectaSec' };
 const MIN_WINDOW_DAYS = 14;
 const MIN_SCANS = 20;
 
+// Mirrors runtime_evidence.RUNTIME_SOURCES — which connector types can see live clients AT
+// ALL, and what they read. This is a capability, not an observation, and the distinction is
+// the point: a Kong connection has no live-client API in the product, while a Kafka connection
+// with no consumer groups genuinely observed nothing. Rendering one empty panel for both tells
+// an operator something false about their coverage. Absent from this map = no runtime source.
+//
+// `attributes` mirrors the engine's gate on RUNTIME.GRANT.NEVER_OBSERVED: only a source that
+// names an AUTHENTICATED principal can support "this identity was never used". Kafka's
+// client.id is self-asserted, so no identity is ever reported unused from it — and this page
+// has to say so, or the Identities view looks unexplainably quiet for a Kafka estate.
+const RUNTIME_SOURCES: Record<string, { reads: string; attributes: boolean }> = {
+  rabbitmq: { reads: 'GET /api/connections — principal, vhost, peer, SASL mechanism, TLS', attributes: true },
+  redis: { reads: 'CLIENT LIST + ACL LOG — connected clients and their denials', attributes: true },
+  nats: { reads: 'GET /connz?auth=1 — live connections with their authenticated account', attributes: true },
+  pgbouncer: { reads: 'SHOW CLIENTS — pooled sessions and the user each authenticated as', attributes: true },
+  kafka: {
+    reads: 'DescribeConsumerGroups — consumer members only; producers are invisible, per-client transport is not reported, and the client.id is self-asserted rather than an authenticated identity',
+    attributes: false,
+  },
+};
+
 type ClientRow = {
   id: string;
   name: string;
@@ -83,8 +104,7 @@ export default async function RuntimePage() {
       .limit(200),
     supabase
       .from('connections')
-      .select('id, runtime_observation_started_at')
-      .not('runtime_observation_started_at', 'is', null),
+      .select('id, name, type, runtime_observation_started_at'),
     supabase.from('scans').select('id', { count: 'exact', head: true }).eq('status', 'done'),
   ]);
 
@@ -92,7 +112,7 @@ export default async function RuntimePage() {
   const denials = (denialsRes.data ?? []) as DenialRow[];
   const evidence = (evidenceRes.data ?? []) as EvidenceRow[];
   const connections = (connectionsRes.data ?? []) as {
-    id: string; runtime_observation_started_at: string | null;
+    id: string; name: string; type: string; runtime_observation_started_at: string | null;
   }[];
   const completedScans = scansRes.count ?? 0;
 
@@ -142,8 +162,8 @@ export default async function RuntimePage() {
             <EmptyState
               tone="setup"
               title="No runtime evidence yet"
-              description="Runtime evidence comes from the systems themselves — RabbitMQ's connections API, Redis' CLIENT LIST, NATS' /connz and PgBouncer's SHOW CLIENTS each name who is connected right now. No sensor or agent is required; scan any of those connections and this fills in."
-              meta="runtime sources: rabbitmq · redis · nats · pgbouncer"
+              description="Runtime evidence comes from the systems themselves — RabbitMQ's connections API, Redis' CLIENT LIST, NATS' /connz, PgBouncer's SHOW CLIENTS and Kafka's consumer-group members each name who is connected right now. No sensor or agent is required; scan any of those connections and this fills in."
+              meta={`runtime sources: ${Object.keys(RUNTIME_SOURCES).join(' · ')}`}
             />
           </CardBody>
         </Card>
@@ -190,6 +210,94 @@ export default async function RuntimePage() {
               ? `Identities never seen across ${completedScans} scans over ${windowDays.toFixed(0)} days are reported as unused in the findings queue. This is sampled evidence, not metering — a job that runs less often than the window could still be legitimate.`
               : `Absence of evidence is not evidence of absence. No identity is reported as unused until this reaches ${MIN_WINDOW_DAYS} days across ${MIN_SCANS} completed scans (currently ${windowDays.toFixed(1)} days, ${completedScans} scans) — an unseen principal may simply run on a schedule longer than we have been watching.`}
           </p>
+        </CardBody>
+      </Card>
+
+      {/* Which of THIS tenant's connections can produce runtime evidence at all. Without it,
+          a Kong estate reads the panels above as "nothing is talking to our systems" when the
+          truth is "we cannot see what is talking to them" — opposite conclusions. */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Runtime coverage</CardTitle>
+          <CardMeta>
+            which connected systems can report live clients — and which cannot be asked
+          </CardMeta>
+        </CardHeader>
+        <CardBody pad={connections.length === 0}>
+          {connections.length === 0 ? (
+            <EmptyState
+              tone="setup"
+              title="No systems connected"
+              description="Runtime evidence is read from connected systems. Connect one whose connector has a live-client source."
+            />
+          ) : (
+            <>
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', padding: '0 0 12px' }}>
+                <StatusPill
+                  tone="ok"
+                  label={`${connections.filter((c) => RUNTIME_SOURCES[c.type]).length} of ${connections.length} can be observed`}
+                />
+                {connections.some((c) => !RUNTIME_SOURCES[c.type]) && (
+                  <StatusPill
+                    tone="neutral"
+                    label={`${connections.filter((c) => !RUNTIME_SOURCES[c.type]).length} have no runtime source`}
+                  />
+                )}
+              </div>
+              <Table density="compact" caption="Runtime evidence availability per connection">
+                <THead>
+                  <TR>
+                    <TH width="20%">Connection</TH>
+                    <TH width="12%">Type</TH>
+                    <TH width="18%">Status</TH>
+                    <TH width="50%">What is read</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {[...connections]
+                    .sort((a, b) =>
+                      Number(Boolean(RUNTIME_SOURCES[b.type])) - Number(Boolean(RUNTIME_SOURCES[a.type])) ||
+                      a.name.localeCompare(b.name),
+                    )
+                    .map((c) => {
+                      const source = RUNTIME_SOURCES[c.type];
+                      const observing = Boolean(c.runtime_observation_started_at);
+                      return (
+                        <TR key={c.id}>
+                          <TD>{c.name}</TD>
+                          <TD mono>{c.type}</TD>
+                          <TD>
+                            <div style={{ display: 'grid', gap: 4, justifyItems: 'start' }}>
+                              {!source ? (
+                                <StatusPill tone="neutral" label="no runtime source" />
+                              ) : observing ? (
+                                <StatusPill tone="ok" label="observing" />
+                              ) : (
+                                <StatusPill tone="warn" label="capable · nothing seen yet" />
+                              )}
+                              {source && !source.attributes && (
+                                <StatusPill tone="neutral" label="cannot attribute identities" />
+                              )}
+                            </div>
+                          </TD>
+                          <TD muted>
+                            {source?.reads ?? 'This system exposes no live-client API that VectaSec can read. Nothing here is evidence about its usage.'}
+                          </TD>
+                        </TR>
+                      );
+                    })}
+                </TBody>
+              </Table>
+              <p style={{ margin: '10px 0 0', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+                &ldquo;No runtime source&rdquo; and &ldquo;nothing seen yet&rdquo; are different
+                answers. The first is a permanent property of that system&rsquo;s API and no
+                amount of scanning changes it; the second closes as the window fills. Where a
+                source reports sessions it cannot attribute to an authenticated principal —
+                Kafka&rsquo;s consumer groups carry a self-asserted <code>client.id</code>, not
+                an identity — no identity is ever reported unused from it.
+              </p>
+            </>
+          )}
         </CardBody>
       </Card>
 

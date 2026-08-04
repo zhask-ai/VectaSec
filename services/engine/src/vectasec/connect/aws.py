@@ -15,7 +15,11 @@ Three disciplines carried over from the other connectors:
   • Per-service error isolation. Each (service, region) collection runs in its own try/except:
     a role denied kafka:ListClusters records {"outcome": "access_denied"} on the aws_account
     resource instead of voiding the whole scan. detect/aws.py turns those records into
-    not-assessable coverage-gap findings — never a pass, never a failure.
+    not-assessable coverage-gap findings — never a pass, never a failure. Isolation alone is
+    not enough: a CHILD read that fails inside a service that otherwise succeeded must also be
+    recorded — as a *_readable flag on the parent resource, or as a child_gaps entry in the
+    service's outcome record when the child leaves no resource behind. Swallowing one to
+    []/None makes "denied" indistinguishable from "none exists", which is the secure state.
   • Resource policies are OBSERVATIONS, not secrets. A queue/topic/bus policy is authorization
     config, exactly the evidence a posture finding must cite, so the parsed JSON is stored in
     Resource.raw and quoted by detectors.
@@ -133,7 +137,10 @@ def parse_queue(region: str, queue_url: str, attrs) -> Resource:
     )
 
 
-def parse_topic(region: str, topic_arn: str, attrs) -> Resource:
+def parse_topic(region: str, topic_arn: str, attrs, subscriptions_readable: bool = True) -> Resource:
+    """One SNS topic. `subscriptions_readable` False means ListSubscriptionsByTopic failed for
+    THIS topic: the subscription resources are missing, so a topic with no delivery endpoints
+    and a topic whose endpoints were denied would otherwise look identical."""
     a = attrs or {}
     return Resource(
         kind="aws_sns_topic",
@@ -146,6 +153,7 @@ def parse_topic(region: str, topic_arn: str, attrs) -> Resource:
             "region": region,
             "account": arn_account(topic_arn),
             "attributes_readable": attrs is not None,
+            "subscriptions_readable": subscriptions_readable,
             "policy": _parse_json(a.get("Policy")),
             "kms_master_key_id": a.get("KmsMasterKeyId"),
             "subscriptions_confirmed": a.get("SubscriptionsConfirmed"),
@@ -180,9 +188,14 @@ def parse_subscription(region: str, sub: dict) -> Resource:
     )
 
 
-def parse_bus(region: str, bus: dict, policy) -> Resource:
+def parse_bus(region: str, bus: dict, policy, policy_readable=True) -> Resource:
     """One event bus. `policy` comes from describe_event_bus (a JSON string) — passed
-    separately because list_event_buses omits it on older API versions."""
+    separately because list_event_buses omits it on older API versions.
+
+    `policy_readable` is three-valued: True read, False the read was refused, None never
+    attempted. A denied DescribeEventBus lands `policy=None`, which is byte-identical to "this
+    bus has no resource policy" — the SECURE state. Without this flag a bus nobody may inspect
+    renders as a clean bus, so the flag, not the None, is what detectors must branch on."""
     arn = bus.get("Arn") or f"event-bus-{region}-{bus.get('Name')}"
     return Resource(
         kind="aws_event_bus",
@@ -194,15 +207,20 @@ def parse_bus(region: str, bus: dict, policy) -> Resource:
             "bus_arn": bus.get("Arn"),
             "region": region,
             "account": arn_account(bus.get("Arn")),
+            "policy_readable": policy_readable,
             "policy": _parse_json(policy),
         },
     )
 
 
-def parse_rule(region: str, bus_ext: str, rule: dict, targets: list) -> tuple:
+def parse_rule(region: str, bus_ext: str, rule: dict, targets) -> tuple:
     """One EventBridge rule + its targets → (resources, edges): bus --routes_to--> rule,
     rule --targets--> each target. Target Input/InputTransformer payloads are deliberately
-    NOT stored — they can embed message bodies, which are data, not posture."""
+    NOT stored — they can embed message bodies, which are data, not posture.
+
+    `targets=None` means ListTargetsByRule failed for THIS rule (recorded, so the
+    cross-account rule answers not-assessable instead of reading an empty list as "this rule
+    forwards nowhere"); `[]` means the rule genuinely has no targets."""
     arn = rule.get("Arn") or f"event-rule-{region}-{rule.get('Name')}"
     kept_targets = [{"id": t.get("Id"), "arn": t.get("Arn"), "role_arn": t.get("RoleArn")}
                     for t in (targets or [])]
@@ -220,6 +238,7 @@ def parse_rule(region: str, bus_ext: str, rule: dict, targets: list) -> tuple:
             "schedule_expression": rule.get("ScheduleExpression"),
             "region": region,
             "account": arn_account(rule.get("Arn")),
+            "targets_readable": targets is not None,
             "targets": kept_targets,
         },
     )
@@ -309,13 +328,16 @@ def _stage_resource(region: str, api_ext: str, api_id: str, api_version: str, *,
     )
 
 
-def parse_api_v1(region: str, api: dict, stages: list, authorizers: list,
-                 resource_items: list) -> tuple:
+def parse_api_v1(region: str, api: dict, stages, authorizers, resource_items) -> tuple:
     """One REST API (API Gateway v1) → (resources, edges): the aws_api, one aws_api_stage per
     stage, api --exposes--> stage. Routes come from get_resources(embed=['methods']) —
     resourceMethods carries authorizationType/apiKeyRequired per method. A method whose
     detail dict is empty (embed not honoured) is recorded with authorization_type=None so
-    detectors answer 'unknown', not 'unauthenticated'."""
+    detectors answer 'unknown', not 'unauthenticated'.
+
+    Each child list is three-valued: None = that call failed, [] = the API genuinely has none.
+    An unread stage list emits NO aws_api_stage resources at all, so every stage rule would
+    have nothing to run on and the API would score clean — the flags are the only trace left."""
     api_id = api.get("id")
     ext = f"aws-api-{region}-{api_id}"
     routes = []
@@ -344,7 +366,10 @@ def parse_api_v1(region: str, api: dict, stages: list, authorizers: list,
             "region": region,
             "endpoint_types": (api.get("endpointConfiguration") or {}).get("types"),
             "api_key_source": api.get("apiKeySource"),
+            "routes_readable": resource_items is not None,
             "routes": routes,
+            "stages_readable": stages is not None,
+            "authorizers_readable": authorizers is not None,
             "authorizers": [{"id": a.get("id"), "name": a.get("name"), "type": a.get("type")}
                             for a in (authorizers or [])],
         },
@@ -366,10 +391,10 @@ def parse_api_v1(region: str, api: dict, stages: list, authorizers: list,
     return resources, edges
 
 
-def parse_api_v2(region: str, api: dict, stages: list, routes: list,
-                 authorizers: list) -> tuple:
+def parse_api_v2(region: str, api: dict, stages, routes, authorizers) -> tuple:
     """One HTTP/WebSocket API (API Gateway v2) → same shape as parse_api_v1. RouteKey
-    'GET /pets' splits into method+path; '$default' is the catch-all route."""
+    'GET /pets' splits into method+path; '$default' is the catch-all route. Child lists are
+    three-valued exactly as in parse_api_v1: None = the call failed, [] = there are none."""
     api_id = api.get("ApiId")
     ext = f"aws-api-{region}-{api_id}"
     protocol = api.get("ProtocolType") or "HTTP"
@@ -398,7 +423,10 @@ def parse_api_v2(region: str, api: dict, stages: list, routes: list,
             "protocol": protocol,
             "region": region,
             "endpoint": api.get("ApiEndpoint"),
+            "routes_readable": routes is not None,
             "routes": norm_routes,
+            "stages_readable": stages is not None,
+            "authorizers_readable": authorizers is not None,
             "authorizers": [{"id": a.get("AuthorizerId"), "name": a.get("Name"),
                              "type": a.get("AuthorizerType")} for a in (authorizers or [])],
         },
@@ -424,15 +452,31 @@ _DENIED_CODES = {"AccessDenied", "AccessDeniedException", "UnauthorizedOperation
                  "AuthorizationError", "NotAuthorized", "UnauthorizedException"}
 
 
-def _outcome_for(exc) -> dict:
-    """A ClientError → the honest per-service record. AccessDenied is a distinct outcome
-    because detect/aws.py must surface it as a coverage gap, not an operational error."""
+def _error_text(exc) -> str:
+    """The ClientError's AWS error code, or the exception itself when it carries none."""
     code = ""
     resp = getattr(exc, "response", None)
     if isinstance(resp, dict):
         code = (resp.get("Error") or {}).get("Code") or ""
-    outcome = "access_denied" if code in _DENIED_CODES else "error"
-    return {"outcome": outcome, "error": code or f"{type(exc).__name__}: {exc}"}
+    return code or f"{type(exc).__name__}: {exc}"
+
+
+def _outcome_for(exc) -> dict:
+    """A ClientError → the honest per-service record. AccessDenied is a distinct outcome
+    because detect/aws.py must surface it as a coverage gap, not an operational error."""
+    text = _error_text(exc)
+    return {"outcome": "access_denied" if text in _DENIED_CODES else "error", "error": text}
+
+
+def _gap(parent, child: str, exc) -> dict:
+    """A CHILD read that failed inside a (service, region) whose own List* succeeded.
+
+    Per-service isolation alone is not enough: swallowing a child failure to []/None leaves
+    outcomes[service] reading {"outcome": "ok"}, so AWS.ACCOUNT.SERVICE_NOT_ASSESSED reports
+    full coverage over resources that were never collected. These records are what that rule
+    names. Only failures NOT already visible on a collected resource are recorded here —
+    a gap that some per-resource rule already files must stay filed exactly once."""
+    return {"parent": str(parent), "child": child, "error": _error_text(exc)}
 
 
 def _collect_sqs(session, region: str) -> tuple:
@@ -445,12 +489,14 @@ def _collect_sqs(session, region: str) -> tuple:
             except Exception:
                 attrs = None   # attributes denied for THIS queue — recorded, not raised
             resources.append(parse_queue(region, url, attrs))
-    return resources, []
+    # No gap records: attributes_readable=False rides on the queue itself and the SQS rules
+    # file it per resource.
+    return resources, [], []
 
 
 def _collect_sns(session, region: str) -> tuple:
     sns = session.client("sns", region_name=region)
-    resources, edges = [], []
+    resources, edges, gaps = [], [], []
     for page in sns.get_paginator("list_topics").paginate():
         for t in page.get("Topics") or []:
             arn = t.get("TopicArn")
@@ -460,23 +506,29 @@ def _collect_sns(session, region: str) -> tuple:
                 attrs = sns.get_topic_attributes(TopicArn=arn)["Attributes"]
             except Exception:
                 attrs = None
-            topic = parse_topic(region, arn, attrs)
-            resources.append(topic)
+            # Subscriptions are listed BEFORE the topic is parsed so their readability is part
+            # of the topic resource rather than a fact lost in an except branch. A partial page
+            # is kept: what was read is real, and the flag still says the list is incomplete.
+            subs, subs_readable = [], True
             try:
                 for spage in sns.get_paginator("list_subscriptions_by_topic").paginate(TopicArn=arn):
-                    for s in spage.get("Subscriptions") or []:
-                        sub = parse_subscription(region, s)
-                        resources.append(sub)
-                        edges.append(Edge(src_ext_id=topic.ext_id, dst_ext_id=sub.ext_id,
-                                          kind="delivers_to"))
-            except Exception:
-                pass   # subscriptions denied leaves the topic itself intact
-    return resources, edges
+                    subs.extend(spage.get("Subscriptions") or [])
+            except Exception as e:
+                subs_readable = False
+                gaps.append(_gap(arn, "subscriptions", e))
+            topic = parse_topic(region, arn, attrs, subscriptions_readable=subs_readable)
+            resources.append(topic)
+            for s in subs:
+                sub = parse_subscription(region, s)
+                resources.append(sub)
+                edges.append(Edge(src_ext_id=topic.ext_id, dst_ext_id=sub.ext_id,
+                                  kind="delivers_to"))
+    return resources, edges, gaps
 
 
 def _collect_events(session, region: str) -> tuple:
     events = session.client("events", region_name=region)
-    resources, edges = [], []
+    resources, edges, gaps = [], [], []
 
     buses, token = [], None
     while True:
@@ -490,12 +542,17 @@ def _collect_events(session, region: str) -> tuple:
     for bus in buses:
         name = bus.get("Name")
         policy = bus.get("Policy")
-        if policy is None and name:
+        if policy is not None:
+            policy_readable = True          # list_event_buses carried it
+        elif name:
             try:
                 policy = events.describe_event_bus(Name=name).get("Policy")
+                policy_readable = True      # authoritative: this bus really has no policy
             except Exception:
-                policy = None
-        bus_res = parse_bus(region, bus, policy)
+                policy_readable = False     # filed by AWS.EVENTBRIDGE.BUS_POLICY_PUBLIC
+        else:
+            policy_readable = None          # nameless bus: the read could not even be issued
+        bus_res = parse_bus(region, bus, policy, policy_readable=policy_readable)
         resources.append(bus_res)
 
         token = None
@@ -505,21 +562,24 @@ def _collect_events(session, region: str) -> tuple:
                 kwargs["NextToken"] = token
             try:
                 page = events.list_rules(**kwargs)
-            except Exception:
-                break   # rules denied on this bus — the bus itself is still recorded
+            except Exception as e:
+                # The bus survives, but its rules — and every routing target behind them —
+                # were never collected, and no rule resource exists to carry that fact.
+                gaps.append(_gap(f"bus {name}", "rules", e))
+                break
             for rule in page.get("Rules") or []:
                 try:
                     targets = events.list_targets_by_rule(
                         Rule=rule.get("Name"), EventBusName=name).get("Targets") or []
                 except Exception:
-                    targets = []
+                    targets = None   # filed by AWS.EVENTBRIDGE.CROSS_ACCOUNT_TARGET
                 rs, es = parse_rule(region, bus_res.ext_id, rule, targets)
                 resources.extend(rs)
                 edges.extend(es)
             token = page.get("NextToken")
             if not token:
                 break
-    return resources, edges
+    return resources, edges, gaps
 
 
 def _collect_msk(session, region: str) -> tuple:
@@ -528,39 +588,43 @@ def _collect_msk(session, region: str) -> tuple:
     for page in kafka.get_paginator("list_clusters_v2").paginate():
         for c in page.get("ClusterInfoList") or []:
             resources.append(parse_msk_cluster(region, c))
-    return resources, []
+    return resources, [], []
 
 
 def _collect_apigw_v1(session, region: str) -> tuple:
     apigw = session.client("apigateway", region_name=region)
-    resources, edges = [], []
+    resources, edges, gaps = [], [], []
     for page in apigw.get_paginator("get_rest_apis").paginate():
         for api in page.get("items") or []:
             api_id = api.get("id")
             try:
                 stages = apigw.get_stages(restApiId=api_id).get("item") or []
-            except Exception:
-                stages = []
+            except Exception as e:
+                # No aws_api_stage resource is emitted, so STAGE_LOGGING_DISABLED and
+                # STAGE_NO_WAF have nothing to run on and report nothing at all.
+                stages = None
+                gaps.append(_gap(f"api {api_id}", "stages", e))
             try:
                 authorizers = apigw.get_authorizers(restApiId=api_id).get("items") or []
-            except Exception:
-                authorizers = []
+            except Exception as e:
+                authorizers = None
+                gaps.append(_gap(f"api {api_id}", "authorizers", e))
             items = []
             try:
                 for rpage in apigw.get_paginator("get_resources").paginate(
                         restApiId=api_id, embed=["methods"]):
                     items.extend(rpage.get("items") or [])
             except Exception:
-                items = []
+                items = None   # filed by AWS.APIGW.ROUTE_NO_AUTHORIZER
             rs, es = parse_api_v1(region, api, stages, authorizers, items)
             resources.extend(rs)
             edges.extend(es)
-    return resources, edges
+    return resources, edges, gaps
 
 
 def _collect_apigw_v2(session, region: str) -> tuple:
     apigw = session.client("apigatewayv2", region_name=region)
-    resources, edges = [], []
+    resources, edges, gaps = [], [], []
 
     def _pages(fn, key, **kw):
         out, token = [], None
@@ -579,20 +643,22 @@ def _collect_apigw_v2(session, region: str) -> tuple:
         api_id = api.get("ApiId")
         try:
             stages = _pages(apigw.get_stages, "Items", ApiId=api_id)
-        except Exception:
-            stages = []
+        except Exception as e:
+            stages = None   # no aws_api_stage emitted — the stage rules never run
+            gaps.append(_gap(f"api {api_id}", "stages", e))
         try:
             routes = _pages(apigw.get_routes, "Items", ApiId=api_id)
         except Exception:
-            routes = []
+            routes = None   # filed by AWS.APIGW.ROUTE_NO_AUTHORIZER
         try:
             authorizers = _pages(apigw.get_authorizers, "Items", ApiId=api_id)
-        except Exception:
-            authorizers = []
+        except Exception as e:
+            authorizers = None
+            gaps.append(_gap(f"api {api_id}", "authorizers", e))
         rs, es = parse_api_v2(region, api, stages, routes, authorizers)
         resources.extend(rs)
         edges.extend(es)
-    return resources, edges
+    return resources, edges, gaps
 
 
 _SERVICES = (
@@ -684,10 +750,15 @@ def collect(config: dict) -> Collected:
         for service, fn in _SERVICES:
             key = f"{service}:{region}"
             try:
-                rs, es = fn(session, region)
+                rs, es, gaps = fn(session, region)
                 resources.extend(rs)
                 edges.extend(es)
                 outcomes[key] = {"outcome": "ok", "error": None, "resources": len(rs)}
+                if gaps:
+                    # The service listed, but not everything under it did. Without this the
+                    # record reads {"outcome": "ok"} and the coverage rule claims a service
+                    # was fully assessed over children that were never collected.
+                    outcomes[key]["child_gaps"] = gaps
             except Exception as e:
                 outcomes[key] = _outcome_for(e)
 

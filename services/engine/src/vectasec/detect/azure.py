@@ -358,31 +358,70 @@ def logic_workflow_disabled(r, ctx) -> list:
 
 
 # ══ Subscription: the coverage-gap surface ════════════════════════════════════
+_MAX_NAMED_GAPS = 8
+
+
+def _named_gaps(gaps: list) -> str:
+    """'queues of sb-open (http_403); apis of apim-legacy (http_403)' — capped so one denied
+    permission across a thousand resources cannot produce an unreadable observation."""
+    named = [f"{g.get('child')} of {g.get('parent')} ({g.get('error')})"
+             for g in gaps[:_MAX_NAMED_GAPS]]
+    rest = len(gaps) - len(named)
+    return "; ".join(named) + (f"; and {rest} more" if rest > 0 else "")
+
+
 @detector(kinds=["azure_subscription"], rule_id="AZURE.SUBSCRIPTION.SERVICE_NOT_ASSESSED",
           severity="info", title="An Azure service could not be assessed with the granted permissions")
 def subscription_service_not_assessed(r, ctx) -> list:
     """The third honest outcome at subscription scope: a provider whose list call answered
     401/403 is a COVERAGE GAP — the connector recorded it instead of failing the scan, and
     this rule surfaces it as not-assessable rather than letting the absence of resources
-    read as a clean pass."""
+    read as a clean pass.
+
+    The same is true one level down. A provider that listed fine can still have lost whole
+    child collections (a namespace's queues, a gateway's APIs), and those children leave NO
+    resource behind to carry the gap: every rule keyed to them simply has nothing to run on.
+    Those are the connector's child_gaps records, reported here too so a partially collected
+    service is never counted as fully assessed."""
     raw = r.raw or {}
     hits = []
     for service, rec in sorted((raw.get("collection") or {}).items()):
-        if (rec or {}).get("outcome") != "access_denied":
+        rec = rec or {}
+        if rec.get("outcome") == "access_denied":
+            hits.append(Hit(
+                observation=(f"listing {service} resources in subscription "
+                             f"{raw.get('subscription_id')} was denied for app "
+                             f"{raw.get('client_id')} ({rec.get('error')}), so no {service} "
+                             f"resource was assessed"),
+                remediation=("Assign the built-in Reader role on the subscription to the app "
+                             "registration (`az role assignment create --assignee "
+                             f"{raw.get('client_id')} --role Reader --scope /subscriptions/"
+                             f"{raw.get('subscription_id')}`). Until then this service's posture "
+                             "is unknown, not clean."),
+                detail=f"service={service} error={rec.get('error')}",
+                assessable=False,
+                assessment_reason=f"{service} list call returned {rec.get('error')}",
+                source_ref={"service": service},
+            ))
+            continue
+        gaps = rec.get("child_gaps") or []
+        if not gaps:
             continue
         hits.append(Hit(
-            observation=(f"listing {service} resources in subscription "
-                         f"{raw.get('subscription_id')} was denied for app "
-                         f"{raw.get('client_id')} ({rec.get('error')}), so no {service} "
-                         f"resource was assessed"),
-            remediation=("Assign the built-in Reader role on the subscription to the app "
-                         "registration (`az role assignment create --assignee "
-                         f"{raw.get('client_id')} --role Reader --scope /subscriptions/"
-                         f"{raw.get('subscription_id')}`). Until then this service's posture "
-                         "is unknown, not clean."),
-            detail=f"service={service} error={rec.get('error')}",
+            observation=(f"{service} resources in subscription {raw.get('subscription_id')} "
+                         f"listed successfully, but {len(gaps)} read(s) beneath them were "
+                         f"denied or failed for app {raw.get('client_id')}, so those "
+                         f"resources were never collected and every rule keyed to them had "
+                         f"nothing to run on: {_named_gaps(gaps)}"),
+            remediation=("Assign the built-in Reader role at subscription scope (`az role "
+                         f"assignment create --assignee {raw.get('client_id')} --role Reader "
+                         f"--scope /subscriptions/{raw.get('subscription_id')}`) — a role "
+                         "scoped to the parent resources only leaves these child reads "
+                         "denied. The parents were assessed; the children named here were "
+                         "not, so their posture is unknown, not clean."),
+            detail=f"service={service} child_gaps={len(gaps)}",
             assessable=False,
-            assessment_reason=f"{service} list call returned {rec.get('error')}",
-            source_ref={"service": service},
+            assessment_reason=f"{len(gaps)} child read(s) under {service} were denied or failed",
+            source_ref={"service": service, "child_gaps": gaps},
         ))
     return hits

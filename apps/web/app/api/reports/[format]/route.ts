@@ -23,6 +23,14 @@ const FORMATS: Record<string, { path: string; filename: string; type: string }> 
     filename: 'vectasec-sbom.cdx.json',
     type: 'application/vnd.cyclonedx+json; version=1.6',
   },
+  // VEX is a separate download, not a section of the SBOM: the inventory changes when the
+  // estate does, the assessments change whenever a human rules on a finding, and consumers
+  // ingest them on different cadences.
+  vex: {
+    path: '/reports/vex',
+    filename: 'vectasec-vex.cdx.json',
+    type: 'application/vnd.cyclonedx+json; version=1.6',
+  },
 };
 
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ format: string }> }) {

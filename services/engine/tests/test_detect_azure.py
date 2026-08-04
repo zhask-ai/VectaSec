@@ -13,10 +13,11 @@ import pathlib
 from vectasec.contracts import Resource, ScanContext
 from vectasec.identity import IDENTITY_EXTRACTORS
 from vectasec.registry import CONNECTOR_FIELDS, DETECTORS
+import vectasec.connect.azure as connect_azure
 import vectasec.detect.azure  # noqa: F401  — import registers the rulepack
 from vectasec.connect.azure import (
-    parse_apim, parse_apim_api, parse_capture_storage, parse_eh_namespace, parse_event_hub,
-    parse_logic_app, parse_sb_namespace, parse_sb_queue, parse_sb_topic,
+    _Denied, parse_apim, parse_apim_api, parse_capture_storage, parse_eh_namespace,
+    parse_event_hub, parse_logic_app, parse_sb_namespace, parse_sb_queue, parse_sb_topic,
 )
 
 FIX = json.loads(
@@ -81,9 +82,10 @@ def event_hub(ns_name: str, hub_name: str, storage="fixture") -> Resource:
     return parse_event_hub(ns.ext_id, hub, groups, capture_storage)
 
 
-def apim(name: str) -> Resource:
+def apim(name: str, apis_readable=True) -> Resource:
     svc = next(x for x in FIX["apim"]["services"] if x["name"] == name)
-    return parse_apim(svc, FIX["apim"]["named_values"][name], FIX["apim"]["subscriptions"][name])
+    return parse_apim(svc, FIX["apim"]["named_values"][name],
+                      FIX["apim"]["subscriptions"][name], apis_readable=apis_readable)
 
 
 def apim_api(svc_name: str, api_name: str) -> Resource:
@@ -284,6 +286,125 @@ def test_denied_service_is_not_assessable_never_a_pass():
 def test_clean_collection_reports_nothing():
     sub = subscription(collection={"servicebus": {"outcome": "ok", "error": None}})
     assert fire("AZURE.SUBSCRIPTION.SERVICE_NOT_ASSESSED", sub) == []
+
+
+def test_denied_child_read_under_an_ok_service_is_a_coverage_gap():
+    """The provider listed fine, so outcome stays 'ok' — but children under it were never
+    collected and left no resource behind to carry the gap. Reporting nothing here is exactly
+    how a partial collection scores as full coverage."""
+    sub = subscription(collection={
+        "eventhub": {"outcome": "ok", "error": None, "resources": 2},
+        "servicebus": {"outcome": "ok", "error": None, "resources": 2,
+                       "child_gaps": [{"parent": "sb-open", "child": "queues",
+                                       "error": "http_403"}]},
+    })
+    hits = fire("AZURE.SUBSCRIPTION.SERVICE_NOT_ASSESSED", sub)
+    assert len(hits) == 1 and hits[0].assessable is False
+    assert "queues of sb-open" in hits[0].observation
+    assert hits[0].source_ref["service"] == "servicebus"
+
+
+def test_child_gaps_and_a_denied_service_are_both_reported_once_each():
+    sub = subscription(collection={
+        "apim": {"outcome": "access_denied", "error": "http_403"},
+        "eventhub": {"outcome": "ok", "error": None,
+                     "child_gaps": [{"parent": "eh-open", "child": "eventhubs",
+                                     "error": "http_403"}]},
+    })
+    hits = fire("AZURE.SUBSCRIPTION.SERVICE_NOT_ASSESSED", sub)
+    assert len(hits) == 2 and all(h.assessable is False for h in hits)
+    by_service = {h.source_ref["service"]: h for h in hits}
+    assert "no apim" in by_service["apim"].observation
+    assert "eventhubs of eh-open" in by_service["eventhub"].observation
+
+
+# ── collection: a denied CHILD read inside a provider that listed fine ────────
+# httpx never appears here either: _arm_list / _arm_get are the seam, so stubs keyed on the
+# ARM path drive the real except branches offline.
+def _arm_stub(deny=()):
+    """Serves the golden ARM fixtures by path leaf; raises 401/403 for the leaves in `deny`
+    (either 'queues' or the ('sb-open', 'queues') pair for one parent only)."""
+    def _list(_client, _headers, path, _api):
+        leaf = path.rsplit("/", 1)[-1]
+        if leaf in ("namespaces", "service"):
+            return {"Microsoft.ServiceBus": FIX["servicebus"]["namespaces"],
+                    "Microsoft.EventHub": FIX["eventhub"]["namespaces"],
+                    "Microsoft.ApiManagement": FIX["apim"]["services"]}[path.split("/")[-2]]
+        parent = path.rsplit("/", 2)[-2]
+        if leaf in deny or (parent, leaf) in deny:
+            raise _Denied(403)
+        source = {"authorizationRules": (FIX["servicebus"]["authorization_rules"]
+                                         if parent.startswith("sb") else
+                                         FIX["eventhub"]["authorization_rules"]),
+                  "queues": FIX["servicebus"]["queues"],
+                  "topics": FIX["servicebus"]["topics"],
+                  "eventhubs": FIX["eventhub"]["hubs"],
+                  "consumergroups": FIX["eventhub"]["consumer_groups"],
+                  "namedValues": FIX["apim"]["named_values"],
+                  "subscriptions": FIX["apim"]["subscriptions"],
+                  "apis": FIX["apim"]["apis"]}[leaf]
+        return source.get(parent) or []
+    return _list
+
+
+def _arm_stub_get(_client, _headers, path, _api):
+    return FIX["eventhub"]["storage_accounts"][path.rsplit("/", 1)[-1]]
+
+
+def _collect(monkeypatch, fn, deny=()):
+    monkeypatch.setattr(connect_azure, "_arm_list", _arm_stub(deny))
+    monkeypatch.setattr(connect_azure, "_arm_get", _arm_stub_get)
+    return fn(None, {}, FIX["subscription_id"])
+
+
+def test_collect_servicebus_fully_readable_records_no_gap(monkeypatch):
+    resources, edges, gaps = _collect(monkeypatch, connect_azure._collect_servicebus)
+    assert gaps == []
+    ns = next(r for r in resources if r.name == "sb-open")
+    assert ns.raw["queues_readable"] is True and ns.raw["topics_readable"] is True
+    assert {r.kind for r in resources} == {"azure_servicebus_namespace", "azure_sb_queue",
+                                           "azure_sb_topic"}
+    assert all(e.kind == "contains" for e in edges)
+
+
+def test_collect_servicebus_denied_queue_listing_is_recorded_not_swallowed(monkeypatch):
+    resources, _edges, gaps = _collect(monkeypatch, connect_azure._collect_servicebus,
+                                       deny={("sb-open", "queues")})
+    ns = next(r for r in resources if r.name == "sb-open")
+    assert ns.raw["queues_readable"] is False and ns.raw["topics_readable"] is True
+    # no azure_sb_queue exists under sb-open, so QUEUE_NO_DEAD_LETTERING never runs on it
+    assert [r.name for r in resources if r.kind == "azure_sb_queue"] == ["payments"]
+    assert gaps == [{"parent": "sb-open", "child": "queues", "error": "http_403"}]
+
+
+def test_collect_eventhub_denied_hub_listing_is_recorded_not_swallowed(monkeypatch):
+    resources, _edges, gaps = _collect(monkeypatch, connect_azure._collect_eventhub,
+                                       deny={("eh-open", "eventhubs")})
+    ns = next(r for r in resources if r.name == "eh-open")
+    assert ns.raw["event_hubs_readable"] is False
+    # the capture rule has no hub to run on — the namespace must not read as an empty one
+    assert [r.name for r in resources if r.kind == "azure_event_hub"] == ["audit"]
+    assert gaps == [{"parent": "eh-open", "child": "eventhubs", "error": "http_403"}]
+
+
+def test_collect_eventhub_denied_consumer_groups_are_recorded(monkeypatch):
+    resources, _edges, gaps = _collect(monkeypatch, connect_azure._collect_eventhub,
+                                       deny={"consumergroups"})
+    hub = next(r for r in resources if r.name == "telemetry")
+    assert hub.raw["consumer_groups_readable"] is False
+    assert {(g["parent"], g["child"]) for g in gaps} == {("telemetry", "consumergroups"),
+                                                        ("audit", "consumergroups")}
+
+
+def test_collect_apim_denied_api_listing_is_recorded_not_swallowed(monkeypatch):
+    resources, _edges, gaps = _collect(monkeypatch, connect_azure._collect_apim,
+                                       deny={("apim-legacy", "apis")})
+    svc = next(r for r in resources if r.name == "apim-legacy")
+    assert svc.raw["apis_readable"] is False
+    # no azure_api exists, so API_SUBSCRIPTION_KEY_ONLY never runs on this gateway
+    assert [r for r in resources if r.kind == "azure_api"] == []
+    assert gaps == [{"parent": "apim-legacy", "child": "apis", "error": "http_403"}]
+    assert apim("apim-legacy").raw["apis_readable"] is True
 
 
 # ── NHI derivation ────────────────────────────────────────────────────────────

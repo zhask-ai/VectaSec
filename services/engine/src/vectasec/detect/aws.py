@@ -228,6 +228,24 @@ def sns_subscription_http(r, ctx) -> list:
 @detector(kinds=["aws_event_bus"], rule_id="AWS.EVENTBRIDGE.BUS_POLICY_PUBLIC",
           severity="critical", title="EventBridge bus policy grants access to any AWS principal")
 def event_bus_policy_public(r, ctx) -> list:
+    raw = r.raw or {}
+    if raw.get("policy_readable", True) is not True:
+        # An unread policy is stored as None, which is byte-identical to "this bus has no
+        # resource policy" — the SECURE state. Reading the None as absence would turn a
+        # denied read into a clean bus, so the flag decides, not the policy value.
+        return [Hit(
+            observation=(f"the resource policy of EventBridge bus '{r.name}' could not be "
+                         f"read, so which principals may put events onto it is unknown — the "
+                         f"bus is recorded with no policy because none could be retrieved, "
+                         f"not because none exists"),
+            remediation=("Grant the scan role events:DescribeEventBus (covered by the "
+                         "SecurityAudit managed policy) so the bus policy can be assessed. "
+                         "Until then this bus is unknown, not clean."),
+            detail=f"policy_readable={raw.get('policy_readable')} region={raw.get('region')}",
+            assessable=False,
+            assessment_reason="events:DescribeEventBus was denied or could not be issued",
+            source_ref={"api": "events:DescribeEventBus"},
+        )]
     return _public_policy_hits(
         r, "EventBridge",
         remediation=("Scope the bus policy to the sender accounts, or condition it on "
@@ -240,6 +258,8 @@ def event_bus_policy_public(r, ctx) -> list:
 @detector(kinds=["aws_event_bus"], rule_id="AWS.EVENTBRIDGE.BUS_POLICY_WILDCARD_ACTION",
           severity="high", title="EventBridge bus policy allows wildcard actions")
 def event_bus_policy_wildcard_action(r, ctx) -> list:
+    if (r.raw or {}).get("policy_readable", True) is not True:
+        return []   # the coverage gap is already filed by AWS.EVENTBRIDGE.BUS_POLICY_PUBLIC
     return _wildcard_action_hits(
         r, "EventBridge", "events",
         remediation=("Grant only events:PutEvents to senders — `events:*` on a bus includes "
@@ -253,6 +273,22 @@ def event_bus_policy_wildcard_action(r, ctx) -> list:
           severity="medium", title="EventBridge rule targets a resource in another AWS account")
 def event_rule_cross_account_target(r, ctx) -> list:
     raw = r.raw or {}
+    if not raw.get("targets_readable", True):
+        # An empty target list is what a rule that forwards nowhere looks like; iterating it
+        # and finding no foreign account would report "no cross-account flow" about a list
+        # that was never retrieved.
+        return [Hit(
+            observation=(f"events:ListTargetsByRule did not return the targets of EventBridge "
+                         f"rule '{r.name}', so where it forwards matched events — including "
+                         f"into other AWS accounts — could not be determined"),
+            remediation=("Grant the scan role events:ListTargetsByRule (covered by the "
+                         "SecurityAudit managed policy) so this rule's destinations can be "
+                         "assessed. Until then its event flow is unknown, not clean."),
+            detail=f"targets_readable=False bus={raw.get('bus_name')} region={raw.get('region')}",
+            assessable=False,
+            assessment_reason="events:ListTargetsByRule was denied or failed",
+            source_ref={"api": "events:ListTargetsByRule"},
+        )]
     own = raw.get("account") or arn_account(raw.get("rule_arn"))
     hits = []
     for t in raw.get("targets") or []:
@@ -396,6 +432,21 @@ _PREFLIGHT_METHODS = {"OPTIONS"}
 def apigw_route_no_authorizer(r, ctx) -> list:
     raw = r.raw or {}
     hits = []
+    if not raw.get("routes_readable", True):
+        # No route was collected, so the per-route loop below is silent — which would read
+        # as "this API exposes nothing unauthenticated".
+        hits.append(Hit(
+            observation=(f"the routes of API '{r.name}' ({raw.get('api_version')}, "
+                         f"{raw.get('protocol')}) could not be listed, so no route's "
+                         f"authorization type was assessed on this API at all"),
+            remediation=("Grant the scan role apigateway:GET on the API (SecurityAudit covers "
+                         "it) so route-level authorization can be assessed. Until then this "
+                         "API's routes are unknown, not clean."),
+            detail=f"routes_readable=False api_id={raw.get('api_id')} region={raw.get('region')}",
+            assessable=False,
+            assessment_reason="the API's route/resource listing was denied or failed",
+            source_ref={"api": "apigateway:GET /resources | apigatewayv2:GetRoutes"},
+        ))
     for route in raw.get("routes") or []:
         if str(route.get("method") or "").upper() in _PREFLIGHT_METHODS:
             continue   # CORS preflight is unauthenticated by design
@@ -440,6 +491,8 @@ def apigw_route_no_authorizer(r, ctx) -> list:
           title="API Gateway route uses an API key as its only access control")
 def apigw_route_api_key_only(r, ctx) -> list:
     raw = r.raw or {}
+    if not raw.get("routes_readable", True):
+        return []   # the coverage gap is already filed by AWS.APIGW.ROUTE_NO_AUTHORIZER
     hits = []
     for route in raw.get("routes") or []:
         if str(route.get("method") or "").upper() in _PREFLIGHT_METHODS:
@@ -512,29 +565,66 @@ def apigw_stage_no_waf(r, ctx) -> list:
 
 
 # ══ Account: the coverage-gap surface ═════════════════════════════════════════
+_MAX_NAMED_GAPS = 8
+
+
+def _named_gaps(gaps: list) -> str:
+    """'rules of bus default (AccessDenied); stages of api abc123 (AccessDenied)' — capped so
+    one denied action across a thousand resources cannot produce an unreadable observation."""
+    named = [f"{g.get('child')} of {g.get('parent')} ({g.get('error')})"
+             for g in gaps[:_MAX_NAMED_GAPS]]
+    rest = len(gaps) - len(named)
+    return "; ".join(named) + (f"; and {rest} more" if rest > 0 else "")
+
+
 @detector(kinds=["aws_account"], rule_id="AWS.ACCOUNT.SERVICE_NOT_ASSESSED", severity="info",
           title="An AWS service could not be assessed with the granted permissions")
 def account_service_not_assessed(r, ctx) -> list:
     """The third honest outcome at account scope: a (service, region) whose List* call was
     AccessDenied is a COVERAGE GAP — the connector recorded it instead of failing the scan,
     and this rule surfaces it as not-assessable rather than letting the absence of resources
-    read as a clean pass."""
+    read as a clean pass.
+
+    The same is true one level down. A service that listed fine can still have lost whole
+    child collections (a bus's rules, an API's stages, a topic's subscriptions), and those
+    children leave NO resource behind to carry the gap: every rule keyed to them simply has
+    nothing to run on. Those are the connector's child_gaps records, reported here too so a
+    partially collected service is never counted as fully assessed."""
     raw = r.raw or {}
     hits = []
     for key, rec in sorted((raw.get("collection") or {}).items()):
-        if (rec or {}).get("outcome") != "access_denied":
-            continue
         service, _, region = key.partition(":")
+        rec = rec or {}
+        if rec.get("outcome") == "access_denied":
+            hits.append(Hit(
+                observation=(f"listing {service} in {region} was denied for "
+                             f"{raw.get('caller_arn')} ({rec.get('error')}), so no {service} "
+                             f"resource in {region} was assessed"),
+                remediation=("Attach the AWS-managed SecurityAudit policy to the scan role, or "
+                             f"grant the read-only List*/Get*/Describe* actions for {service}. "
+                             "Until then this service's posture is unknown, not clean."),
+                detail=f"service={service} region={region} error={rec.get('error')}",
+                assessable=False,
+                assessment_reason=f"{service} list call returned {rec.get('error')} in {region}",
+                source_ref={"service": service, "region": region},
+            ))
+            continue
+        gaps = rec.get("child_gaps") or []
+        if not gaps:
+            continue
         hits.append(Hit(
-            observation=(f"listing {service} in {region} was denied for "
-                         f"{raw.get('caller_arn')} ({rec.get('error')}), so no {service} "
-                         f"resource in {region} was assessed"),
+            observation=(f"{service} in {region} listed successfully, but {len(gaps)} read(s) "
+                         f"beneath it were denied or failed for {raw.get('caller_arn')}, so "
+                         f"those resources were never collected and every rule keyed to them "
+                         f"had nothing to run on: {_named_gaps(gaps)}"),
             remediation=("Attach the AWS-managed SecurityAudit policy to the scan role, or "
-                         f"grant the read-only List*/Get*/Describe* actions for {service}. "
-                         "Until then this service's posture is unknown, not clean."),
-            detail=f"service={service} region={region} error={rec.get('error')}",
+                         f"grant the missing read-only {service} actions listed above. The "
+                         "parent resources were assessed; the children named here were not, "
+                         "so their posture is unknown, not clean."),
+            detail=f"service={service} region={region} child_gaps={len(gaps)}",
             assessable=False,
-            assessment_reason=f"{service} list call returned {rec.get('error')} in {region}",
-            source_ref={"service": service, "region": region},
+            assessment_reason=(f"{len(gaps)} child read(s) under {service} in {region} were "
+                               f"denied or failed"),
+            source_ref={"service": service, "region": region, "child_gaps": gaps},
         ))
     return hits

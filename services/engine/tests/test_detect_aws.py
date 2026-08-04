@@ -74,16 +74,18 @@ def topic(name: str, attrs="fixture") -> Resource:
     return parse_topic(REGION, arn, a)
 
 
-def bus(name: str) -> Resource:
+def bus(name: str, policy="fixture") -> Resource:
     b = next(x for x in FIX["events"]["buses"] if x["Name"] == name)
-    return parse_bus(REGION, b, json.dumps(FIX["events"]["bus_policies"][name]))
+    if policy == "fixture":
+        return parse_bus(REGION, b, json.dumps(FIX["events"]["bus_policies"][name]))
+    return parse_bus(REGION, b, policy, policy_readable=policy is not None)
 
 
-def event_rule() -> Resource:
+def event_rule(targets="fixture") -> Resource:
     b = bus("default")
     rule = as_boto(FIX["events"]["rules"]["default"][0])
-    resources, _ = parse_rule(REGION, b.ext_id, rule,
-                              FIX["events"]["targets"]["forward-orders"])
+    t = FIX["events"]["targets"]["forward-orders"] if targets == "fixture" else targets
+    resources, _ = parse_rule(REGION, b.ext_id, rule, t)
     return resources[0]
 
 
@@ -92,17 +94,17 @@ def msk(name: str) -> Resource:
     return parse_msk_cluster(REGION, c)
 
 
-def api_v1() -> list:
+def api_v1(resource_items="fixture") -> list:
     fx = FIX["apigw_v1"]
-    resources, _ = parse_api_v1(REGION, fx["api"], fx["stages"], fx["authorizers"],
-                                fx["resources"])
+    items = fx["resources"] if resource_items == "fixture" else resource_items
+    resources, _ = parse_api_v1(REGION, fx["api"], fx["stages"], fx["authorizers"], items)
     return resources
 
 
-def api_v2() -> list:
+def api_v2(routes="fixture") -> list:
     fx = FIX["apigw_v2"]
-    resources, _ = parse_api_v2(REGION, fx["api"], fx["stages"], fx["routes"],
-                                fx["authorizers"])
+    rs = fx["routes"] if routes == "fixture" else routes
+    resources, _ = parse_api_v2(REGION, fx["api"], fx["stages"], rs, fx["authorizers"])
     return resources
 
 
@@ -241,6 +243,32 @@ def test_bus_wildcard_action_fire_and_pass():
     assert fire("AWS.EVENTBRIDGE.BUS_POLICY_WILDCARD_ACTION", bus("default")) == []
 
 
+def test_bus_unread_policy_is_not_assessable_never_a_clean_bus():
+    """policy=None is what a bus with NO resource policy looks like — the secure state. A
+    denied DescribeEventBus must not borrow that clean reading."""
+    gap = bus("default", policy=None)
+    hits = fire("AWS.EVENTBRIDGE.BUS_POLICY_PUBLIC", gap)
+    assert len(hits) == 1 and hits[0].assessable is False
+    assert "DescribeEventBus" in hits[0].assessment_reason
+    # the gap is filed once: the wildcard rule stays quiet rather than restating it
+    assert fire("AWS.EVENTBRIDGE.BUS_POLICY_WILDCARD_ACTION", gap) == []
+
+
+def test_bus_with_a_read_but_empty_policy_is_a_clean_pass():
+    clean = parse_bus(REGION, {"Name": "quiet", "Arn": "arn:aws:events:us-east-1:1:x"}, None)
+    assert clean.raw["policy_readable"] is True
+    assert fire("AWS.EVENTBRIDGE.BUS_POLICY_PUBLIC", clean) == []
+    assert fire("AWS.EVENTBRIDGE.BUS_POLICY_WILDCARD_ACTION", clean) == []
+
+
+def test_cross_account_target_not_assessable_when_targets_denied():
+    hits = fire("AWS.EVENTBRIDGE.CROSS_ACCOUNT_TARGET", event_rule(targets=None))
+    assert len(hits) == 1 and hits[0].assessable is False
+    assert "ListTargetsByRule" in hits[0].assessment_reason
+    # a rule that genuinely forwards nowhere is a real (clean) answer, not a gap
+    assert fire("AWS.EVENTBRIDGE.CROSS_ACCOUNT_TARGET", event_rule(targets=[])) == []
+
+
 def test_cross_account_target_fires_only_for_foreign_account():
     r = event_rule()
     hits = fire("AWS.EVENTBRIDGE.CROSS_ACCOUNT_TARGET", r)
@@ -312,6 +340,18 @@ def test_apigw_v2_default_route_fires_jwt_route_passes():
     assert fire("AWS.APIGW.ROUTE_NO_AUTHORIZER", secured) == []
 
 
+def test_apigw_unreadable_route_list_is_not_assessable_filed_once():
+    """No route collected means the per-route loop is silent, which reads as 'this API exposes
+    nothing unauthenticated'."""
+    for api in (api_v1(resource_items=None)[0], api_v2(routes=None)[0]):
+        hits = fire("AWS.APIGW.ROUTE_NO_AUTHORIZER", api)
+        assert len(hits) == 1 and hits[0].assessable is False, api.raw["api_version"]
+        assert "route" in hits[0].assessment_reason
+        assert fire("AWS.APIGW.ROUTE_API_KEY_ONLY", api) == []
+    # an API that genuinely defines no route is a real (clean) answer, not a gap
+    assert fire("AWS.APIGW.ROUTE_NO_AUTHORIZER", api_v2(routes=[])[0]) == []
+
+
 def test_apigw_api_key_only_fire_and_pass():
     api = api_v1()[0]
     hits = fire("AWS.APIGW.ROUTE_API_KEY_ONLY", api)
@@ -355,3 +395,48 @@ def test_denied_service_is_not_assessable_never_a_pass():
 def test_clean_collection_reports_nothing():
     acct = account(collection={"sqs:us-east-1": {"outcome": "ok", "error": None}})
     assert fire("AWS.ACCOUNT.SERVICE_NOT_ASSESSED", acct) == []
+
+
+def test_denied_child_read_under_an_ok_service_is_a_coverage_gap():
+    """The service listed fine, so outcome stays 'ok' — but children under it were never
+    collected and left no resource behind to carry the gap. Reporting nothing here is exactly
+    how a partial collection scores as full coverage."""
+    acct = account(collection={
+        "sqs:us-east-1": {"outcome": "ok", "error": None, "resources": 2},
+        "apigateway:us-east-1": {
+            "outcome": "ok", "error": None, "resources": 1,
+            "child_gaps": [{"parent": "api abc123", "child": "stages",
+                            "error": "AccessDeniedException"}]},
+    })
+    hits = fire("AWS.ACCOUNT.SERVICE_NOT_ASSESSED", acct)
+    assert len(hits) == 1
+    assert hits[0].assessable is False
+    assert "stages of api abc123" in hits[0].observation
+    assert "apigateway" in hits[0].observation and "us-east-1" in hits[0].observation
+    assert hits[0].source_ref["child_gaps"][0]["child"] == "stages"
+
+
+def test_child_gaps_and_a_denied_service_are_both_reported_once_each():
+    acct = account(collection={
+        "msk:us-east-1": {"outcome": "access_denied", "error": "AccessDeniedException"},
+        "events:us-east-1": {
+            "outcome": "ok", "error": None, "resources": 3,
+            "child_gaps": [{"parent": "bus default", "child": "rules", "error": "AccessDenied"},
+                           {"parent": "bus partner", "child": "rules", "error": "AccessDenied"}]},
+    })
+    hits = fire("AWS.ACCOUNT.SERVICE_NOT_ASSESSED", acct)
+    assert len(hits) == 2 and all(h.assessable is False for h in hits)
+    by_service = {h.source_ref["service"]: h for h in hits}
+    assert "no msk" in by_service["msk"].observation
+    assert "bus default" in by_service["events"].observation
+    assert "bus partner" in by_service["events"].observation
+
+
+def test_child_gap_naming_is_capped_so_one_denial_cannot_flood_the_observation():
+    gaps = [{"parent": f"api api{i}", "child": "stages", "error": "AccessDenied"}
+            for i in range(12)]
+    acct = account(collection={
+        "apigateway:us-east-1": {"outcome": "ok", "error": None, "child_gaps": gaps}})
+    hits = fire("AWS.ACCOUNT.SERVICE_NOT_ASSESSED", acct)
+    assert len(hits) == 1 and "and 4 more" in hits[0].observation
+    assert len(hits[0].source_ref["child_gaps"]) == 12   # the full list is still evidence

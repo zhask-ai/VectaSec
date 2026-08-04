@@ -1,5 +1,7 @@
 import type { Severity } from '@/lib/types';
-import { createClient } from '@/lib/supabase/server';
+import { engineGet } from '@/lib/engine';
+import { getOwnMembership } from '@/lib/role';
+import { createClient, getVerifiedUser } from '@/lib/supabase/server';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import { PageHeader } from '@/components/ui/page-header';
@@ -29,11 +31,18 @@ export const metadata = { title: 'Supply chain · VectaSec' };
 // `elasticsearch`), each next to a green "NVD" pill. A user pasting one of those into NVD gets
 // zero hits and concludes the broker is clean. Both HALVES of the pair must be mirrored, and
 // the trailing `:*` components are part of a well-formed CPE 2.3 string, not decoration.
+// Re-verified against the live NVD API on 2026-08-03 alongside the engine's copy. Three entries
+// were stale here after that check corrected them upstream — and a stale entry is not cosmetic:
+// this table renders a copyable CPE next to a green "NVD" pill, so a user pasting the old
+// `nats:nats_server` got zero results (the real pair is `linuxfoundation:nats-server`, 36 CVEs)
+// and concluded the broker was clean. OpenSearch was borrowing Elasticsearch's pair, which both
+// inherits Elastic's post-fork CVEs and misses OpenSearch's own.
 const CPE: Record<string, [vendor: string, product: string]> = {
-  kafka: ['apache', 'kafka'], redis: ['redis', 'redis'], rabbitmq: ['vmware', 'rabbitmq'],
+  kafka: ['apache', 'kafka'], redis: ['redis', 'redis'],
+  rabbitmq: ['broadcom', 'rabbitmq_server'],
   kong: ['konghq', 'kong_gateway'], vault: ['hashicorp', 'vault'],
-  elasticsearch: ['elastic', 'elasticsearch'], opensearch: ['elastic', 'elasticsearch'],
-  pulsar: ['apache', 'pulsar'], nats: ['nats', 'nats_server'], etcd: ['etcd', 'etcd'],
+  elasticsearch: ['elastic', 'elasticsearch'], opensearch: ['amazon', 'opensearch'],
+  pulsar: ['apache', 'pulsar'], nats: ['linuxfoundation', 'nats-server'], etcd: ['etcd', 'etcd'],
   activemq: ['apache', 'activemq'], zookeeper: ['apache', 'zookeeper'],
   memcached: ['memcached', 'memcached'], solr: ['apache', 'solr'],
   consul: ['hashicorp', 'consul'],
@@ -90,8 +99,37 @@ type OsvFinding = {
   scans: { connections: { name: string } | null } | null;
 };
 
+type LicenseRow = {
+  product: string;
+  version: string;
+  known: boolean;
+  licenses: string[];
+  osi_approved: boolean | null;
+  source_url: string | null;
+  choice: boolean;
+  connections: string[];
+};
+type LicensingResponse = {
+  components: LicenseRow[];
+  summary: { total: number; non_osi: number; unknown: number };
+};
+
 export default async function SupplyChainPage() {
   const supabase = await createClient();
+  const [user, membership] = await Promise.all([getVerifiedUser(), getOwnMembership()]);
+  // Licensing is resolved engine-side against the version we READ, because the terms are
+  // version-dependent (Redis 7.2 is BSD, 7.4 is source-available, 8.0 is AGPL). Mirroring that
+  // table into the browser would be a second copy to drift, and a drifted licence claim ends up
+  // in somebody's compliance report.
+  const licensingRes =
+    user && membership
+      ? await engineGet<LicensingResponse>('/licensing', {
+          tenantId: membership.tenantId,
+          actor: user.id,
+        })
+      : null;
+  const licensing = licensingRes && licensingRes.ok ? licensingRes.data : null;
+
   const [{ data }, { data: osvData }] = await Promise.all([
     supabase
       .from('resources')
@@ -171,6 +209,21 @@ export default async function SupplyChainPage() {
             >
               Download SBOM
             </a>
+            <a
+              href="/api/reports/vex"
+              style={{
+                padding: '9px 14px',
+                background: 'var(--surface-raised)',
+                color: 'var(--text-primary)',
+                border: '1px solid var(--border-interactive)',
+                borderRadius: 'var(--radius-sm, 6px)',
+                fontSize: 'var(--text-sm)',
+                fontWeight: 600,
+                textDecoration: 'none',
+              }}
+            >
+              Download VEX
+            </a>
             <StatusPill
               tone={anyProbed ? 'warn' : 'ok'}
               label={anyProbed ? 'lifecycle: discovery' : 'lifecycle: operations'}
@@ -183,6 +236,117 @@ export default async function SupplyChainPage() {
             It also declares itself an incomplete inventory — a scanner sees the systems it was
             pointed at, never a whole software supply chain.
           </p>
+          <p style={{ margin: '6px 0 0', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+            The VEX document is separate on purpose: it carries what this estate <em>says</em>{' '}
+            about each vulnerability — open findings as <code>in_triage</code>, suppressed ones as{' '}
+            <code>not_affected</code> with the suppressing person&rsquo;s verbatim reason and the
+            date that assessment lapses. Findings that could not be assessed are withheld rather
+            than published as &ldquo;not affected&rdquo;, and the document says how many it withheld.
+          </p>
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Licensing</CardTitle>
+          <CardMeta>
+            resolved against the version actually running — these terms changed mid-life for
+            several of these products
+          </CardMeta>
+        </CardHeader>
+        <CardBody pad={!licensing || licensing.components.length === 0}>
+          {!licensing ? (
+            <EmptyState
+              tone="setup"
+              title="Licensing needs the engine"
+              description="This panel is resolved engine-side so the version-to-licence table has exactly one copy. Start the engine and reload."
+            />
+          ) : licensing.components.length === 0 ? (
+            <EmptyState
+              tone="setup"
+              title="No versioned components yet"
+              description="Licensing is derived from the version a connector read. Scan a system whose connector reports a product version."
+            />
+          ) : (
+            <>
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', padding: '0 0 12px' }}>
+                <StatusPill
+                  tone={licensing.summary.non_osi > 0 ? 'warn' : 'ok'}
+                  label={
+                    licensing.summary.non_osi > 0
+                      ? `${licensing.summary.non_osi} not OSI-approved`
+                      : 'all OSI-approved'
+                  }
+                />
+                {licensing.summary.unknown > 0 && (
+                  <StatusPill tone="neutral" label={`${licensing.summary.unknown} not in the table`} />
+                )}
+              </div>
+              <Table density="default" caption="Licence terms per running component version">
+                <THead>
+                  <TR>
+                    <TH width="22%">Component</TH>
+                    <TH width="34%">Terms</TH>
+                    <TH width="16%">OSI</TH>
+                    <TH width="28%">Source</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {licensing.components.map((c) => (
+                    <TR key={`${c.product}@${c.version}`}>
+                      <TD mono>
+                        {c.product} {c.version}
+                      </TD>
+                      <TD>
+                        {c.known ? (
+                          <span>
+                            {c.licenses.join(c.choice ? ' or ' : ' + ')}
+                            {c.choice && (
+                              <span style={{ color: 'var(--text-secondary)' }}> (your choice)</span>
+                            )}
+                          </span>
+                        ) : (
+                          <span style={{ color: 'var(--text-secondary)' }}>
+                            not in the verified table — no claim made
+                          </span>
+                        )}
+                      </TD>
+                      <TD>
+                        {c.osi_approved === null ? (
+                          <span style={{ color: 'var(--text-secondary)' }}>unknown</span>
+                        ) : (
+                          <StatusPill
+                            tone={c.osi_approved ? 'ok' : 'warn'}
+                            label={c.osi_approved ? 'open source' : 'source-available'}
+                          />
+                        )}
+                      </TD>
+                      <TD>
+                        {c.source_url ? (
+                          <a
+                            href={c.source_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-2xs)' }}
+                          >
+                            primary source ↗
+                          </a>
+                        ) : (
+                          <span style={{ color: 'var(--text-secondary)' }}>—</span>
+                        )}
+                      </TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+              <p style={{ margin: '10px 0 0', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+                Source-available terms (BUSL, SSPL, RSAL, Elastic) are perfectly legal to run —
+                they are simply not OSI-approved open source, which is the distinction a licence
+                review asks about. VectaSec does not file these as security findings: a licence is
+                a contractual fact, not a vulnerability.
+              </p>
+            </>
+          )}
         </CardBody>
       </Card>
 

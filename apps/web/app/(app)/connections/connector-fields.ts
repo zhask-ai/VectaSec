@@ -195,7 +195,7 @@ export const CONNECTORS: ConnectorSpec[] = [
     type: "ibmmq",
     label: "IBM MQ",
     blurb: "mqweb REST + MQSC — CONNAUTH/CHLAUTH enforcement, channel MCAUSER, channel TLS.",
-    rules: 10,
+    rules: 11,
     fields: [
       { key: "base_url", label: "mqweb URL", required: true, placeholder: "https://mq.example:9443", help: "Base URL of the IBM MQ mqweb server. Read-only: only MQSC DISPLAY commands are issued." },
       { key: "username", label: "Admin user", required: true, help: "An mqweb user in the MQWebAdmin/MQWebAdminRO role. DISPLAY-only here." },
@@ -222,7 +222,7 @@ export const CONNECTORS: ConnectorSpec[] = [
     type: "kafka",
     label: "Apache Kafka",
     blurb: "Brokers, topics, ACLs — listener security, authorization, footguns, durability posture.",
-    rules: 24,
+    rules: 25,
     fields: [
       { key: "bootstrap", label: "Bootstrap servers", required: true, placeholder: "broker-1:9092,broker-2:9092", help: "Comma-separated host:port list the engine or worker can reach. Read-only AdminClient — nothing is written to the cluster." },
     ],
@@ -258,7 +258,7 @@ export const CONNECTORS: ConnectorSpec[] = [
     type: "kong",
     label: "Kong Gateway",
     blurb: "Admin API — routes, services, plugins, consumer credentials, exposure.",
-    rules: 16,
+    rules: 17,
     fields: [
       { key: "url", label: "Admin API URL", required: true, placeholder: "http://localhost:8001", help: "Kong Admin API base URL. GETs only." },
       { key: "admin_token", label: "Admin token", secret: true, help: "Kong-Admin-Token for RBAC-enabled gateways — use a read-only role." },
@@ -445,7 +445,7 @@ export const CONNECTORS: ConnectorSpec[] = [
     type: "solace",
     label: "Solace PubSub+",
     blurb: "SEMP config — default clientUsername, ACL default-allow, message-VPN TLS.",
-    rules: 9,
+    rules: 10,
     fields: [
       { key: "semp_url", label: "SEMP URL", required: true, placeholder: "https://localhost:1943", help: "Solace SEMP base URL (the SEMP service port; 1943 for TLS, 8080 for plaintext). The connector appends /SEMP/v2/config. GETs only." },
       { key: "username", label: "Admin username", required: true, help: "A management user with read access to the config API." },

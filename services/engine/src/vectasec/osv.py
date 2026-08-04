@@ -384,8 +384,10 @@ def _write_finding(cur, tenant_id, scan_id, connection_id, resource_id, ext_id,
                   assessment = excluded.assessment,
                   assessment_reason = excluded.assessment_reason,
                   status = case
-                    when excluded.status = 'suppressed' then 'suppressed'
-                    when findings.status = 'suppressed' then 'open'
+                    when excluded.status = 'suppressed'
+                          and findings.status in ('open','suppressed') then 'suppressed'
+                    when findings.status = 'suppressed'
+                          and excluded.status <> 'suppressed' then 'open'
                     else findings.status
                   end
            returning id""",
