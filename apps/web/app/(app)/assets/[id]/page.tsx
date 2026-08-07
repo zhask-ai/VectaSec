@@ -7,11 +7,20 @@ import { Breadcrumbs } from '@/components/ui/breadcrumbs';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconForType } from '@/components/ui/icons';
+import { Page } from '@/components/ui/page';
 import { SeverityBadge } from '@/components/ui/severity';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
-import { BlastRadius, type GraphResource, type Neighbour } from '../_blast-radius';
+import {
+  BlastRadius,
+  BlastRadiusExplorer,
+  type GraphResource,
+  type LayeredEdge,
+  type Neighbour,
+  type RiskIndex,
+} from '../_blast-radius';
 import { LabelChips, StaleChip } from '../_chips';
-import { absolute, labelEntries, redactSecrets, relative } from '../_lib';
+import { absolute, labelEntries, redactSecrets, relative, worstSeverity, type LayeredNode } from '../_lib';
 
 /* Resource detail: what it is, what it says about itself, what is wrong with it, and what it
  * touches. RLS scopes every read; no query filters by tenant_id on purpose. */
@@ -56,9 +65,20 @@ type EdgeRow = {
   dst_resource_id: string;
 };
 
-export default async function AssetDetailPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function AssetDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ [key: string]: string | string[] | undefined }>;
+}) {
   const { id } = await params;
   if (!UUID_RE.test(id)) notFound();
+
+  // Graph radius: 1 = direct edges (default), 2–3 = the explorer view. Anything else is 1 —
+  // the URL is user input like any other.
+  const sp = await searchParams;
+  const radius = sp.radius === '2' ? 2 : sp.radius === '3' ? 3 : 1;
 
   const supabase = await createClient();
 
@@ -92,13 +112,102 @@ export default async function AssetDetailPage({ params }: { params: Promise<{ id
     ...new Set(edges.map((e) => (e.src_resource_id === id ? e.dst_resource_id : e.src_resource_id))),
   ];
 
-  const neighbourRes = neighbourIds.length
-    ? await supabase.from('resources').select('id, kind, name, stale').in('id', neighbourIds)
-    : { data: [], error: null };
+  // ── The graph's node set: signed hop distance from the focus. ──────────────────────────────
+  // Level ±1 comes from the direct edges already fetched; radius 2–3 walks OUTWARD along
+  // src→dst and INWARD along dst→src with one bounded query per side per level. Frontiers are
+  // capped so a hub node cannot turn one page load into a full-graph crawl; the explorer says
+  // in words whatever the caps dropped.
+  const FRONTIER_CAP = 24;
+  const dist = new Map<string, number>([[id, 0]]);
+  const graphEdges = new Map<string, EdgeRow>(edges.map((e) => [e.id, e]));
+  let inFrontier: string[] = [];
+  let outFrontier: string[] = [];
+  for (const e of edges) {
+    if (e.dst_resource_id === id && !dist.has(e.src_resource_id)) {
+      dist.set(e.src_resource_id, -1);
+      inFrontier.push(e.src_resource_id);
+    }
+  }
+  for (const e of edges) {
+    if (e.src_resource_id === id && !dist.has(e.dst_resource_id)) {
+      dist.set(e.dst_resource_id, 1);
+      outFrontier.push(e.dst_resource_id);
+    }
+  }
+
+  for (let hop = 2; hop <= radius; hop++) {
+    const [outRes, inRes] = await Promise.all([
+      outFrontier.length
+        ? supabase
+            .from('edges')
+            .select('id, kind, labels, src_resource_id, dst_resource_id')
+            .in('src_resource_id', outFrontier.slice(0, FRONTIER_CAP))
+            .limit(200)
+        : Promise.resolve({ data: [] as EdgeRow[], error: null }),
+      inFrontier.length
+        ? supabase
+            .from('edges')
+            .select('id, kind, labels, src_resource_id, dst_resource_id')
+            .in('dst_resource_id', inFrontier.slice(0, FRONTIER_CAP))
+            .limit(200)
+        : Promise.resolve({ data: [] as EdgeRow[], error: null }),
+    ]);
+    const nextOut: string[] = [];
+    const nextIn: string[] = [];
+    for (const e of (outRes.data ?? []) as EdgeRow[]) {
+      graphEdges.set(e.id, e);
+      if (!dist.has(e.dst_resource_id)) {
+        dist.set(e.dst_resource_id, hop);
+        nextOut.push(e.dst_resource_id);
+      }
+    }
+    for (const e of (inRes.data ?? []) as EdgeRow[]) {
+      graphEdges.set(e.id, e);
+      if (!dist.has(e.src_resource_id)) {
+        dist.set(e.src_resource_id, -hop);
+        nextIn.push(e.src_resource_id);
+      }
+    }
+    outFrontier = nextOut;
+    inFrontier = nextIn;
+    if (!outFrontier.length && !inFrontier.length) break;
+  }
+
+  const graphIds = [...dist.keys()].filter((rid) => rid !== id);
+
+  // Node identities AND their open-finding load in one round: the graph paints each node
+  // with its risk badge, because "what this touches" matters most when what it touches is
+  // itself on fire. A failed risk read degrades to badge-less nodes, never to a blank graph.
+  const [nodesRes, riskRes] = await Promise.all([
+    graphIds.length
+      ? supabase.from('resources').select('id, kind, name, stale').in('id', graphIds.slice(0, 200))
+      : Promise.resolve({ data: [], error: null }),
+    graphIds.length
+      ? supabase
+          .from('findings')
+          .select('resource_id, severity')
+          .eq('status', 'open')
+          .in('resource_id', [...graphIds.slice(0, 200), id])
+      : Promise.resolve({ data: [], error: null }),
+  ]);
 
   const byId = new Map<string, GraphResource>(
-    ((neighbourRes.data ?? []) as GraphResource[]).map((r) => [r.id, r]),
+    ((nodesRes.data ?? []) as GraphResource[]).map((r) => [r.id, r]),
   );
+
+  const risk: RiskIndex = {};
+  {
+    const grouped = new Map<string, Severity[]>();
+    for (const row of (riskRes.data ?? []) as { resource_id: string; severity: Severity }[]) {
+      const arr = grouped.get(row.resource_id);
+      if (arr) arr.push(row.severity);
+      else grouped.set(row.resource_id, [row.severity]);
+    }
+    for (const [rid, sevs] of grouped) {
+      const worst = worstSeverity(sevs);
+      if (worst) risk[rid] = { worst, open: sevs.length };
+    }
+  }
 
   const neighbours: Neighbour[] = edges
     .map((e) => {
@@ -126,26 +235,35 @@ export default async function AssetDetailPage({ params }: { params: Promise<{ id
     (a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.title.localeCompare(b.title),
   );
 
+  // The focus node wears its own risk badge, computed from the findings already loaded.
+  const focusWorst = worstSeverity(open.map((f) => f.severity));
+  if (focusWorst) risk[resource.id] = { worst: focusWorst, open: open.length };
+
   const inbound = neighbours.filter((n) => n.direction === 'in').length;
   const outbound = neighbours.length - inbound;
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+    <Page>
       <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
         <Breadcrumbs items={[{ label: 'Assets', href: '/assets' }, { label: resource.name }]} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+          <span aria-hidden="true" className="vs-icontile" data-size="lg" data-tone="accent">
+            <IconForType type={resource.kind} size={18} />
+          </span>
           <h1
             style={{
               margin: 0,
               fontSize: 'var(--text-xl)',
               lineHeight: 'var(--leading-xl)',
-              fontWeight: 600,
+              fontWeight: 640,
               fontFamily: 'var(--font-mono)',
+              letterSpacing: '-0.01em',
               wordBreak: 'break-all',
             }}
           >
             {resource.name}
           </h1>
+          {focusWorst && <SeverityBadge severity={focusWorst} count={open.length} />}
           {resource.stale && <StaleChip />}
         </div>
       </div>
@@ -279,7 +397,8 @@ export default async function AssetDetailPage({ params }: { params: Promise<{ id
         <CardHeader>
           <CardTitle>Blast radius</CardTitle>
           <CardMeta>
-            {inbound} inbound · {outbound} outbound · direct edges only
+            {inbound} inbound · {outbound} outbound
+            {radius === 1 ? ' · direct edges only' : ` · exploring ${radius} hops · ${graphIds.length} nodes`}
           </CardMeta>
         </CardHeader>
         <CardBody>
@@ -292,7 +411,46 @@ export default async function AssetDetailPage({ params }: { params: Promise<{ id
             />
           ) : (
             <>
-              <BlastRadius focus={focus} neighbours={neighbours} />
+              {/* Radius control — URL state, so an explored view is shareable and the back
+                  button walks the exploration. Click a node to refocus on it; widen the radius
+                  to research from right here. */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', marginBottom: 'var(--space-3)', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 'var(--text-2xs)', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-secondary)', marginRight: 'var(--space-1)' }}>
+                  Radius
+                </span>
+                {([1, 2, 3] as const).map((r) => (
+                  <Link
+                    key={r}
+                    href={`/assets/${resource.id}${r === 1 ? '' : `?radius=${r}`}`}
+                    className="vs-filterpill"
+                    data-active={radius === r || undefined}
+                    aria-current={radius === r ? 'true' : undefined}
+                  >
+                    {r === 1 ? 'Direct' : `${r} hops`}
+                  </Link>
+                ))}
+                <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
+                  · every node is a link — click through to refocus
+                </span>
+              </div>
+              {radius === 1 ? (
+                <BlastRadius focus={focus} neighbours={neighbours} risk={risk} />
+              ) : (
+                <BlastRadiusExplorer
+                  focus={focus}
+                  nodes={graphIds
+                    .map((rid): LayeredNode | null => {
+                      const r = byId.get(rid);
+                      const d = dist.get(rid);
+                      return r && d !== undefined ? { ...r, d } : null;
+                    })
+                    .filter((n): n is LayeredNode => n !== null)}
+                  edges={[...graphEdges.values()].map(
+                    (e): LayeredEdge => ({ id: e.id, kind: e.kind, src: e.src_resource_id, dst: e.dst_resource_id }),
+                  )}
+                  risk={risk}
+                />
+              )}
               <div style={{ marginTop: 'var(--space-4)' }}>
                 <Table density="compact" caption={`Resources directly connected to ${resource.name}`}>
                   <THead>
@@ -404,7 +562,7 @@ export default async function AssetDetailPage({ params }: { params: Promise<{ id
           </details>
         </CardBody>
       </Card>
-    </div>
+    </Page>
   );
 }
 

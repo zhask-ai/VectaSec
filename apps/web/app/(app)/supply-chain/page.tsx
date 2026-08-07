@@ -4,6 +4,8 @@ import { getOwnMembership } from '@/lib/role';
 import { createClient, getVerifiedUser } from '@/lib/supabase/server';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconForType } from '@/components/ui/icons';
+import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatusPill } from '@/components/ui/status-pill';
@@ -180,7 +182,7 @@ export default async function SupplyChainPage() {
   const unreachable = components.filter((c) => !c.purl && !c.cpe);
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+    <Page>
       <PageHeader
         title="Supply chain"
         description="The component versions actually running in the estate, with the identifiers that reach a vulnerability feed."
@@ -282,7 +284,7 @@ export default async function SupplyChainPage() {
                   <StatusPill tone="neutral" label={`${licensing.summary.unknown} not in the table`} />
                 )}
               </div>
-              <Table density="default" caption="Licence terms per running component version">
+              <Table density="relaxed" caption="Licence terms per running component version">
                 <THead>
                   <TR>
                     <TH width="22%">Component</TH>
@@ -295,7 +297,14 @@ export default async function SupplyChainPage() {
                   {licensing.components.map((c) => (
                     <TR key={`${c.product}@${c.version}`}>
                       <TD mono>
-                        {c.product} {c.version}
+                        <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-2) 0' }}>
+                          <span aria-hidden="true" className="vs-icontile">
+                            <IconForType type={c.product} />
+                          </span>
+                          <span style={{ display: 'grid', gap: 1, minWidth: 0 }}>
+                            {c.product} {c.version}
+                          </span>
+                        </span>
                       </TD>
                       <TD>
                         {c.known ? (
@@ -453,7 +462,7 @@ export default async function SupplyChainPage() {
               />
             </div>
           ) : (
-            <Table density="default" caption="Component versions running in the estate">
+            <Table density="relaxed" caption="Component versions running in the estate">
               <THead>
                 <TR>
                   <TH width="16%">Product</TH>
@@ -466,7 +475,14 @@ export default async function SupplyChainPage() {
                 {components.map((c) => (
                   <TR key={`${c.product}-${c.version}`}>
                     <TD>
-                      <span style={{ fontWeight: 600 }}>{c.product}</span>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-2) 0' }}>
+                        <span aria-hidden="true" className="vs-icontile">
+                          <IconForType type={c.product} />
+                        </span>
+                        <span style={{ display: 'grid', gap: 1, minWidth: 0 }}>
+                          <span style={{ fontWeight: 600 }}>{c.product}</span>
+                        </span>
+                      </span>
                     </TD>
                     <TD>
                       <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-2xs)' }}>
@@ -524,6 +540,6 @@ export default async function SupplyChainPage() {
           </CardBody>
         </Card>
       )}
-    </div>
+    </Page>
   );
 }

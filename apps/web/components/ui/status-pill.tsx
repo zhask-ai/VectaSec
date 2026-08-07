@@ -40,6 +40,16 @@ function Shape({ shape, color, pulse }: { shape: string; color: string; pulse?: 
   );
 }
 
+/** The tint pair behind each tone's soft pill — reuses the severity tint tokens so operational
+ * states read on the same scale without inventing colour. Decorative; word + shape carry it. */
+const SOFT_BG: Record<StatusTone, { bg: string; border: string }> = {
+  ok: { bg: 'var(--sev-low-bg)', border: 'color-mix(in srgb, var(--sev-low-solid) 26%, transparent)' },
+  warn: { bg: 'var(--sev-medium-bg)', border: 'color-mix(in srgb, var(--sev-medium-solid) 30%, transparent)' },
+  bad: { bg: 'var(--sev-critical-bg)', border: 'color-mix(in srgb, var(--sev-critical-solid) 26%, transparent)' },
+  info: { bg: 'var(--sev-low-bg)', border: 'color-mix(in srgb, var(--sev-low-solid) 26%, transparent)' },
+  neutral: { bg: 'var(--sev-info-bg)', border: 'var(--border)' },
+};
+
 export function StatusPill({
   tone,
   label,
@@ -63,9 +73,9 @@ export function StatusPill({
         alignItems: 'center',
         gap: 'var(--space-1)',
         color: t.color,
-        background: soft ? 'var(--surface-raised)' : 'transparent',
-        border: soft ? '1px solid var(--border)' : undefined,
-        padding: soft ? '2px var(--space-2)' : 0,
+        background: soft ? SOFT_BG[tone].bg : 'transparent',
+        border: soft ? `1px solid ${SOFT_BG[tone].border}` : undefined,
+        padding: soft ? '1px var(--space-2)' : 0,
         borderRadius: 'var(--radius-full)',
         fontWeight: 600,
         fontSize: 'var(--text-2xs)',

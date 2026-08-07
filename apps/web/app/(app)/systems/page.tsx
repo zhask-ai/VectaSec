@@ -8,6 +8,8 @@ import { SEVERITY_RANK, type Severity } from '@/lib/types';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconFindings, IconLayers, IconPlug, IconShieldCheck } from '@/components/ui/icons';
+import { Page } from '@/components/ui/page';
 import { PageHeader, SectionHeader } from '@/components/ui/page-header';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatTile } from '@/components/ui/stat';
@@ -390,7 +392,7 @@ export default async function SystemsPage() {
     : 'coverage counts unavailable · catalogue from roadmap';
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-5)', maxWidth: 1280 }}>
+    <Page>
       <PageHeader
         title="Systems"
         description="Every integration-layer system VectaSec can assess, grouped by class — with your connected estate and its live findings mapped onto it. This is the coverage claim, made falsifiable."
@@ -423,35 +425,51 @@ export default async function SystemsPage() {
       )}
 
       {/* Estate summary tiles. */}
-      <Card>
-        <CardBody>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 'var(--space-4)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
+        <Card hover>
+          <CardBody>
             <StatTile
               label="Systems covered"
               value={totalConnectors}
+              icon={<IconLayers size={13} />}
               sub={engineOk ? `across ${orderedCategories.length} categories` : 'from the roadmap catalogue'}
             />
+          </CardBody>
+        </Card>
+        <Card hover>
+          <CardBody>
             <StatTile
               label="Detection rules"
               value={totalRules ?? '—'}
               tone="neutral"
+              icon={<IconShieldCheck size={13} />}
               sub={engineOk ? 'shipped in the engine registry' : 'engine registry unavailable'}
             />
+          </CardBody>
+        </Card>
+        <Card hover>
+          <CardBody>
             <StatTile
               label="Connected"
               value={connectedTypes}
               tone={brokenTypes > 0 ? 'warn' : 'neutral'}
+              icon={<IconPlug size={13} />}
               sub={brokenTypes > 0 ? `${brokenTypes} with a broken connection` : 'system types in your tenant'}
             />
+          </CardBody>
+        </Card>
+        <Card hover>
+          <CardBody>
             <StatTile
               label="Open findings"
               value={totalOpen ?? '—'}
               tone={totalOpen && totalOpen > 0 ? 'bad' : 'neutral'}
+              icon={<IconFindings size={13} />}
               sub={findingsError ? 'read failed — not zero' : 'attributed to a connected system'}
             />
-          </div>
-        </CardBody>
-      </Card>
+          </CardBody>
+        </Card>
+      </div>
 
       {/* Connections-by-category distribution. */}
       <Card>
@@ -527,7 +545,7 @@ export default async function SystemsPage() {
           </CardBody>
         </Card>
       </section>
-    </div>
+    </Page>
   );
 }
 

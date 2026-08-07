@@ -1,9 +1,10 @@
 'use client';
 
 import Link from 'next/link';
+import type { Route } from 'next';
 import { useState } from 'react';
 
-import { Chip } from '@/components/ui/chip';
+import { IconChevronRight } from '@/components/ui/icons';
 import { SeverityBadge } from '@/components/ui/severity';
 import { TBody, THead, TD, TH, TR, Table } from '@/components/ui/table';
 import { NotAssessedBadge } from './assessment';
@@ -20,6 +21,14 @@ import { StatusPill } from './status';
  * Grouping (rule_id across assets) is not dedup (fingerprint across scans). Dedup already
  * happened in Postgres — one row per issue per asset, `last_seen` updated in place. This is the
  * second collapse, and only this one is the UI's job.
+ *
+ * ROW ANATOMY: one composite "Finding" cell — the title on top, `rule_id · SYSTEM` as a quiet
+ * mono subline — instead of separate Rule / System / Title columns. Three columns of competing
+ * text made every row a different height (long titles wrapped three lines while rule ids ate a
+ * third of the table saying less), which is what made the queue read as clutter. One flexible
+ * cell, title clamped to a line, gives every row the same silhouette; the full title rides the
+ * tooltip and the detail page. "mixed" / "+N not assessed" annotations live on the subline for
+ * the same reason.
  *
  * Client because rows expand; it fetches nothing. The server does the query, the grouping and
  * the sort, and hands down a DTO — `resources.raw` is never selected, so it cannot ride along
@@ -45,29 +54,30 @@ export function FindingsTable({ groups }: { groups: RuleGroup[] }) {
     });
 
   return (
-    <Table density="compact" caption="Findings grouped by rule, sorted by severity then most recently seen">
+    <Table density="relaxed" fixed caption="Findings grouped by rule, sorted by severity then most recently seen">
       <THead>
         <TR>
-          <TH width="28px">
+          <TH width="32px">
             <span className="vs-visually-hidden">Expand</span>
           </TH>
           {/* aria-sort on the two columns the server actually ordered by. Claiming a sort we did
               not perform would be worse than claiming none. */}
-          <TH width="104px" sort="desc">
+          <TH width="118px" sort="desc">
             Severity
           </TH>
-          <TH width="1%">Rule</TH>
-          <TH width="1%">System</TH>
-          <TH>Title</TH>
+          {/* An explicit width claim: with auto table layout, a column whose content can all
+              ellipsis to nothing gets bullied by columns that cannot — and the title is the one
+              cell a human actually reads. */}
+          <TH width="36%">Finding</TH>
           <TH width="20%">Resource</TH>
-          <TH width="130px">Status</TH>
+          <TH width="120px">Status</TH>
           {/* Counts are compared, so they are right-aligned and tabular. Dates are read, not
               compared, so they are not. */}
-          <TH width="80px" numeric>
+          <TH width="64px" numeric>
             Evidence
           </TH>
-          <TH width="88px">Age</TH>
-          <TH width="96px" sort="desc">
+          <TH width="72px">Age</TH>
+          <TH width="88px" sort="desc">
             Last seen
           </TH>
         </TR>
@@ -91,6 +101,70 @@ export function FindingsTable({ groups }: { groups: RuleGroup[] }) {
   );
 }
 
+/** The composite Finding cell: one clamped title line over a quiet `rule · SYSTEM` subline.
+ * The subline is plain muted mono — boxed chips here multiplied by 48 rows was chip soup. */
+function FindingCell({
+  title,
+  ruleId,
+  href,
+  note,
+  children,
+}: {
+  title: string;
+  ruleId: string;
+  href?: Route;
+  /** Inline annotations after the rule — "mixed", "+2 not assessed". */
+  note?: React.ReactNode;
+  /** An optional block under the subline (the coverage-gap reason). */
+  children?: React.ReactNode;
+}) {
+  const titleEl = (
+    <span
+      title={title}
+      style={{
+        display: 'block',
+        fontSize: 'var(--text-sm)',
+        fontWeight: 500,
+        color: 'var(--text-primary)',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {title}
+    </span>
+  );
+  return (
+    <span style={{ display: 'grid', gap: 1, minWidth: 0, padding: 'var(--space-2) 0' }}>
+      {href ? (
+        <Link href={href} style={{ minWidth: 0 }}>
+          {titleEl}
+        </Link>
+      ) : (
+        titleEl
+      )}
+      <span
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 'var(--space-2)',
+          minWidth: 0,
+          fontSize: 'var(--text-2xs)',
+          color: 'var(--text-muted)',
+        }}
+      >
+        <span style={{ fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {ruleId}
+        </span>
+        <span aria-hidden="true">·</span>
+        <span style={{ letterSpacing: '0.04em' }}>{systemOf(ruleId)}</span>
+        {note}
+      </span>
+      {children}
+    </span>
+  );
+}
+
 /** One occurrence, so the group IS the finding — no expander, and the row links straight to it.
  * Wrapping a single occurrence in a collapsed group would add a click that reveals one row. */
 function SingleRow({ group, finding }: { group: RuleGroup; finding: FindingRow }) {
@@ -102,17 +176,10 @@ function SingleRow({ group, finding }: { group: RuleGroup; finding: FindingRow }
         {/* A coverage gap carries no severity mark — it is not a vulnerability on that axis. */}
         {gap ? <NotAssessedBadge /> : <SeverityBadge severity={finding.severity} />}
       </TD>
-      <TD mono muted>
-        {group.ruleId}
-      </TD>
       <TD>
-        <SystemChip ruleId={group.ruleId} />
-      </TD>
-      <TD>
-        <Link href={findingHref(finding.id)} style={{ color: 'var(--text-primary)' }}>
-          {finding.title}
-        </Link>
-        {gap && <GapReason reason={finding.assessmentReason} />}
+        <FindingCell title={finding.title} ruleId={group.ruleId} href={findingHref(finding.id)}>
+          {gap && <GapReason reason={finding.assessmentReason} />}
+        </FindingCell>
       </TD>
       <TD>
         <ResourceCell finding={finding} />
@@ -148,95 +215,88 @@ function GroupRows({
 
   return (
     <>
-      <TR>
-        <TD>
+      {/* The WHOLE row is the toggle target (a 20px caret alone is a dexterity test); the button
+          stays inside as the named, focusable control. stopPropagation on it prevents the double
+          fire when the button itself is the click. */}
+      <tr
+        data-toggle-row
+        onClick={onToggle}
+        style={{ height: 'var(--vs-row-h)', borderBottom: '1px solid var(--border)' }}
+      >
+        <td style={{ padding: '0 var(--space-3)' }}>
           <button
             type="button"
-            onClick={onToggle}
-            aria-expanded={open}
-            style={{
-              display: 'grid',
-              placeItems: 'center',
-              width: 20,
-              height: 20,
-              padding: 0,
-              border: 0,
-              background: 'transparent',
-              color: 'var(--text-secondary)',
-              cursor: 'pointer',
-              font: 'inherit',
+            className="vs-rowchevron"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle();
             }}
+            aria-expanded={open}
           >
-            <span aria-hidden="true" style={{ lineHeight: 1 }}>
-              {open ? '▾' : '▸'}
-            </span>
+            <IconChevronRight size={13} />
             <span className="vs-visually-hidden">
               {open ? 'Collapse' : 'Expand'} {group.count} occurrences of {group.ruleId}
             </span>
           </button>
-        </TD>
+        </td>
 
-        <TD>
+        <td style={{ padding: '0 var(--space-3)' }}>
           {/* The ×N is the whole point of the row: one badge, one decision. When every occurrence
               is a coverage gap the whole group is "we could not check", so it shows the neutral
               mark instead of a severity — the stored severity only drove its sort position. */}
           {group.allNotAssessable ? (
             <NotAssessedBadge count={group.count} />
           ) : (
-            // Count the ASSESSED occurrences here — the gaps are tallied separately below, so the
-            // ×N beside a severity never silently includes a coverage gap.
+            // Count the ASSESSED occurrences here — the gaps are tallied separately on the
+            // subline, so the ×N beside a severity never silently includes a coverage gap.
             <SeverityBadge severity={group.severity} count={group.assessedCount} />
           )}
-          {/* A detector may override severity per hit (scan.py: `h.severity or d.severity`), so
-              a group can genuinely be mixed. Saying so prevents the worst outcome of grouping —
-              a critical occurrence hidden inside a row labelled with a lower severity. */}
-          {!group.allNotAssessable && group.mixedSeverity && (
-            <span
-              style={{ marginLeft: 'var(--space-1)', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}
-            >
-              mixed
-            </span>
-          )}
-          {/* A partly-uncheckable group: some occurrences are real findings, some are coverage
-              gaps. Flag the gaps so the severity badge is not read as covering all N. */}
-          {!group.allNotAssessable && group.notAssessableCount > 0 && (
-            <span
-              style={{ marginLeft: 'var(--space-1)', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}
-            >
-              +{group.notAssessableCount} not assessed
-            </span>
-          )}
-        </TD>
+        </td>
 
-        <TD mono muted>
-          {group.ruleId}
-        </TD>
-        <TD>
-          <SystemChip ruleId={group.ruleId} />
-        </TD>
-        <TD>{group.title}</TD>
-        <TD muted>
+        <td style={{ padding: '0 var(--space-3)' }}>
+          <FindingCell
+            title={group.title}
+            ruleId={group.ruleId}
+            note={
+              <>
+                {/* A detector may override severity per hit (scan.py: `h.severity or
+                    d.severity`), so a group can genuinely be mixed. Saying so prevents the worst
+                    outcome of grouping — a critical occurrence hidden inside a row labelled with
+                    a lower severity. */}
+                {!group.allNotAssessable && group.mixedSeverity && (
+                  <span style={{ color: 'var(--sev-medium-fg)', fontWeight: 600 }}>mixed severity</span>
+                )}
+                {/* A partly-uncheckable group: some occurrences are real findings, some are
+                    coverage gaps. Flag the gaps so the badge is not read as covering all N. */}
+                {!group.allNotAssessable && group.notAssessableCount > 0 && (
+                  <span>+{group.notAssessableCount} not assessed</span>
+                )}
+              </>
+            }
+          />
+        </td>
+        <td style={{ padding: '0 var(--space-3)', color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>
           {resourceCount} resource{resourceCount === 1 ? '' : 's'}
-        </TD>
-        <TD>
+        </td>
+        <td style={{ padding: '0 var(--space-3)' }}>
           <span style={{ display: 'inline-flex', gap: 'var(--space-1)', flexWrap: 'wrap' }}>
             {group.statusCounts.map(({ status, count }) => (
               <StatusPill key={status} status={status} count={count} />
             ))}
           </span>
-        </TD>
-        <TD numeric>
+        </td>
+        <td data-numeric style={{ padding: '0 var(--space-3)', textAlign: 'right' }}>
           <EvidenceCount n={group.evidenceCount} />
-        </TD>
-        <TD muted>
+        </td>
+        <td style={{ padding: '0 var(--space-3)', color: 'var(--text-muted)' }}>
           <Age label={group.firstSeenLabel} iso={group.firstSeenIso} />
-        </TD>
-        <TD muted>
+        </td>
+        <td style={{ padding: '0 var(--space-3)', color: 'var(--text-muted)' }}>
           <time dateTime={group.lastSeenIso} title={group.lastSeenIso}>
             {group.lastSeenLabel}
           </time>
-        </TD>
-      </TR>
+        </td>
+      </tr>
 
       {open && group.findings.map((f) => <OccurrenceRow key={f.id} finding={f} />)}
     </>
@@ -251,19 +311,19 @@ function GroupRows({
  * reading the DOM. The one thing needed here is recession, so it recedes onto --bg and nothing
  * else changes.
  *
- * Rule, System and Title are left empty on purpose: they are identical to the group header
- * directly above (title comes from the detector, so it is constant per rule; system is the
- * rule's first segment). Repeating them per row is exactly the noise grouping exists to remove.
- * What differs — resource, status, evidence, age, recency — is what stays.
+ * The Finding column is left empty on purpose (bar a per-occurrence coverage-gap reason): title
+ * and rule are identical to the group header directly above, and repeating them per row is
+ * exactly the noise grouping exists to remove. What differs — resource, status, evidence, age,
+ * recency — is what stays.
  */
 function OccurrenceRow({ finding }: { finding: FindingRow }) {
   const cell: React.CSSProperties = { padding: '0 var(--space-3)' };
   return (
-    <tr style={{ height: 'var(--vs-row-h)', borderBottom: '1px solid var(--border)', background: 'var(--bg)' }}>
+    <tr style={{ height: 'var(--row-default)', borderBottom: '1px solid var(--border)', background: 'var(--bg)' }}>
       <td />
       <td style={{ ...cell, textAlign: 'left' }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-          <span aria-hidden="true" style={{ color: 'var(--text-secondary)' }}>
+          <span aria-hidden="true" style={{ color: 'var(--text-muted)' }}>
             ↳
           </span>
           {finding.assessment === 'not_assessable' ? (
@@ -273,9 +333,7 @@ function OccurrenceRow({ finding }: { finding: FindingRow }) {
           )}
         </span>
       </td>
-      <td />
-      <td />
-      {/* The otherwise-empty title column carries the coverage-gap reason for this occurrence —
+      {/* The otherwise-empty Finding column carries the coverage-gap reason for this occurrence —
           each not_assessable finding can have a different reason, so it belongs on the row. */}
       <td style={cell}>
         {finding.assessment === 'not_assessable' && <GapReason reason={finding.assessmentReason} />}
@@ -306,13 +364,6 @@ function OccurrenceRow({ finding }: { finding: FindingRow }) {
   );
 }
 
-/** The system a rule belongs to — its first dotted segment (KAFKA.ACL.001 -> KAFKA). A quiet
- * mono chip, not a link: the FilterBar owns system filtering, and a link inside a row that already
- * links elsewhere is an ambiguous target. */
-function SystemChip({ ruleId }: { ruleId: string }) {
-  return <Chip mono>{systemOf(ruleId)}</Chip>;
-}
-
 /** Age = time since first_seen. Left-aligned (a date is read, not compared) but tabular so the
  * leading numeral lines up down the column; the absolute UTC first_seen rides the tooltip. */
 function Age({ label, iso }: { label: string; iso: string }) {
@@ -330,11 +381,39 @@ function ResourceCell({ finding }: { finding: FindingRow }) {
   if (!r) return <span style={{ color: 'var(--text-secondary)' }}>—</span>;
 
   return (
-    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 'var(--space-1)', minWidth: 0 }}>
-      <span style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-2xs)' }}>{r.kind}</span>
-      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-2xs)' }}>{r.name}</span>
+    // Every segment may shrink: an unshrinkable namespace like `deploy/dev/docker-compose.yml`
+    // widens the whole column and starves the titles two cells over. Kind keeps a floor (it is
+    // one short word); name and namespace truncate with their full values on the tooltip.
+    <span style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-1)', minWidth: 0, maxWidth: '100%' }}>
+      <span style={{ color: 'var(--text-muted)', fontSize: 'var(--text-2xs)', flexShrink: 0 }}>{r.kind}</span>
+      <span
+        title={r.name}
+        style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 'var(--text-2xs)',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          minWidth: 40,
+        }}
+      >
+        {r.name}
+      </span>
       {r.namespace && (
-        <span style={{ color: 'var(--text-secondary)', fontSize: 'var(--text-2xs)' }}>· {r.namespace}</span>
+        <span
+          title={r.namespace}
+          style={{
+            color: 'var(--text-muted)',
+            fontSize: 'var(--text-2xs)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            flexShrink: 2,
+            minWidth: 24,
+          }}
+        >
+          · {r.namespace}
+        </span>
       )}
     </span>
   );
@@ -348,7 +427,6 @@ function GapReason({ reason }: { reason: string | null }) {
     <span
       style={{
         display: 'block',
-        marginTop: '2px',
         fontSize: 'var(--text-2xs)',
         lineHeight: 'var(--leading-2xs)',
         color: 'var(--text-secondary)',

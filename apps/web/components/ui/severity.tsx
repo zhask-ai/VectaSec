@@ -95,11 +95,15 @@ export function SeverityBadge({ severity, variant = 'badge', count, className }:
         alignItems: 'center',
         gap: 'var(--space-1)',
         // The tint is decorative only — label + shape carry the meaning, so SC 1.4.11's 3:1
-        // does not apply to it. Badge bg/fg pairs still clear 4.5:1 for the text.
+        // does not apply to it. Badge bg/fg pairs still clear 4.5:1 for the text; the hairline
+        // is the solid at low alpha, keeping the pill crisp on both themes.
         background: isBadge ? `var(--sev-${severity}-bg)` : 'transparent',
+        border: isBadge
+          ? `1px solid color-mix(in srgb, var(--sev-${severity}-solid) 28%, transparent)`
+          : '1px solid transparent',
         color: `var(--sev-${severity}-fg)`,
-        padding: isBadge ? '2px var(--space-2)' : '0',
-        borderRadius: 'var(--radius-sm)',
+        padding: isBadge ? '1px var(--space-2)' : '0',
+        borderRadius: 'var(--radius-full)',
         fontSize: 'var(--text-2xs)',
         lineHeight: 'var(--leading-2xs)',
         fontWeight: 600,

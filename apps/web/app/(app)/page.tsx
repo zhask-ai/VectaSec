@@ -6,8 +6,10 @@ import { createClient } from '@/lib/supabase/server';
 import { SEVERITIES, SEVERITY_RANK, type Severity, type SeverityCounts } from '@/lib/types';
 import { postureScore, gradeColor } from '@/lib/posture';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
+import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconDatabase, IconFindings, IconIdentity, IconLayers } from '@/components/ui/icons';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatTile } from '@/components/ui/stat';
 import { StatusPill, type StatusTone } from '@/components/ui/status-pill';
@@ -237,7 +239,7 @@ export default async function OverviewPage() {
       meta={`${distinctTypes} system type${s(distinctTypes)} · ${connections.length} connection${s(connections.length)} · scanned ${relative(scannedAt)}`}
     >
       {/* 1 · Posture hero — the score, its trend, and the raw counts it came from */}
-      <Card>
+      <Card accent>
         <CardHeader>
           <CardTitle>Security posture</CardTitle>
           <CardMeta>{latestSnap ? `${trend.length} snapshot${s(trend.length)} · latest ${relative(latestSnap.taken_at)}` : 'awaiting scan history'}</CardMeta>
@@ -297,11 +299,11 @@ export default async function OverviewPage() {
         <CardHeader><CardTitle>Estate at a glance</CardTitle><CardMeta>as of last scan · {relative(scannedAt)}</CardMeta></CardHeader>
         <CardBody>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 'var(--space-5) var(--space-4)' }}>
-            <StatTile label="Systems covered" value={distinctTypes} sub={`${connections.length} connection${s(connections.length)}`} />
-            <StatTile label="Open findings" value={totalOpen} sub="across all systems" />
+            <StatTile label="Systems covered" value={distinctTypes} icon={<IconLayers size={13} />} sub={`${connections.length} connection${s(connections.length)}`} />
+            <StatTile label="Open findings" value={totalOpen} icon={<IconFindings size={13} />} sub="across all systems" />
             <StatTile label="Criticals" value={counts.critical} tone={counts.critical > 0 ? 'bad' : 'good'} sub="highest exploitability" />
-            <StatTile label="NHI identities" value={identities} tone={wildcard > 0 ? 'warn' : 'neutral'} sub={wildcard > 0 ? `${wildcard} with wildcard grant${s(wildcard)}` : 'service accounts & clients'} />
-            <StatTile label="Sensitive resources" value={sensitiveHigh} tone={sensitiveHigh > 0 ? 'warn' : 'neutral'} sub="named like PCI / PHI / secrets" />
+            <StatTile label="NHI identities" value={identities} tone={wildcard > 0 ? 'warn' : 'neutral'} icon={<IconIdentity size={13} />} sub={wildcard > 0 ? `${wildcard} with wildcard grant${s(wildcard)}` : 'service accounts & clients'} />
+            <StatTile label="Sensitive resources" value={sensitiveHigh} tone={sensitiveHigh > 0 ? 'warn' : 'neutral'} icon={<IconDatabase size={13} />} sub="named like PCI / PHI / secrets" />
             <StatTile label="Assessment coverage" value={coverage.value} unit={coverage.unit} tone={coverage.tone} sub={coverage.sub} />
           </div>
         </CardBody>
@@ -342,7 +344,7 @@ export default async function OverviewPage() {
           <CardBody pad={false}>
             <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
               {top.map((f) => (
-                <li key={f.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                <li key={f.id} className="vs-listrow" style={{ borderBottom: '1px solid var(--border)' }}>
                   <Link
                     href={`/findings/${f.id}` as Route}
                     style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-2) var(--space-4)', textDecoration: 'none' }}
@@ -355,7 +357,7 @@ export default async function OverviewPage() {
                       </span>
                     </span>
                     {LED_RULE.test(f.rule_id) && <Chip tone="high" title="Reachable attack path or exposed data">priority</Chip>}
-                    <span aria-hidden="true" style={{ color: 'var(--text-muted)' }}>→</span>
+                    <span aria-hidden="true" data-row-arrow style={{ color: 'var(--text-muted)' }}>→</span>
                   </Link>
                 </li>
               ))}
@@ -507,7 +509,7 @@ function scanTone(status: string): { tone: StatusTone; pulse: boolean } {
  * disappears on an empty or error state. */
 function Frame({ children, meta, active = false }: { children: ReactNode; meta?: string; active?: boolean }) {
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-5)', maxWidth: 1200 }}>
+    <Page>
       <AutoRefresh active={active} />
       <PageHeader
         title="Overview"
@@ -515,6 +517,6 @@ function Frame({ children, meta, active = false }: { children: ReactNode; meta?:
         meta={meta}
       />
       {children}
-    </div>
+    </Page>
   );
 }

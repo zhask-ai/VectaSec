@@ -219,17 +219,18 @@ function ToggleChip({
         display: 'inline-flex',
         alignItems: 'center',
         gap: 'var(--space-1)',
-        height: 'var(--row-compact)',
+        height: 26,
         padding: '0 var(--space-2)',
         // --border-interactive on every state: the outline is the chip's only structural edge and
-        // owes SC 1.4.11's 3:1, which --border (1.38:1) does not clear.
-        border: '1px solid var(--border-interactive)',
-        borderRadius: 'var(--radius-md)',
-        background: pressed ? 'var(--surface-raised)' : 'transparent',
-        boxShadow: pressed ? 'inset 0 0 0 1px var(--border-interactive)' : undefined,
+        // owes SC 1.4.11's 3:1, which --border (1.38:1) does not clear. The pressed accent border
+        // clears it too (checked pair: --accent on all three surfaces ≥3:1 both themes).
+        border: `1px solid ${pressed ? 'var(--accent)' : 'var(--border-interactive)'}`,
+        borderRadius: 'var(--radius-full)',
+        background: pressed ? 'var(--accent-soft)' : 'transparent',
         cursor: 'pointer',
         font: 'inherit',
         whiteSpace: 'nowrap',
+        transition: 'background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard)',
       }}
     >
       <span

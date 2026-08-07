@@ -6,6 +6,7 @@ import { createClient } from '@/lib/supabase/server';
 import { isSuperAdmin } from '@/lib/role';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 
@@ -46,7 +47,7 @@ export default async function AdminOrgsPage() {
   const orgs = (data ?? []) as OrgRow[];
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+    <Page>
       <PageHeader
         title="Organizations"
         description="Every organization on the platform — who created it, how many people are in it, and whether it is actually scanning."
@@ -109,6 +110,6 @@ export default async function AdminOrgsPage() {
           )}
         </CardBody>
       </Card>
-    </div>
+    </Page>
   );
 }

@@ -2,9 +2,11 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
+import { Page } from '@/components/ui/page';
 import { SeverityBadge } from '@/components/ui/severity';
 import { canEdit, getOwnMembership, getRoleInTenant } from '@/lib/role';
 import { getClaims } from '@/lib/supabase/server';
+import { AttackChain, chainFromClaims } from '../../attack-paths/_chain';
 import { NotAssessedBadge } from '../assessment';
 import { getActionContext, getFinding, type EvidenceItem, type FindingDetail, type TriageView } from '../data';
 import { shortId } from '../format';
@@ -62,7 +64,7 @@ export default async function FindingPage({ params }: PageProps<'/findings/[id]'
   const editable = canEdit(role);
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1200 }}>
+    <Page>
       <Link href="/findings" style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
         ← Findings
       </Link>
@@ -77,6 +79,7 @@ export default async function FindingPage({ params }: PageProps<'/findings/[id]'
               labels below, never fetched or invented. Renders nothing for rules with no
               specialised panel. */}
           <TypePanels finding={finding} />
+          <ChainCard finding={finding} />
           <Evidence items={finding.evidence} finding={finding} />
           <Triage finding={finding} editable={editable} />
           <Remediation finding={finding} />
@@ -108,7 +111,30 @@ export default async function FindingPage({ params }: PageProps<'/findings/[id]'
           </CardBody>
         </Card>
       </div>
-    </div>
+    </Page>
+  );
+}
+
+/** The hop-by-hop chain for attack-path findings — the same visualization the Attack paths board
+ * draws, so "Full evidence →" lands on the picture it promised. Parsed from the observation
+ * claims (the engine's cite grammar); when no claim parses, the card simply does not render —
+ * the Evidence list below remains the record either way. */
+function ChainCard({ finding }: { finding: FindingDetail }) {
+  if (!finding.ruleId.startsWith('ATTACKPATH.')) return null;
+  const chain = chainFromClaims(finding.evidence.map((e) => e.claim));
+  if (!chain || chain.hops.length === 0) return null;
+  return (
+    <Card accent>
+      <CardHeader>
+        <CardTitle>Attack chain</CardTitle>
+        <CardMeta>
+          {chain.hops.length} hop{chain.hops.length === 1 ? '' : 's'} · parsed from the cited observations below
+        </CardMeta>
+      </CardHeader>
+      <CardBody>
+        <AttackChain hops={chain.hops} note={chain.trailer} />
+      </CardBody>
+    </Card>
   );
 }
 

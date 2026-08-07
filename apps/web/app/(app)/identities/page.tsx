@@ -5,6 +5,8 @@ import { SEVERITY_RANK, type Severity } from '@/lib/types';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconBroadcast, IconForType, IconIdentity, IconKey, IconUnlock } from '@/components/ui/icons';
+import { Page } from '@/components/ui/page';
 import { PageHeader, SectionHeader } from '@/components/ui/page-header';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatTile } from '@/components/ui/stat';
@@ -187,14 +189,14 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
   if (openRes.error || lifecycleRes.error) {
     const e = openRes.error ?? lifecycleRes.error!;
     return (
-      <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+      <Page>
         <Card>
           <CardBody>
             <EmptyState tone="error" title="Could not load identity risk"
               description={`${e.message} — no identity can be shown as clean while its findings are unreadable.`} />
           </CardBody>
         </Card>
-      </div>
+      </Page>
     );
   }
 
@@ -297,18 +299,18 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
         meta={`${exactTotal} identities · ${systemsSet.size} systems`}
       />
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 'var(--space-3)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
         <KpiCard>
-          <StatTile label="Non-human identities" value={exactTotal} sub={`across ${systemsSet.size} system${systemsSet.size === 1 ? '' : 's'}`} />
+          <StatTile label="Non-human identities" value={exactTotal} icon={<IconIdentity size={13} />} sub={`across ${systemsSet.size} system${systemsSet.size === 1 ? '' : 's'}`} />
         </KpiCard>
         <KpiCard>
-          <StatTile label="Wildcard-granted" value={wildcardGranted} tone={wildcardGranted ? 'bad' : 'good'} sub="hold a blanket authorization" />
+          <StatTile label="Wildcard-granted" value={wildcardGranted} tone={wildcardGranted ? 'bad' : 'good'} icon={<IconKey size={13} />} sub="hold a blanket authorization" />
         </KpiCard>
         <KpiCard>
-          <StatTile label="External" value={externalCount} tone={externalCount ? 'warn' : 'good'} sub="principals from outside the estate" />
+          <StatTile label="External" value={externalCount} tone={externalCount ? 'warn' : 'good'} icon={<IconBroadcast size={13} />} sub="principals from outside the estate" />
         </KpiCard>
         <KpiCard>
-          <StatTile label="Shared / default" value={defaultCount} tone={defaultCount ? 'warn' : 'good'} sub="unattributable principals" />
+          <StatTile label="Shared / default" value={defaultCount} tone={defaultCount ? 'warn' : 'good'} icon={<IconUnlock size={13} />} sub="unattributable principals" />
         </KpiCard>
       </div>
 
@@ -418,7 +420,7 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
               }
             />
           ) : (
-            <Table density="default" caption="Non-human identities across all connected systems">
+            <Table density="relaxed" caption="Non-human identities across all connected systems">
               <THead>
                 <TR>
                   <TH width="22%">Identity</TH>
@@ -436,12 +438,19 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
                 {filtered.map((d) => (
                   <TR key={d.id}>
                     <TD>
-                      <span style={{ fontFamily: 'var(--font-mono)' }}>{leaf(d.name)}</span>
-                      {d.connector && (
-                        <span style={{ display: 'block', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
-                          {d.connector.type}/{d.connector.name}
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-2) 0' }}>
+                        <span aria-hidden="true" className="vs-icontile">
+                          <IconForType type={d.identityType || 'identity'} />
                         </span>
-                      )}
+                        <span style={{ display: 'grid', gap: 1, minWidth: 0 }}>
+                          <span style={{ fontFamily: 'var(--font-mono)' }}>{leaf(d.name)}</span>
+                          {d.connector && (
+                            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+                              {d.connector.type}/{d.connector.name}
+                            </span>
+                          )}
+                        </span>
+                      </span>
                     </TD>
                     <TD mono>{d.system || '—'}</TD>
                     <TD>
@@ -497,14 +506,10 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
 
 function KpiCard({ children }: { children: React.ReactNode }) {
   return (
-    <Card>
+    <Card hover>
       <CardBody>{children}</CardBody>
     </Card>
   );
-}
-
-function Page({ children }: { children: React.ReactNode }) {
-  return <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>{children}</div>;
 }
 
 function SetupState() {

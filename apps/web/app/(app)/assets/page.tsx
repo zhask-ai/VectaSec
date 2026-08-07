@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardBody, CardFooter, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconForType } from '@/components/ui/icons';
+import { Page as PageShell } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { SeverityBadge } from '@/components/ui/severity';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
@@ -252,33 +254,39 @@ export default async function AssetsPage({
                 {sorted.map((a) => (
                   <TR key={a.id}>
                     <TD>
-                      <span
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 'var(--space-2)',
-                          minWidth: 0,
-                        }}
-                      >
-                        <Link
-                          href={`/assets/${a.id}`}
-                          style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}
-                        >
-                          {a.name}
-                        </Link>
-                        {a.stale && <StaleChip />}
-                      </span>
-                      {a.namespace && (
-                        <span
-                          style={{
-                            marginLeft: 'var(--space-2)',
-                            color: 'var(--text-secondary)',
-                            fontSize: 'var(--text-2xs)',
-                          }}
-                        >
-                          {a.namespace}
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-2) 0' }}>
+                        <span aria-hidden="true" className="vs-icontile">
+                          <IconForType type={a.kind} />
                         </span>
-                      )}
+                        <span style={{ display: 'grid', gap: 1, minWidth: 0 }}>
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 'var(--space-2)',
+                              minWidth: 0,
+                            }}
+                          >
+                            <Link
+                              href={`/assets/${a.id}`}
+                              style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}
+                            >
+                              {a.name}
+                            </Link>
+                            {a.stale && <StaleChip />}
+                          </span>
+                          {a.namespace && (
+                            <span
+                              style={{
+                                color: 'var(--text-secondary)',
+                                fontSize: 'var(--text-2xs)',
+                              }}
+                            >
+                              {a.namespace}
+                            </span>
+                          )}
+                        </span>
+                      </span>
                     </TD>
                     <TD>
                       {a.connections ? (
@@ -330,14 +338,14 @@ export default async function AssetsPage({
 
 function Page({ children, meta }: { children: React.ReactNode; meta?: string }) {
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+    <PageShell>
       <PageHeader
         title="Assets"
         description="The inventory discovery built from your connected systems — every resource a scan has returned."
         meta={meta}
       />
       {children}
-    </div>
+    </PageShell>
   );
 }
 

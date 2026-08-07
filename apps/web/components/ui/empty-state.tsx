@@ -79,17 +79,30 @@ export function EmptyState({
         style={{
           display: 'grid',
           placeItems: 'center',
-          width: 32,
-          height: 32,
+          width: 44,
+          height: 44,
           borderRadius: 'var(--radius-full)',
-          border: `1px solid ${isError ? 'var(--sev-critical-solid)' : 'var(--border-interactive)'}`,
-          background: isError ? 'var(--sev-critical-bg)' : undefined,
-          color: mark.color,
-          fontSize: 'var(--text-base)',
-          lineHeight: 1,
+          border: `1px dashed ${isError ? 'var(--sev-critical-solid)' : 'var(--border-strong)'}`,
+          padding: 4,
         }}
       >
-        {mark.glyph}
+        <span
+          style={{
+            display: 'grid',
+            placeItems: 'center',
+            width: '100%',
+            height: '100%',
+            borderRadius: 'var(--radius-full)',
+            border: `1px solid ${isError ? 'var(--sev-critical-solid)' : 'var(--border-interactive)'}`,
+            background: isError ? 'var(--sev-critical-bg)' : 'var(--surface-raised)',
+            boxShadow: 'var(--shadow-sm)',
+            color: mark.color,
+            fontSize: 'var(--text-base)',
+            lineHeight: 1,
+          }}
+        >
+          {mark.glyph}
+        </span>
       </span>
       <span className="vs-visually-hidden">{mark.label}.</span>
 

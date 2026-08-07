@@ -49,7 +49,7 @@ export function ConnectDrawer({ label = '+ Connect a system' }: { label?: string
 
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)} style={primaryButtonStyle}>
+      <button type="button" onClick={() => setOpen(true)} className="vs-button" data-variant="primary" style={primaryButtonStyle}>
         {label}
       </button>
 
@@ -89,6 +89,8 @@ export function ConnectDrawer({ label = '+ Connect a system' }: { label?: string
                   form={FORM_ID}
                   disabled={pending}
                   aria-busy={pending || undefined}
+                  className="vs-button"
+                  data-variant="primary"
                   style={{ ...primaryButtonStyle, opacity: pending ? 0.55 : 1 }}
                 >
                   {pending ? 'Connecting…' : `Connect ${picked.label}`}
@@ -367,7 +369,7 @@ const primaryButtonStyle: React.CSSProperties = {
   fontWeight: 600,
   background: 'var(--accent)',
   color: 'var(--accent-fg)',
-  borderColor: 'var(--border-interactive)',
+  borderColor: 'var(--accent)',
 };
 
 const pickRowStyle: React.CSSProperties = {

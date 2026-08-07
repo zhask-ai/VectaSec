@@ -169,12 +169,14 @@ export function IdentityDetailButton({ detail }: { detail: IdentityDetail }) {
           )}
         </Section>
 
-        {/* Blast radius — reach derived from grant scope, honest about wildcards. */}
+        {/* Blast radius — reach derived from grant scope, honest about wildcards. The graph is
+            the glance (identity → what its grants land on); the list below stays the record. */}
         <Section title="Blast radius" meta="inferred from grant scope">
           {reached.length === 0 ? (
             <p style={emptyLine}>Nothing reachable from recorded grants.</p>
           ) : (
             <>
+              <ReachGraph name={leaf(d.name)} identityType={d.identityType} reached={reached} worst={d.worst} />
               <ul style={listReset}>
                 {reached.map((r) => (
                   <li key={r.resource} style={rowItem}>
@@ -216,6 +218,97 @@ export function IdentityDetailButton({ detail }: { detail: IdentityDetail }) {
         </Section>
       </Drawer>
     </>
+  );
+}
+
+/* — the reach graph — */
+
+/** Identity → reached resources, in the console's graph language (dot canvas, rounded nodes,
+ * directional flow). Wildcard edges are dashed and hot because their reach is a PATTERN, not
+ * the drawn set — the note under the list says so in words. Capped; the list is complete. */
+const REACH_CAP = 7;
+
+function ReachGraph({
+  name,
+  identityType,
+  reached,
+  worst,
+}: {
+  name: string;
+  identityType: string;
+  reached: Reached[];
+  worst: Severity | null;
+}) {
+  const shown = reached.slice(0, REACH_CAP);
+  const W = 470;
+  const idW = 138;
+  const idH = 46;
+  const tW = 196;
+  const tH = 36;
+  const gapY = 10;
+  const pad = 14;
+  const rightX = W - pad - tW;
+  const colH = shown.length * tH + (shown.length - 1) * gapY;
+  const H = Math.max(idH, colH) + pad * 2;
+  const idY = pad + (Math.max(idH, colH) - idH) / 2;
+  const startY = pad + (Math.max(idH, colH) - colH) / 2;
+  const ring = worst ? `var(--sev-${worst}-solid)` : 'var(--accent)';
+
+  return (
+    <div className="vs-canvas" style={{ marginBottom: 'var(--space-3)', overflowX: 'auto' }}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ display: 'block', width: '100%', minWidth: 420, height: 'auto' }} aria-hidden="true" focusable="false">
+        <defs>
+          <marker id="vs-reach-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+            <path d="M 0 1 L 7 4 L 0 7 z" fill="var(--graph-edge)" />
+          </marker>
+        </defs>
+
+        {shown.map((r, i) => {
+          const y = startY + i * (tH + gapY);
+          const x1 = pad + idW;
+          const y1 = idY + idH / 2;
+          const x2 = rightX;
+          const y2 = y + tH / 2;
+          const bend = 40;
+          const d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`;
+          const hot = r.wildcard;
+          return (
+            <g key={r.resource}>
+              <path
+                d={d}
+                fill="none"
+                stroke={hot ? 'var(--sev-critical-solid)' : 'var(--graph-edge)'}
+                strokeOpacity={hot ? 0.7 : 1}
+                strokeWidth="1.25"
+                strokeDasharray={hot ? '5 4' : undefined}
+                markerEnd="url(#vs-reach-arrow)"
+              />
+              <path className="vs-gedge-flow" d={d} fill="none" stroke={hot ? 'var(--sev-critical-solid)' : 'var(--accent)'} strokeOpacity="0.5" strokeWidth="1.5" />
+              <rect x={x2} y={y} width={tW} height={tH} rx={10} fill="var(--surface-raised)" stroke={hot ? 'var(--sev-critical-solid)' : 'var(--border-strong)'} strokeDasharray={hot ? '5 4' : undefined} />
+              <text x={x2 + 12} y={y + tH / 2 - 2} fontSize="10.5" fontWeight={600} fill="var(--text-primary)" fontFamily="var(--font-mono)">
+                {r.resource.length > 24 ? `${r.resource.slice(0, 23)}…` : r.resource}
+              </text>
+              <text x={x2 + 12} y={y + tH / 2 + 11} fontSize="9" fill={hot ? 'var(--sev-critical-fg)' : 'var(--text-muted)'}>
+                {hot ? 'wildcard — pattern, not a list' : r.dataClasses.length ? r.dataClasses.join(' · ') : 'reached by grant'}
+              </text>
+            </g>
+          );
+        })}
+
+        <rect x={pad} y={idY} width={idW} height={idH} rx={12} fill="var(--surface-raised)" stroke={ring} strokeWidth="1.5" style={{ filter: 'drop-shadow(0 2px 8px rgb(0 0 0 / 0.1))' }} />
+        <text x={pad + 12} y={idY + idH / 2 - 2} fontSize="11" fontWeight={700} fill="var(--text-primary)" fontFamily="var(--font-mono)">
+          {name.length > 15 ? `${name.slice(0, 14)}…` : name}
+        </text>
+        <text x={pad + 12} y={idY + idH / 2 + 11} fontSize="9" fill="var(--text-muted)">
+          {identityType || 'identity'}
+        </text>
+      </svg>
+      {reached.length > REACH_CAP && (
+        <p style={{ margin: 'var(--space-1) var(--space-3) var(--space-2)', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+          Showing {REACH_CAP} of {reached.length} — the list below is complete.
+        </p>
+      )}
+    </div>
   );
 }
 

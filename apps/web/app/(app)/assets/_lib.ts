@@ -100,17 +100,17 @@ export function clamp(text: string, max: number): string {
  * it is arithmetic, and arithmetic that decides whether nodes overlap is worth checking.
  */
 
-export const NODE_W = 168;
-export const NODE_H = 40;
-export const GAP_Y = 12;
+export const NODE_W = 196;
+export const NODE_H = 56;
+export const GAP_Y = 16;
 /** Room for the curve and its edge-kind label. */
-export const COL_GAP = 88;
-export const PAD = 10;
+export const COL_GAP = 128;
+export const PAD = 28;
 /** Past ~10 a side the fan is unreadable and the table is the better tool. */
 export const MAX_PER_SIDE = 10;
 
-export const GRAPH_WIDTH = NODE_W * 3 + COL_GAP * 2;
-export const COL_X = { in: 0, focus: NODE_W + COL_GAP, out: (NODE_W + COL_GAP) * 2 };
+export const GRAPH_WIDTH = NODE_W * 3 + COL_GAP * 2 + PAD * 2;
+export const COL_X = { in: PAD, focus: PAD + NODE_W + COL_GAP, out: PAD + (NODE_W + COL_GAP) * 2 };
 
 export type Placed = { x: number; y: number };
 
@@ -121,6 +121,59 @@ export type GraphLayout = {
   outbound: Placed[];
   focus: Placed;
 };
+
+/* ── Multi-hop (explorer) layout ──────────────────────────────────────────
+ * Columns by signed hop distance from the focus: … -2, -1, [0], +1, +2 …
+ * Negative = reaches the focus (inbound side), positive = reached by it. Pure and capped:
+ * each column shows at most MAX_PER_SIDE nodes and reports its true total, so the SVG can
+ * say what it dropped instead of silently pretending completeness. */
+
+export type LayeredNode = { id: string; kind: string; name: string; stale: boolean; d: number };
+
+export type LayeredLayout = {
+  width: number;
+  height: number;
+  /** Placed positions per node id — only for nodes that made the per-column cap. */
+  pos: Map<string, Placed>;
+  cols: { d: number; x: number; shown: number; total: number }[];
+};
+
+export function layoutLayers(nodes: LayeredNode[]): LayeredLayout {
+  const byCol = new Map<number, LayeredNode[]>();
+  for (const n of nodes) {
+    const arr = byCol.get(n.d);
+    if (arr) arr.push(n);
+    else byCol.set(n.d, [n]);
+  }
+  if (!byCol.has(0)) byCol.set(0, []);
+  const ds = [...byCol.keys()].sort((a, b) => a - b);
+
+  const shownByCol = ds.map((d) => {
+    const all = byCol.get(d)!;
+    // Focus column is never capped (it holds exactly the focus); risky-first would need
+    // risk here — name order keeps the layout pure and stable instead.
+    const shown = d === 0 ? all : all.slice(0, MAX_PER_SIDE);
+    return { d, all, shown };
+  });
+
+  const rows = Math.max(...shownByCol.map((c) => c.shown.length), 1);
+  const innerH = rows * NODE_H + (rows - 1) * GAP_Y;
+  const width = PAD * 2 + ds.length * NODE_W + (ds.length - 1) * COL_GAP;
+
+  const pos = new Map<string, Placed>();
+  const cols = shownByCol.map(({ d, all, shown }, idx) => {
+    const x = PAD + idx * (NODE_W + COL_GAP);
+    const colH = shown.length * NODE_H + (shown.length - 1) * GAP_Y;
+    const startY = PAD + (innerH - colH) / 2;
+    shown.forEach((n, i) => pos.set(n.id, { x, y: startY + i * (NODE_H + GAP_Y) }));
+    if (d === 0 && shown.length === 0) {
+      // The focus is placed by the caller at the column centre.
+    }
+    return { d, x, shown: shown.length, total: all.length };
+  });
+
+  return { width, height: innerH + PAD * 2, pos, cols };
+}
 
 /** Pure layout: y-positions per column, each column centred as a group so the focus node sits
  * on the visual axis however lopsided the two sides are. */

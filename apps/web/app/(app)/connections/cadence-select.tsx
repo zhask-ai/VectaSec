@@ -4,10 +4,14 @@ import { useActionState } from 'react';
 
 import { setCadenceAction, type ActionState } from './actions';
 
-/* The recurring-scan cadence control, living next to the cadence display in the Last scan
- * cell. A <form> around a Server Action like every other mutation here: works without JS,
- * re-verifies role and row ownership server-side, nothing optimistic — the engine owns the
- * write and the page re-renders from the revalidated read.
+/* The recurring-scan cadence control, living in the Last scan cell. A <form> around a Server
+ * Action like every other mutation here: works without JS, re-verifies role and row ownership
+ * server-side, nothing optimistic — the engine owns the write and the page re-renders from the
+ * revalidated read.
+ *
+ * Visually it is now a quiet chip-select that AUTO-SUBMITS on change (the tenant switcher's
+ * pattern) — the old select + "Set" button pair took two clicks and a full control row for a
+ * setting most rows never touch. A hidden submit keeps the no-JS path posting.
  *
  * The select is uncontrolled with defaultValue + key: after the action lands, revalidatePath
  * re-renders the row with the new `current`, and the key remounts the select so the DOM state
@@ -36,7 +40,7 @@ export function CadenceSelect({
   return (
     <form
       action={formAction}
-      style={{ display: 'flex', gap: 'var(--space-1)', alignItems: 'center', flexWrap: 'wrap', marginTop: '2px' }}
+      style={{ display: 'flex', gap: 'var(--space-1)', alignItems: 'center', flexWrap: 'wrap', marginTop: 2 }}
     >
       <input type="hidden" name="connectionId" value={connectionId} />
       <label htmlFor={`cadence-${connectionId}`} className="vs-visually-hidden">
@@ -49,15 +53,8 @@ export function CadenceSelect({
         defaultValue={currentValue}
         disabled={pending}
         title="How often this connection is rescanned automatically"
-        style={{
-          border: '1px solid var(--border-interactive)',
-          borderRadius: 'var(--radius-md)',
-          background: 'var(--bg)',
-          color: 'var(--text-primary)',
-          fontSize: 'var(--text-2xs)',
-          padding: '0 var(--space-1)',
-          height: 'var(--row-compact)',
-        }}
+        className="vs-chipselect"
+        onChange={(e) => e.currentTarget.form?.requestSubmit()}
       >
         {CHOICES.map((c) => (
           <option key={c.value} value={c.value}>
@@ -65,34 +62,26 @@ export function CadenceSelect({
           </option>
         ))}
       </select>
-      <button
-        type="submit"
-        disabled={pending}
-        aria-busy={pending || undefined}
-        style={{
-          border: '1px solid var(--border-interactive)',
-          borderRadius: 'var(--radius-md)',
-          background: 'var(--surface-raised)',
-          color: 'var(--text-primary)',
-          fontSize: 'var(--text-2xs)',
-          fontWeight: 500,
-          padding: '0 var(--space-2)',
-          height: 'var(--row-compact)',
-          cursor: 'pointer',
-          whiteSpace: 'nowrap',
-          opacity: pending ? 0.55 : 1,
-        }}
-      >
-        {pending ? 'Saving…' : 'Set'}
-      </button>
-      {state && (
+      {/* No-JS fallback: without an onChange runtime this is the only way to post. Hidden from
+          pointer users (the select submits itself), visible to keyboard flows via focus. */}
+      <noscript>
+        <button type="submit" className="vs-actionbtn">
+          Set
+        </button>
+      </noscript>
+      {pending && (
+        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }} aria-live="polite">
+          Saving…
+        </span>
+      )}
+      {state && !pending && !state.ok && (
         <span
           role="status"
           style={{
             flexBasis: '100%',
             fontSize: 'var(--text-2xs)',
             lineHeight: 'var(--leading-2xs)',
-            color: state.ok ? 'var(--text-secondary)' : 'var(--sev-critical-fg)',
+            color: 'var(--sev-critical-fg)',
           }}
         >
           {state.message}

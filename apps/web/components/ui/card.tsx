@@ -2,30 +2,35 @@ import type { ReactNode, CSSProperties } from 'react';
 
 /* Card. A container, not a layout engine — it does not manage grids or its own width.
  *
- * Elevation is a HAIRLINE plus a whisper of shadow, never a heavy drop. `raised` (popovers,
- * selected rows) lifts to --surface-raised and the stronger --shadow-popover; the inversion
- * between light (border+shadow) and dark (lighter surface) is already encoded in the tokens, so
- * one prop works in both themes. Radius --radius-lg keeps cards a touch softer than the sharp
- * controls without reading "consumer". */
+ * Elevation is a HAIRLINE plus a layered, low-alpha shadow, never a heavy drop. The visual
+ * treatment (resting / raised / hover-lift / accent hairline) lives on `.vs-card` in globals.css
+ * because :hover cannot be expressed inline; this component only chooses the data-attributes.
+ *
+ *   raised — popovers, selected rows: --surface-raised + the popover shadow.
+ *   hover  — cards that ACT like links or summaries (KPI tiles, asset cards): lift on pointer.
+ *   accent — the one hero band a page may have: a gradient hairline across the top.
+ */
 
 export function Card({
   children,
   raised = false,
+  hover = false,
+  accent = false,
   style,
 }: {
   children: ReactNode;
   raised?: boolean;
+  hover?: boolean;
+  accent?: boolean;
   style?: CSSProperties;
 }) {
   return (
     <section
-      style={{
-        background: raised ? 'var(--surface-raised)' : 'var(--surface)',
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius-lg)',
-        boxShadow: raised ? 'var(--shadow-popover)' : 'var(--shadow-sm)',
-        ...style,
-      }}
+      className="vs-card"
+      data-raised={raised || undefined}
+      data-hover={hover || undefined}
+      data-accent={accent || undefined}
+      style={style}
     >
       {children}
     </section>
@@ -57,6 +62,7 @@ export function CardTitle({ children }: { children: ReactNode }) {
         fontSize: 'var(--text-lg)',
         lineHeight: 'var(--leading-lg)',
         fontWeight: 600,
+        letterSpacing: '-0.011em',
         color: 'var(--text-primary)',
       }}
     >
@@ -95,6 +101,8 @@ export function CardFooter({ children }: { children: ReactNode }) {
         borderTop: '1px solid var(--border)',
         fontSize: 'var(--text-xs)',
         color: 'var(--text-secondary)',
+        background: 'color-mix(in srgb, var(--bg) 45%, transparent)',
+        borderRadius: '0 0 var(--radius-lg) var(--radius-lg)',
       }}
     >
       {children}

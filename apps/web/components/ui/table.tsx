@@ -22,19 +22,26 @@ export function Table({
   children,
   density = 'default',
   caption,
+  fixed = false,
 }: {
   children: ReactNode;
   density?: Density;
   /** Visually hidden but read aloud — a bare grid of cells is meaningless to a screen reader. */
   caption?: string;
+  /** table-layout: fixed — column widths obey the TH width props instead of max-content, so one
+   * long unbreakable mono string cannot bully the readable columns into ellipsis. Opt-in: it
+   * requires the header row to state widths for the columns that matter. */
+  fixed?: boolean;
 }) {
   return (
     <div style={{ overflowX: 'auto', width: '100%' }}>
       <table
+        className="vs-table"
         data-density={density}
         style={
           {
             width: '100%',
+            tableLayout: fixed ? 'fixed' : undefined,
             borderCollapse: 'collapse',
             fontSize: 'var(--text-xs)',
             lineHeight: 'var(--leading-xs)',
@@ -57,7 +64,9 @@ export function THead({ children }: { children: ReactNode }) {
         position: 'sticky',
         top: 0,
         zIndex: 1,
-        background: 'var(--surface)',
+        background: 'color-mix(in srgb, var(--surface) 92%, transparent)',
+        backdropFilter: 'blur(6px)',
+        WebkitBackdropFilter: 'blur(6px)',
       }}
     >
       {children}

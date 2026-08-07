@@ -4,6 +4,7 @@ import { createClient, getVerifiedUser } from '@/lib/supabase/server';
 import { isSuperAdmin } from '@/lib/role';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
@@ -59,7 +60,7 @@ export default async function AdminUsersPage() {
   ).length;
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+    <Page>
       <AutoRefresh active />
       <PageHeader
         title="Users"
@@ -160,6 +161,6 @@ export default async function AdminUsersPage() {
           )}
         </CardBody>
       </Card>
-    </div>
+    </Page>
   );
 }

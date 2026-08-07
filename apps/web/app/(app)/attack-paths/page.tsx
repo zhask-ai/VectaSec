@@ -7,10 +7,27 @@ import { Card, CardBody, CardFooter, CardHeader, CardMeta, CardTitle } from '@/c
 import { Chip } from '@/components/ui/chip';
 import { DataClassChips } from '@/components/ui/data-class';
 import { EmptyState } from '@/components/ui/empty-state';
+import {
+  IconBroadcast,
+  IconDatabase,
+  IconKey,
+  IconLock,
+  IconRoutePath,
+} from '@/components/ui/icons';
+import { Page } from '@/components/ui/page';
 import { PageHeader, SectionHeader } from '@/components/ui/page-header';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatTile } from '@/components/ui/stat';
 import { StatusPill } from '@/components/ui/status-pill';
+import {
+  AttackChain,
+  classifyText,
+  dataClassesFrom,
+  hopsFromClaim,
+  makeHop,
+  type Hop,
+  type HopKind,
+} from './_chain';
 
 /* Attack paths — VectaSec's flagship differentiator, the toxic-combination correlation engine made
  * visible. A flat scanner emits N independent findings; the value here is the CORRELATION: when an
@@ -18,9 +35,16 @@ import { StatusPill } from '@/components/ui/status-pill';
  * graph, that co-occurrence is an exploitable path, not three tolerable weaknesses.
  *
  * Reads under RLS like every console page. It selects `findings` where rule_id like 'ATTACKPATH.%',
- * joins their `observations` (each observation's claim/source_ref names a hop) and the `resources`
- * they cite for context, then renders each path HOP-BY-HOP as a visual chain:
+ * joins their `observations` (each observation's claim carries the CITED hop-by-hop chain in the
+ * engine's `[kind 'name' (ext_id): signal] -> …` grammar — graph_engine.Hop.cite()) and renders
+ * each path as a visual chain of hop cards on an animated rail:
  *   exposed surface  →  over-privileged NHI  →  sensitive data
+ *
+ * THE PARSER MATTERS: an observation's claim is the WHOLE chain, and `source_ref` is a jsonb
+ * OBJECT ({attack_path, anchor, hops, factors}). The first cut of this page treated source_ref as
+ * a string and each observation as one hop — which rendered `[object Object]` chips and three
+ * identical cards per path. Hops now come from parsing the cite grammar; identical claims from
+ * repeated scans dedupe to one chain.
  *
  * HONESTY (DESIGN law 3): the engine correlates AUTHORIZATION + HOSTING within a single scan. It does
  * not prove network lineage or runtime reachability — deep multi-hop lineage awaits the CDC
@@ -51,26 +75,18 @@ type FindingRow = {
   created_at?: string | null;
 };
 
+/** source_ref is a jsonb OBJECT for attack-path observations ({attack_path, anchor, hops,
+ * factors}) and free-form for everything else. Typed as unknown so nothing can String() it. */
 type ObservationRow = {
   id: string;
   finding_id: string;
   claim: string | null;
-  source_ref: string | null;
+  source_ref: unknown;
 };
 
 type ResourceRow = { id: string; ext_id: string; name: string; kind: string; labels: Labels };
 
-type HopKind = 'exposure' | 'privilege' | 'sensitive' | 'generic';
 type ChainSource = 'observations' | 'raw' | 'fallback';
-
-type Hop = {
-  kind: HopKind;
-  factor: string;
-  detail: string;
-  cited: string;
-  dataClasses: string[];
-  sensitivity: string;
-};
 
 type AttackPath = {
   id: string;
@@ -113,21 +129,6 @@ const ARCHETYPE: Record<string, { label: string; blurb: string; factors: string[
   },
 };
 
-const FACTOR_LABEL: Record<HopKind, string> = {
-  exposure: 'Exposed surface',
-  privilege: 'Over-privileged NHI',
-  sensitive: 'Sensitive data',
-  generic: 'Factor',
-};
-
-const KIND_RANK: Record<HopKind, number> = { exposure: 0, privilege: 1, sensitive: 2, generic: 3 };
-const KIND_COLOR: Record<HopKind, string> = {
-  exposure: 'var(--sev-high-fg)',
-  privilege: 'var(--sev-medium-fg)',
-  sensitive: 'var(--sev-critical-fg)',
-  generic: 'var(--text-secondary)',
-};
-
 const GROUPS: Severity[] = ['critical', 'high', 'medium', 'low', 'info'];
 const GROUP_LABEL: Record<Severity, string> = {
   critical: 'Critical',
@@ -141,7 +142,8 @@ const GROUP_LABEL: Record<Severity, string> = {
 
 function lbl(labels: Labels, k: string): string {
   const v = labels ? labels[k] : undefined;
-  return v == null ? '' : String(v);
+  if (v == null) return '';
+  return typeof v === 'string' ? v : typeof v === 'number' || typeof v === 'boolean' ? String(v) : '';
 }
 function ruleSuffix(ruleId: string): string {
   return String(ruleId ?? '').split('.').pop() || String(ruleId ?? '');
@@ -156,47 +158,29 @@ function prettyKey(key: string): string {
   return key.replace(/_/g, ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase());
 }
 
-function classifyHop(text: string): HopKind {
-  const t = text.toLowerCase();
-  if (/(wildcard|over-?priv|privileg|grant|permission|\bacl\b|\brole\b|scope|authoriz|admin|\*)/.test(t)) return 'privilege';
-  if (/(expos|public|internet|external|reachable|ingress|listener|endpoint|anonymous|unauth|\bopen\b)/.test(t)) return 'exposure';
-  if (/(sensitive|classif|pci|phi|pii|secret|confidential|payment|personal|financial)/.test(t)) return 'sensitive';
-  return 'generic';
-}
-
-function dataClassesFrom(text: string): string[] {
-  const t = text.toLowerCase();
-  const out: string[] = [];
-  if (/pci|payment|\bcard\b/.test(t)) out.push('pci');
-  if (/phi|health|patient/.test(t)) out.push('phi');
-  if (/pii|personal|customer|\bemail\b|\bssn\b/.test(t)) out.push('pii');
-  if (/secret|token|\bkey\b|credential/.test(t)) out.push('secrets');
-  if (/financial|invoice|ledger|transaction/.test(t)) out.push('financial');
-  if (/\bauth\b|oauth|session/.test(t)) out.push('auth');
-  return [...new Set(out)];
-}
-
-function makeHop(text: string, ref: string, detail?: string): Hop {
-  const basis = `${text} ${ref}`;
-  const kind = classifyHop(basis);
-  return {
-    kind,
-    factor: FACTOR_LABEL[kind],
-    detail: (detail ?? text) || ref || '—',
-    cited: ref,
-    dataClasses: kind === 'sensitive' ? dataClassesFrom(basis) : [],
-    sensitivity: 'high',
-  };
-}
-
-function hopFromObservation(o: ObservationRow): Hop {
-  const claim = o.claim ?? '';
-  const ref = o.source_ref ?? '';
-  return makeHop(claim || ref, ref, claim || undefined);
+/** Human text out of an unknown value WITHOUT ever minting "[object Object]": strings pass,
+ * objects yield their most name-like field, everything else stringifies scalar-wise. */
+function refText(v: unknown): string {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (Array.isArray(v)) return v.map(refText).filter(Boolean).join(', ');
+  if (typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    for (const k of ['anchor', 'name', 'resource', 'ext_id', 'ref', 'target', 'attack_path']) {
+      if (typeof o[k] === 'string' && o[k]) return o[k] as string;
+    }
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return '';
+    }
+  }
+  return '';
 }
 
 /** Best-effort structured chain out of the finding's raw evidence blob (shape unknown, so tolerant). */
-function hopsFromRaw(raw: unknown): { text: string; ref: string }[] | null {
+function hopsFromRaw(raw: unknown): Hop[] | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
   const cand = r.chain ?? r.hops ?? r.path ?? r.steps;
@@ -206,14 +190,15 @@ function hopsFromRaw(raw: unknown): { text: string; ref: string }[] | null {
       if (typeof el === 'string') return { text: el, ref: '' };
       if (el && typeof el === 'object') {
         const o = el as Record<string, unknown>;
-        const text = String(o.claim ?? o.label ?? o.factor ?? o.description ?? o.step ?? '');
-        const ref = String(o.resource ?? o.source_ref ?? o.ref ?? o.target ?? o.name ?? '');
+        const text = refText(o.claim ?? o.label ?? o.factor ?? o.description ?? o.step ?? '');
+        const ref = refText(o.resource ?? o.source_ref ?? o.ref ?? o.target ?? o.name ?? '');
         return { text, ref };
       }
-      return { text: String(el), ref: '' };
+      return { text: refText(el), ref: '' };
     })
     .filter((h) => h.text || h.ref);
-  return hops.length ? hops : null;
+  if (!hops.length) return null;
+  return hops.map((h) => makeHop(classifyText(`${h.text} ${h.ref}`), h.text, { ref: h.ref }));
 }
 
 function archetypeHop(factor: string, kind: HopKind, res: ResourceRow | undefined, f: FindingRow): Hop {
@@ -222,7 +207,9 @@ function archetypeHop(factor: string, kind: HopKind, res: ResourceRow | undefine
     kind,
     factor,
     detail: `${factor} — from the rule definition`,
-    cited,
+    citedKind: res?.kind ?? '',
+    citedName: cited,
+    citedRef: res?.ext_id ?? '',
     dataClasses: kind === 'sensitive' ? dataClassesFrom(`${factor} ${cited} ${lbl(f.labels, 'data_classes')}`) : [],
     sensitivity: 'high',
   };
@@ -240,21 +227,30 @@ function buildPath(f: FindingRow, obs: ObservationRow[], resById: Map<string, Re
   let chainSource: ChainSource = 'fallback';
   let chainNote: string | null = null;
 
-  if (obs.length) {
-    // Primary path: each observation IS a hop. Reorder into the canonical attack direction only when
-    // every hop classified cleanly; otherwise keep recorded order and say the roles are inferred.
-    hops = obs.map(hopFromObservation);
-    const allKnown = hops.every((h) => h.kind !== 'generic');
-    if (allKnown && hops.length > 1) {
-      hops = [...hops].sort((a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind]);
-    } else if (!allKnown) {
-      chainNote = 'Hops are shown in the order recorded; factor roles are inferred from the evidence text, not asserted by the engine.';
+  // Repeated scans append identical observations; the chain is the same chain.
+  const claims = [...new Set(obs.map((o) => o.claim ?? '').filter(Boolean))];
+
+  for (const claim of claims) {
+    const parsed = hopsFromClaim(claim);
+    if (parsed) {
+      hops = parsed.hops;
+      chainSource = 'observations';
+      chainNote = parsed.trailer;
+      break; // one cited chain per finding; first parseable claim wins
     }
+  }
+
+  if (!hops.length && claims.length) {
+    // Claims exist but none carried the cite grammar — each claim becomes one hop, old-style.
+    hops = claims.map((c) => makeHop(classifyText(c), c, {}));
     chainSource = 'observations';
-  } else {
+    chainNote = 'Hops are shown in the order recorded; factor roles are inferred from the evidence text, not asserted by the engine.';
+  }
+
+  if (!hops.length) {
     const rawHops = hopsFromRaw(f.raw);
     if (rawHops) {
-      hops = rawHops.map((rh) => makeHop(rh.text, rh.ref));
+      hops = rawHops;
       chainSource = 'raw';
       chainNote = 'Chain read from the finding’s recorded evidence rather than discrete observations.';
     } else if (arch) {
@@ -262,7 +258,7 @@ function buildPath(f: FindingRow, obs: ObservationRow[], resById: Map<string, Re
       chainSource = 'fallback';
       chainNote = 'No per-hop evidence was recorded on this finding — the chain is reconstructed from the rule’s definition and is not proven hop-by-hop.';
     } else {
-      hops = [makeHop(f.rule_id, resourceName)];
+      hops = [makeHop('generic', f.rule_id, { ref: resourceName })];
       chainSource = 'fallback';
       chainNote = 'No structured chain was recorded for this finding.';
     }
@@ -367,33 +363,44 @@ export default async function AttackPathsPage() {
       />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 'var(--space-3)' }}>
-        <KpiCard>
-          <StatTile label="Attack paths" value={totalCount} tone={totalCount ? 'bad' : 'good'} sub="toxic combinations correlated" />
-        </KpiCard>
-        <KpiCard>
-          <StatTile
-            label="Critical — full triad"
-            value={triadCount}
-            tone={triadCount ? 'bad' : 'good'}
-            sub="exposed → over-privileged NHI → sensitive"
-          />
-        </KpiCard>
-        <KpiCard>
-          <StatTile
-            label="Public + over-privileged"
-            value={byType.PUBLIC_OVERPRIVILEGED ?? 0}
-            tone={byType.PUBLIC_OVERPRIVILEGED ? 'warn' : 'good'}
-            sub="exposed surface, wildcard grant"
-          />
-        </KpiCard>
-        <KpiCard>
-          <StatTile
-            label="Sensitive on exposed"
-            value={byType.SENSITIVE_ON_EXPOSED ?? 0}
-            tone={byType.SENSITIVE_ON_EXPOSED ? 'warn' : 'good'}
-            sub="sensitive data, reachable surface"
-          />
-        </KpiCard>
+        <Card hover>
+          <CardBody>
+            <StatTile label="Attack paths" value={totalCount} tone={totalCount ? 'bad' : 'good'} icon={<IconRoutePath size={13} />} sub="toxic combinations correlated" />
+          </CardBody>
+        </Card>
+        <Card hover>
+          <CardBody>
+            <StatTile
+              label="Critical — full triad"
+              value={triadCount}
+              tone={triadCount ? 'bad' : 'good'}
+              icon={<IconLock size={13} />}
+              sub="exposed → over-privileged NHI → sensitive"
+            />
+          </CardBody>
+        </Card>
+        <Card hover>
+          <CardBody>
+            <StatTile
+              label="Public + over-privileged"
+              value={byType.PUBLIC_OVERPRIVILEGED ?? 0}
+              tone={byType.PUBLIC_OVERPRIVILEGED ? 'warn' : 'good'}
+              icon={<IconKey size={13} />}
+              sub="exposed surface, wildcard grant"
+            />
+          </CardBody>
+        </Card>
+        <Card hover>
+          <CardBody>
+            <StatTile
+              label="Sensitive on exposed"
+              value={byType.SENSITIVE_ON_EXPOSED ?? 0}
+              tone={byType.SENSITIVE_ON_EXPOSED ? 'warn' : 'good'}
+              icon={<IconDatabase size={13} />}
+              sub="sensitive data, reachable surface"
+            />
+          </CardBody>
+        </Card>
       </div>
 
       <Explainer />
@@ -433,7 +440,7 @@ const HEAD_DESC =
 function AttackPathCard({ path }: { path: AttackPath }) {
   const isTriad = path.archetypeKey === 'EXPOSED_NHI_SENSITIVE';
   return (
-    <Card>
+    <Card accent={isTriad}>
       <CardHeader>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)', minWidth: 0, flexWrap: 'wrap' }}>
           <CardTitle>{path.archetypeLabel}</CardTitle>
@@ -442,7 +449,7 @@ function AttackPathCard({ path }: { path: AttackPath }) {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexShrink: 0 }}>
           <SeverityBadge severity={path.severity} />
-          <StatusPill tone={path.status === 'open' ? 'bad' : 'neutral'} label={path.status || 'open'} />
+          <StatusPill tone={path.status === 'open' ? 'bad' : 'neutral'} label={path.status || 'open'} variant="soft" />
         </div>
       </CardHeader>
 
@@ -461,7 +468,7 @@ function AttackPathCard({ path }: { path: AttackPath }) {
             </p>
           )}
 
-          <ChainPath hops={path.hops} note={path.chainNote} />
+          <AttackChain hops={path.hops} note={path.chainNote} />
         </div>
       </CardBody>
 
@@ -491,148 +498,6 @@ const SOURCE_LABEL: Record<ChainSource, string> = {
   raw: 'from evidence',
   fallback: 'from rule definition',
 };
-
-// ── The centerpiece: hop-by-hop chain visualization ───────────────────────────────────────────────
-
-function ChainPath({ hops, note }: { hops: Hop[]; note: string | null }) {
-  return (
-    <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
-      <ol
-        aria-label={`Attack chain, ${hops.length} hop${hops.length === 1 ? '' : 's'}`}
-        style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 'var(--space-1)' }}
-      >
-        {hops.map((hop, i) => (
-          <li key={i} style={{ display: 'flex', alignItems: 'center' }} aria-label={`Hop ${i + 1}, ${hop.factor}`}>
-            {i > 0 && <Connector />}
-            <HopNode hop={hop} index={i + 1} />
-          </li>
-        ))}
-      </ol>
-      {note && (
-        <p style={{ margin: 0, display: 'inline-flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--text-2xs)', lineHeight: 'var(--leading-2xs)', color: 'var(--text-muted)' }}>
-          <span aria-hidden="true" style={{ color: 'var(--sev-medium-fg)' }}>&#9432;</span>
-          {note}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function Connector() {
-  return (
-    <svg
-      width="30"
-      height="12"
-      viewBox="0 0 30 12"
-      fill="none"
-      aria-hidden="true"
-      style={{ color: 'var(--text-muted)', flexShrink: 0, margin: '0 var(--space-1)' }}
-    >
-      <line x1="0" y1="6" x2="24" y2="6" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M24 2l5 4-5 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function HopNode({ hop, index }: { hop: Hop; index: number }) {
-  const color = KIND_COLOR[hop.kind];
-  return (
-    <div
-      style={{
-        flex: '0 1 220px',
-        minWidth: 190,
-        display: 'grid',
-        gap: 'var(--space-2)',
-        padding: 'var(--space-3)',
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius-md)',
-        background: 'var(--surface-raised)',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', minWidth: 0 }}>
-        <span
-          aria-hidden="true"
-          style={{
-            display: 'grid',
-            placeItems: 'center',
-            width: 20,
-            height: 20,
-            flexShrink: 0,
-            borderRadius: 'var(--radius-full)',
-            border: '1px solid var(--border-interactive)',
-            fontSize: 'var(--text-2xs)',
-            fontWeight: 600,
-            color: 'var(--text-primary)',
-            fontVariantNumeric: 'tabular-nums',
-          }}
-        >
-          {index}
-        </span>
-        <span style={{ display: 'inline-flex', color, flexShrink: 0 }}>
-          <HopGlyph kind={hop.kind} />
-        </span>
-        <span style={{ fontSize: 'var(--text-2xs)', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600, color, whiteSpace: 'nowrap' }}>
-          {hop.factor}
-        </span>
-      </div>
-
-      <p
-        style={{
-          margin: 0,
-          fontSize: 'var(--text-xs)',
-          lineHeight: 'var(--leading-xs)',
-          color: 'var(--text-secondary)',
-          overflowWrap: 'anywhere',
-        }}
-      >
-        {hop.detail}
-      </p>
-
-      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-        {hop.kind === 'sensitive' && hop.dataClasses.length > 0 ? (
-          <DataClassChips classes={hop.dataClasses} sensitivity={hop.sensitivity} signals={hop.cited} />
-        ) : hop.cited ? (
-          <Chip mono title={hop.cited}>{leaf(hop.cited)}</Chip>
-        ) : (
-          <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>no cited resource</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function HopGlyph({ kind }: { kind: HopKind }) {
-  const common = { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.5, 'aria-hidden': true } as const;
-  switch (kind) {
-    case 'exposure': // broadcast — a reachable surface
-      return (
-        <svg {...common}>
-          <circle cx="8" cy="8" r="1.75" fill="currentColor" stroke="none" />
-          <path d="M4.6 4.6a4.8 4.8 0 0 0 0 6.8M11.4 4.6a4.8 4.8 0 0 1 0 6.8" strokeLinecap="round" />
-        </svg>
-      );
-    case 'privilege': // key — an over-broad grant
-      return (
-        <svg {...common}>
-          <circle cx="6" cy="6" r="3" />
-          <path d="M8.2 8.2l4.3 4.3M10.6 10.6l1.4-1.4" strokeLinecap="round" />
-        </svg>
-      );
-    case 'sensitive': // lock — sensitive data
-      return (
-        <svg {...common}>
-          <rect x="3.5" y="7" width="9" height="6" rx="1" />
-          <path d="M5.5 7V5.2a2.5 2.5 0 0 1 5 0V7" strokeLinecap="round" />
-        </svg>
-      );
-    default: // generic
-      return (
-        <svg {...common}>
-          <circle cx="8" cy="8" r="2.5" fill="currentColor" stroke="none" />
-        </svg>
-      );
-  }
-}
 
 // ── Explainer (honest about scope) ────────────────────────────────────────────────────────────────
 
@@ -682,18 +547,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 function Muted({ children }: { children: React.ReactNode }) {
   return <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>{children}</span>;
-}
-
-function KpiCard({ children }: { children: React.ReactNode }) {
-  return (
-    <Card>
-      <CardBody>{children}</CardBody>
-    </Card>
-  );
-}
-
-function Page({ children }: { children: React.ReactNode }) {
-  return <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>{children}</div>;
 }
 
 // ── Honest empty states ───────────────────────────────────────────────────────────────────────────

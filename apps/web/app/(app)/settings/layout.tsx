@@ -1,5 +1,6 @@
 import { Card, CardBody } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { getOwnMembership, isAdmin } from '@/lib/role';
 import { SettingsTabs } from './tabs';
@@ -20,7 +21,7 @@ export default async function SettingsLayout({ children }: { children: React.Rea
   const admin = isAdmin(membership?.role);
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1080 }}>
+    <Page>
       <PageHeader
         title="Settings"
         description="Tenant administration — who can access this workspace, where findings are delivered, and how members sign in."
@@ -42,6 +43,6 @@ export default async function SettingsLayout({ children }: { children: React.Rea
           </CardBody>
         </Card>
       )}
-    </div>
+    </Page>
   );
 }

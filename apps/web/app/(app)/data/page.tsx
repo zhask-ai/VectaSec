@@ -7,6 +7,8 @@ import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui
 import { Chip } from '@/components/ui/chip';
 import { DataClassChips } from '@/components/ui/data-class';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconAlertTriangle, IconDatabase, IconForType, IconLayers, IconUnlock } from '@/components/ui/icons';
+import { Page } from '@/components/ui/page';
 import { PageHeader, SectionHeader } from '@/components/ui/page-header';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatTile } from '@/components/ui/stat';
@@ -216,18 +218,18 @@ export default async function DataPage({ searchParams }: { searchParams: SearchP
         meta={`${exactTotal} sensitive resources · ${systemOptions.length} system${systemOptions.length === 1 ? '' : 's'}`}
       />
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 'var(--space-3)' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
         <KpiCard>
-          <StatTile label="Sensitive resources" value={exactTotal} sub="named like they carry sensitive data" />
+          <StatTile label="Sensitive resources" value={exactTotal} icon={<IconDatabase size={13} />} sub="named like they carry sensitive data" />
         </KpiCard>
         <KpiCard>
-          <StatTile label="High sensitivity" value={highTotal} tone={highTotal ? 'warn' : 'good'} sub="PCI / PHI / secrets-class naming" />
+          <StatTile label="High sensitivity" value={highTotal} tone={highTotal ? 'warn' : 'good'} icon={<IconAlertTriangle size={13} />} sub="PCI / PHI / secrets-class naming" />
         </KpiCard>
         <KpiCard>
-          <StatTile label="Data classes" value={distinctClasses.size} sub={`distinct classes${truncated ? ' in loaded set' : ''}`} />
+          <StatTile label="Data classes" value={distinctClasses.size} icon={<IconLayers size={13} />} sub={`distinct classes${truncated ? ' in loaded set' : ''}`} />
         </KpiCard>
         <KpiCard>
-          <StatTile label="Exposed sensitive" value={exposureTotal} tone={exposureTotal ? 'bad' : 'good'} sub="on a plaintext / open surface" />
+          <StatTile label="Exposed sensitive" value={exposureTotal} tone={exposureTotal ? 'bad' : 'good'} icon={<IconUnlock size={13} />} sub="on a plaintext / open surface" />
         </KpiCard>
       </div>
 
@@ -412,7 +414,7 @@ export default async function DataPage({ searchParams }: { searchParams: SearchP
               }
             />
           ) : (
-            <Table density="default" caption="Resources named like they carry sensitive data">
+            <Table density="relaxed" caption="Resources named like they carry sensitive data">
               <THead>
                 <TR>
                   <TH width="26%">Resource</TH>
@@ -427,12 +429,19 @@ export default async function DataPage({ searchParams }: { searchParams: SearchP
                 {filtered.map((r) => (
                   <TR key={r.id}>
                     <TD>
-                      <span style={{ fontFamily: 'var(--font-mono)' }}>{leaf(r.name)}</span>
-                      {r.connector && (
-                        <span style={{ display: 'block', fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
-                          {r.connector.type}/{r.connector.name}
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-2) 0' }}>
+                        <span aria-hidden="true" className="vs-icontile">
+                          <IconForType type={r.kind} />
                         </span>
-                      )}
+                        <span style={{ display: 'grid', gap: 1, minWidth: 0 }}>
+                          <span style={{ fontFamily: 'var(--font-mono)' }}>{leaf(r.name)}</span>
+                          {r.connector && (
+                            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+                              {r.connector.type}/{r.connector.name}
+                            </span>
+                          )}
+                        </span>
+                      </span>
                     </TD>
                     <TD mono>{r.system || '—'}</TD>
                     <TD>
@@ -534,14 +543,10 @@ function SensitivityBreakdown({ counts, total }: { counts: { high: number; mediu
 
 function KpiCard({ children }: { children: React.ReactNode }) {
   return (
-    <Card>
+    <Card hover>
       <CardBody>{children}</CardBody>
     </Card>
   );
-}
-
-function Page({ children }: { children: React.ReactNode }) {
-  return <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>{children}</div>;
 }
 
 function SetupState() {

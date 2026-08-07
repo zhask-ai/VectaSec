@@ -4,6 +4,8 @@ import { createClient } from '@/lib/supabase/server';
 import { AutoRefresh } from '@/components/AutoRefresh';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconForType } from '@/components/ui/icons';
+import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { StatusPill, type StatusTone } from '@/components/ui/status-pill';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
@@ -75,13 +77,13 @@ export default async function ScansPage() {
 
   if (res.error) {
     return (
-      <Page active={false}>
+      <Shell active={false}>
         <Card>
           <CardBody>
             <EmptyState tone="error" title="Could not load scans" description={res.error.message} />
           </CardBody>
         </Card>
-      </Page>
+      </Shell>
     );
   }
 
@@ -90,7 +92,7 @@ export default async function ScansPage() {
 
   if (rows.length === 0) {
     return (
-      <Page active={false}>
+      <Shell active={false}>
         <Card>
           <CardBody>
             <EmptyState
@@ -105,14 +107,14 @@ export default async function ScansPage() {
             </p>
           </CardBody>
         </Card>
-      </Page>
+      </Shell>
     );
   }
 
   const meta = `last ${rows.length} scan${rows.length === 1 ? '' : 's'}${active > 0 ? ` · ${active} in flight` : ''}`;
 
   return (
-    <Page active={active > 0} meta={meta}>
+    <Shell active={active > 0} meta={meta}>
       <Card>
         <CardHeader>
           <CardTitle>Scan history</CardTitle>
@@ -122,7 +124,7 @@ export default async function ScansPage() {
           </CardMeta>
         </CardHeader>
         <CardBody pad={false}>
-          <Table density="default" caption="Scan history, newest first">
+          <Table density="relaxed" caption="Scan history, newest first">
             <THead>
               <TR>
                 <TH width="12%">Status</TH>
@@ -148,8 +150,14 @@ export default async function ScansPage() {
                   </TD>
                   <TD>
                     {r.connections ? (
-                      <span style={{ fontFamily: 'var(--font-mono)' }}>
-                        {r.connections.type}/{r.connections.name}
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-2) 0' }}>
+                        <span aria-hidden="true" className="vs-icontile">
+                          <IconForType type={r.connections.type} />
+                        </span>
+                        <span style={{ display: 'grid', gap: 1, minWidth: 0 }}>
+                          <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600 }}>{r.connections.name}</span>
+                          <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>{r.connections.type}</span>
+                        </span>
                       </span>
                     ) : (
                       <span style={{ color: 'var(--text-muted)' }}>(connection removed)</span>
@@ -209,13 +217,13 @@ export default async function ScansPage() {
         (or an enrolled collector, for collector-mode connections). If a scan sits queued,{' '}
         <code style={{ fontFamily: 'var(--font-mono)' }}>vectasec doctor</code> will say why.
       </p>
-    </Page>
+    </Shell>
   );
 }
 
-function Page({ children, active, meta }: { children: React.ReactNode; active: boolean; meta?: string }) {
+function Shell({ children, active, meta }: { children: React.ReactNode; active: boolean; meta?: string }) {
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+    <Page>
       <AutoRefresh active={active} />
       <PageHeader
         title="Scans"
@@ -223,7 +231,7 @@ function Page({ children, active, meta }: { children: React.ReactNode; active: b
         meta={meta}
       />
       {children}
-    </div>
+    </Page>
   );
 }
 

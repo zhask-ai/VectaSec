@@ -30,6 +30,7 @@ export function StatTile({
   tone = 'neutral',
   delta,
   size = 'md',
+  icon,
 }: {
   label: string;
   value: ReactNode;
@@ -41,22 +42,38 @@ export function StatTile({
   /** A period-over-period change. `goodDirection` says which way is healthy. */
   delta?: { value: number; goodDirection?: 'up' | 'down'; label?: string };
   size?: 'sm' | 'md' | 'lg';
+  /** Decorative anchor mark, rendered in a quiet tile to the right of the label row. */
+  icon?: ReactNode;
 }) {
   const valueSize = size === 'lg' ? 'var(--text-4xl)' : size === 'sm' ? 'var(--text-2xl)' : 'var(--text-3xl)';
   const valueLeading = size === 'lg' ? 'var(--leading-4xl)' : size === 'sm' ? 'var(--leading-2xl)' : 'var(--leading-3xl)';
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-1)', minWidth: 0 }}>
+    <div style={{ display: 'grid', gap: 'var(--space-1)', minWidth: 0, position: 'relative' }}>
       <div
         style={{
-          fontSize: 'var(--text-2xs)',
-          textTransform: 'uppercase',
-          letterSpacing: '0.05em',
-          color: 'var(--text-secondary)',
-          fontWeight: 600,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 'var(--space-2)',
         }}
       >
-        {label}
+        <span
+          style={{
+            fontSize: 'var(--text-2xs)',
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            color: 'var(--text-secondary)',
+            fontWeight: 600,
+          }}
+        >
+          {label}
+        </span>
+        {icon && (
+          <span aria-hidden="true" className="vs-icontile" style={{ width: 24, height: 24 }}>
+            {icon}
+          </span>
+        )}
       </div>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
         <span

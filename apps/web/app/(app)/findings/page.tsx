@@ -1,6 +1,7 @@
 import { LiveFindings } from '@/components/LiveFindings';
 import { Card, CardBody, CardFooter, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { getFindingsView, LIST_LIMIT } from './data';
 import { FindingsTable } from './findings-table';
@@ -36,7 +37,7 @@ export default async function FindingsPage({ searchParams }: PageProps<'/finding
       : undefined;
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
+    <Page>
       <PageHeader
         title="Findings"
         description="Every issue we found across your connected systems, grouped by rule and ordered by severity — one badge, one decision."
@@ -151,7 +152,7 @@ export default async function FindingsPage({ searchParams }: PageProps<'/finding
           </Card>
         </>
       )}
-    </div>
+    </Page>
   );
 }
 

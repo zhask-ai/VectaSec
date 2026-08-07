@@ -2,6 +2,8 @@ import { createClient } from '@/lib/supabase/server';
 import { AutoRefresh } from '@/components/AutoRefresh';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconForType } from '@/components/ui/icons';
+import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
@@ -121,7 +123,7 @@ export default async function RuntimePage() {
   const loadError = clientsRes.error ?? denialsRes.error ?? evidenceRes.error;
   if (loadError) {
     return (
-      <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+      <Page>
         <Head />
         <Card>
           <CardBody>
@@ -129,7 +131,7 @@ export default async function RuntimePage() {
                         description={loadError.message} />
           </CardBody>
         </Card>
-      </div>
+      </Page>
     );
   }
 
@@ -155,7 +157,7 @@ export default async function RuntimePage() {
 
   if (clients.length === 0 && evidence.length === 0) {
     return (
-      <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+      <Page>
         <Head />
         <Card>
           <CardBody>
@@ -167,12 +169,12 @@ export default async function RuntimePage() {
             />
           </CardBody>
         </Card>
-      </div>
+      </Page>
     );
   }
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+    <Page>
       <AutoRefresh active />
       <Head meta={`${clients.length} live client group${clients.length === 1 ? '' : 's'}`} />
 
@@ -264,7 +266,14 @@ export default async function RuntimePage() {
                       const observing = Boolean(c.runtime_observation_started_at);
                       return (
                         <TR key={c.id}>
-                          <TD>{c.name}</TD>
+                          <TD>
+                            <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', padding: 'var(--space-2) 0' }}>
+                              <span aria-hidden="true" className="vs-icontile">
+                                <IconForType type={c.type} />
+                              </span>
+                              <span style={{ display: 'grid', gap: 1, minWidth: 0 }}>{c.name}</span>
+                            </span>
+                          </TD>
                           <TD mono>{c.type}</TD>
                           <TD>
                             <div style={{ display: 'grid', gap: 4, justifyItems: 'start' }}>
@@ -470,7 +479,7 @@ export default async function RuntimePage() {
           </CardBody>
         </Card>
       )}
-    </div>
+    </Page>
   );
 }
 

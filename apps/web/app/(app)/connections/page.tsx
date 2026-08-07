@@ -7,6 +7,8 @@ import { SEVERITIES, SEVERITY_RANK, type Severity } from '@/lib/types';
 import { AutoRefresh } from '@/components/AutoRefresh';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconAlertTriangle, IconFindings, IconForType, IconPlug, IconRadar } from '@/components/ui/icons';
+import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatTile } from '@/components/ui/stat';
@@ -288,31 +290,46 @@ export default async function ConnectionsPage({
       )}
 
       {/* Estate summary. Computed from the whole estate, not the current filter. */}
-      <Card>
-        <CardBody>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 'var(--space-4)' }}>
-            <StatTile label="Connections" value={rows.length} sub={`${CONNECTOR_COUNT} connectors available`} />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
+        <Card hover>
+          <CardBody>
+            <StatTile label="Connections" value={rows.length} icon={<IconPlug size={13} />} sub={`${CONNECTOR_COUNT} connectors available`} />
+          </CardBody>
+        </Card>
+        <Card hover>
+          <CardBody>
             <StatTile
               label="Needs attention"
               value={attention}
               tone={attention > 0 ? 'warn' : 'neutral'}
+              icon={<IconAlertTriangle size={13} />}
               sub={broken > 0 ? `${broken} failed last scan` : unscanned > 0 ? `${unscanned} never scanned` : 'all healthy'}
             />
+          </CardBody>
+        </Card>
+        <Card hover>
+          <CardBody>
             <StatTile
               label="Open findings"
               value={openTotal}
               tone={openTotal > 0 ? 'bad' : 'neutral'}
+              icon={<IconFindings size={13} />}
               sub="attributed to a connection"
             />
+          </CardBody>
+        </Card>
+        <Card hover>
+          <CardBody>
             <StatTile
               label="Scanning"
               value={scanning}
               tone={scanning > 0 ? 'warn' : 'neutral'}
+              icon={<IconRadar size={13} />}
               sub={scanning > 0 ? 'live — refreshing' : 'nothing in flight'}
             />
-          </div>
-        </CardBody>
-      </Card>
+          </CardBody>
+        </Card>
+      </div>
 
       {/* Filter bar — one row above the table, state in the URL so a view is shareable. */}
       <Toolbar
@@ -339,20 +356,8 @@ export default async function ConnectionsPage({
             <Link
               key={f.key}
               href={f.href}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 'var(--space-1)',
-                height: 'var(--row-compact)',
-                padding: '0 var(--space-2)',
-                border: `1px solid ${active ? 'var(--border-interactive)' : 'var(--border)'}`,
-                borderRadius: 'var(--radius-md)',
-                background: active ? 'var(--surface-raised)' : 'transparent',
-                color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                fontSize: 'var(--text-2xs)',
-                fontWeight: active ? 600 : 500,
-                textDecoration: 'none',
-              }}
+              className="vs-filterpill"
+              data-active={active || undefined}
               aria-current={active ? 'true' : undefined}
             >
               {f.label}
@@ -391,47 +396,47 @@ export default async function ConnectionsPage({
               }
             />
           ) : (
-            <Table density="default" caption="Connected systems and their collection status">
+            <Table density="relaxed" caption="Connected systems and their collection status">
               <THead>
                 <TR>
-                  <TH width="18%">Name</TH>
-                  <TH width="8%">Type</TH>
+                  <TH width="24%">System</TH>
                   <TH width="12%">Status</TH>
-                  <TH width="13%">Last scan</TH>
-                  <TH width="9%" numeric>
+                  <TH width="17%">Last scan</TH>
+                  <TH width="8%" numeric>
                     Resources
                   </TH>
-                  <TH width="17%">Open findings</TH>
-                  <TH width="23%">Actions</TH>
+                  <TH width="19%">Open findings</TH>
+                  <TH width="20%">Actions</TH>
                 </TR>
               </THead>
               <TBody>
                 {visible.map((r) => (
                   <TR key={r.id}>
                     <TD>
-                      <span style={{ fontFamily: 'var(--font-mono)' }}>{r.name}</span>
-                      {/* Mode matters when it is NOT the default path: a collector connection
-                          names its collector; cloud is implied by saying nothing. */}
-                      {r.collectors && (
-                        <span
-                          style={{
-                            display: 'block',
-                            fontSize: 'var(--text-2xs)',
-                            color: 'var(--text-secondary)',
-                          }}
-                        >
-                          via {r.collectors.name} ({r.collectors.status})
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', minWidth: 0, padding: 'var(--space-2) 0' }}>
+                        <span aria-hidden="true" className="vs-icontile">
+                          <IconForType type={r.type} />
                         </span>
-                      )}
-                      {r.mode === 'collector' && !r.collectors && (
-                        <span
-                          style={{ display: 'block', fontSize: 'var(--text-2xs)', color: 'var(--sev-medium-fg)' }}
-                        >
-                          collector mode · no collector enrolled
+                        <span style={{ display: 'grid', gap: 1, minWidth: 0 }}>
+                          <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {r.name}
+                          </span>
+                          <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
+                            {r.type}
+                            {/* Mode matters when it is NOT the default path: a collector
+                                connection names its collector; cloud is implied by silence. */}
+                            {r.collectors && (
+                              <> · via {r.collectors.name} ({r.collectors.status})</>
+                            )}
+                          </span>
+                          {r.mode === 'collector' && !r.collectors && (
+                            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--sev-medium-fg)' }}>
+                              collector mode · no collector enrolled
+                            </span>
+                          )}
                         </span>
-                      )}
+                      </span>
                     </TD>
-                    <TD mono>{r.type}</TD>
                     <TD>
                       <ConnStatus
                         status={r.scan?.status === 'error' ? 'error' : r.status}
@@ -459,22 +464,24 @@ export default async function ConnectionsPage({
                       )}
                       {/* Recurring cadence (connections.scan_interval_minutes, consumed by the
                           DB scheduler queue_due_scans()). Absence means point-in-time only —
-                          say nothing rather than invent a default. */}
-                      {r.scan_interval_minutes != null && (
-                        <span
-                          style={{
-                            display: 'block',
-                            fontSize: 'var(--text-2xs)',
-                            color: 'var(--text-secondary)',
-                          }}
-                          title="Rescanned automatically on this cadence"
-                        >
-                          rescans {cadence(r.scan_interval_minutes)}
-                        </span>
+                          say nothing rather than invent a default. Editors get the chip-select
+                          (which displays AND changes it); viewers get the static line alone. */}
+                      {editable ? (
+                        <CadenceSelect connectionId={r.id} current={r.scan_interval_minutes} />
+                      ) : (
+                        r.scan_interval_minutes != null && (
+                          <span
+                            style={{
+                              display: 'block',
+                              fontSize: 'var(--text-2xs)',
+                              color: 'var(--text-secondary)',
+                            }}
+                            title="Rescanned automatically on this cadence"
+                          >
+                            rescans {cadence(r.scan_interval_minutes)}
+                          </span>
+                        )
                       )}
-                      {/* Editors change the cadence right where it is displayed; viewers see
-                          the display alone. */}
-                      {editable && <CadenceSelect connectionId={r.id} current={r.scan_interval_minutes} />}
                     </TD>
                     <TD numeric>
                       {r.counts.total === 0 ? (
@@ -524,7 +531,7 @@ export default async function ConnectionsPage({
  * section rather than two sidebar entries competing to mean the same thing. */
 function Shell({ children, editable }: { children: React.ReactNode; editable?: boolean }) {
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-4)', maxWidth: 1280 }}>
+    <Page>
       <PageHeader
         title="Systems"
         description="The systems VectaSec is collecting from, and how healthy that collection is. A broken connection is louder than a clean one — it is the coverage gap."
@@ -543,12 +550,15 @@ function Shell({ children, editable }: { children: React.ReactNode; editable?: b
         ]}
       />
       {children}
-    </div>
+    </Page>
   );
 }
 
-/** The per-connection severity mini-summary. Exact open total (count:'exact') on top; the
- * severity mix beneath, from the bounded sample — noted honestly when the sample is truncated. */
+/** The per-connection severity mini-summary: the worst level as the one badge (one badge, one
+ * decision), an exact open total, and a compact stacked severity bar showing the mix. The old
+ * row of five ×N badges wrapped to three lines on busy connections and made the whole table
+ * ragged; the bar says the same thing in six pixels of height. Colour is never alone — the
+ * badge + counts text carry the levels, and the full mix rides the tooltip. */
 function FindingSummary({ row }: { row: DisplayRow }) {
   if (!row.worst) {
     return row.last_scanned_at ? (
@@ -558,16 +568,32 @@ function FindingSummary({ row }: { row: DisplayRow }) {
     );
   }
   const truncated = row.open > row.sampleSize;
+  const mix = SEVERITIES.filter((s) => (row.sevCounts[s] ?? 0) > 0);
+  const mixLabel = mix.map((s) => `${row.sevCounts[s]} ${s}`).join(' · ');
   return (
-    <div style={{ display: 'grid', gap: 2 }}>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-1) var(--space-2)', alignItems: 'center' }}>
-        {SEVERITIES.filter((s) => (row.sevCounts[s] ?? 0) > 0).map((s) => (
-          <SeverityBadge key={s} variant="inline" severity={s} count={row.sevCounts[s]} />
+    <div style={{ display: 'grid', gap: 4, maxWidth: 210 }} title={mixLabel}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+        <SeverityBadge variant="inline" severity={row.worst} />
+        <span data-numeric style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
+          {row.open} open{truncated ? ` · top ${LIST_LIMIT} sampled` : ''}
+        </span>
+      </div>
+      <div
+        aria-hidden="true"
+        style={{ display: 'flex', height: 5, borderRadius: 'var(--radius-full)', overflow: 'hidden', background: 'var(--grid)' }}
+      >
+        {mix.map((s) => (
+          <span
+            key={s}
+            style={{
+              width: `${(100 * (row.sevCounts[s] ?? 0)) / row.sampleSize}%`,
+              background: `var(--sev-${s}-solid)`,
+              minWidth: 3,
+            }}
+          />
         ))}
       </div>
-      <span data-numeric style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
-        {row.open} open{truncated ? ` · top ${LIST_LIMIT} sampled` : ''}
-      </span>
+      <span className="vs-visually-hidden">{mixLabel}</span>
     </div>
   );
 }

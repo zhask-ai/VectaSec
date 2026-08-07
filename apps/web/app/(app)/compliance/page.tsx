@@ -6,7 +6,9 @@ import { createClient } from '@/lib/supabase/server';
 import { SEVERITIES, SEVERITY_RANK, type ControlStatus, type Severity } from '@/lib/types';
 import { Card, CardBody, CardFooter, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
+import { IconAlertTriangle, IconClock, IconLayers, IconShieldCheck } from '@/components/ui/icons';
 import { Meter } from '@/components/ui/meter';
+import { Page } from '@/components/ui/page';
 import { PageHeader, SectionHeader } from '@/components/ui/page-header';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatTile } from '@/components/ui/stat';
@@ -550,38 +552,57 @@ function frameworkState(s: Score): { tone: StatusTone; label: string } {
  *  ("Not scored" is not "passing") cannot be misread as the flattering one. */
 function KpiRow({ agg }: { agg: Aggregate }) {
   return (
-    <Card>
-      <CardBody>
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-            gap: 'var(--space-4)',
-          }}
-        >
-          <StatTile label="Frameworks" value={agg.frameworks} sub="evaluated for this tenant" />
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+        gap: 'var(--space-3)',
+      }}
+    >
+      <Card hover>
+        <CardBody>
+          <StatTile label="Frameworks" value={agg.frameworks} icon={<IconLayers size={13} />} sub="evaluated for this tenant" />
+        </CardBody>
+      </Card>
+      <Card hover>
+        <CardBody>
           <StatTile label="Controls" value={agg.controls} sub="across all frameworks" />
+        </CardBody>
+      </Card>
+      <Card hover>
+        <CardBody>
           <StatTile
             label="Attested"
             value={agg.attested}
             tone={agg.attested > 0 ? 'good' : 'neutral'}
+            icon={<IconShieldCheck size={13} />}
             sub="passing on a human sign-off"
           />
+        </CardBody>
+      </Card>
+      <Card hover>
+        <CardBody>
           <StatTile
             label="Failing"
             value={agg.failing}
             tone={agg.failing > 0 ? 'bad' : 'neutral'}
+            icon={<IconAlertTriangle size={13} />}
             sub="a live finding proves it"
           />
+        </CardBody>
+      </Card>
+      <Card hover>
+        <CardBody>
           <StatTile
             label="Not scored"
             value={agg.notScored}
             tone={agg.notScored > 0 ? 'warn' : 'neutral'}
+            icon={<IconClock size={13} />}
             sub="no result yet — not passing"
           />
-        </div>
-      </CardBody>
-    </Card>
+        </CardBody>
+      </Card>
+    </div>
   );
 }
 
@@ -635,6 +656,67 @@ function FrameworkOverview({ group }: { group: FrameworkGroup }) {
   );
 }
 
+/* The control mosaic — the whole framework in one glance: one cell per control, coloured by
+ * status, failing cells ringed. The same information as the table below (which stays the
+ * record), compressed to the shape auditors actually ask about: "how much of this framework is
+ * red". Colour never stands alone — every cell carries a title (id · status · requirement), a
+ * legend names the hues in words, and the aria-label states the tally. */
+const MOSAIC_COLOR: Record<ControlStatus, string> = {
+  pass: 'var(--sev-low-solid)',
+  fail: 'var(--sev-critical-solid)',
+  unknown: 'var(--sev-medium-solid)',
+  not_applicable: 'var(--grid)',
+};
+const MOSAIC_LABEL: Record<ControlStatus, string> = {
+  pass: 'pass',
+  fail: 'fail',
+  unknown: 'unknown',
+  not_applicable: 'n/a',
+};
+
+function ControlMosaic({ controls }: { controls: Control[] }) {
+  if (controls.length === 0) return null;
+  const tally = (s: ControlStatus) => controls.filter((c) => c.status === s).length;
+  const summary = (['fail', 'pass', 'unknown', 'not_applicable'] as ControlStatus[])
+    .map((s) => `${tally(s)} ${MOSAIC_LABEL[s]}`)
+    .join(', ');
+  return (
+    <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
+      <div
+        role="img"
+        aria-label={`Control mosaic: ${summary}`}
+        style={{ display: 'flex', flexWrap: 'wrap', gap: 4, maxWidth: 640 }}
+      >
+        {controls.map((c) => (
+          <span
+            key={c.id}
+            title={`${c.control_id} · ${MOSAIC_LABEL[c.status]}${c.title ? ` · ${c.title}` : ''}`}
+            style={{
+              width: 13,
+              height: 13,
+              borderRadius: 3.5,
+              background: MOSAIC_COLOR[c.status] ?? 'var(--grid)',
+              opacity: c.status === 'not_applicable' ? 0.8 : 1,
+              boxShadow:
+                c.status === 'fail'
+                  ? '0 0 0 1.5px color-mix(in srgb, var(--sev-critical-solid) 45%, transparent)'
+                  : 'inset 0 0 0 1px rgb(0 0 0 / 0.06)',
+            }}
+          />
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }} data-numeric>
+        {(['fail', 'pass', 'unknown', 'not_applicable'] as ControlStatus[]).map((s) => (
+          <span key={s} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            <span aria-hidden="true" style={{ width: 9, height: 9, borderRadius: 2.5, background: MOSAIC_COLOR[s] }} />
+            {tally(s)} {MOSAIC_LABEL[s]}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function FrameworkCard({ group, editable }: { group: FrameworkGroup; editable: boolean }) {
   const meta = metaFor(group.framework);
 
@@ -656,6 +738,7 @@ function FrameworkCard({ group, editable }: { group: FrameworkGroup; editable: b
         <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
           <ScoreBlock score={group.score} />
           <CoverageBar tally={group.score.tally} total={group.controls.length} />
+          <ControlMosaic controls={group.controls} />
           <Caveat>{meta.caveat}</Caveat>
         </div>
       </CardBody>
@@ -859,7 +942,7 @@ export default async function CompliancePage() {
       : [];
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-5)', maxWidth: 1200 }}>
+    <Page>
       <PageHeader
         title="Compliance"
         description="Framework posture you can defend: a scan can prove a control fails, but only a human attesting can make one pass."
@@ -955,6 +1038,6 @@ export default async function CompliancePage() {
           )}
         </>
       )}
-    </div>
+    </Page>
   );
 }

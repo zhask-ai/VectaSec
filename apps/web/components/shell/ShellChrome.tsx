@@ -22,6 +22,9 @@ import {
   IconSettings,
   IconMenu,
   IconClose,
+  IconActivity,
+  IconLayers,
+  IconRadar,
   type IconProps,
 } from '@/components/ui/icons';
 import { ThemeToggle } from './ThemeToggle';
@@ -73,7 +76,7 @@ const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
       { href: '/connections', label: 'Systems', Icon: IconSystems, also: ['/systems'] },
       // Discovery sits with Inventory rather than Operations: its output is estate, and its
       // headline finding — middleware nobody monitors — is an inventory gap, not a scan result.
-      { href: '/discovery', label: 'Discovery', Icon: IconScans },
+      { href: '/discovery', label: 'Discovery', Icon: IconRadar },
       { href: '/identities', label: 'Identities', Icon: IconIdentities },
       { href: '/data', label: 'Data', Icon: IconData },
       { href: '/assets', label: 'Assets', Icon: IconAssets },
@@ -83,8 +86,8 @@ const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
     label: 'Assurance',
     items: [
       { href: '/attack-paths', label: 'Attack paths', Icon: IconAttackPaths },
-      { href: '/runtime', label: 'Runtime', Icon: IconOverview },
-      { href: '/supply-chain', label: 'Supply chain', Icon: IconSystems },
+      { href: '/runtime', label: 'Runtime', Icon: IconActivity },
+      { href: '/supply-chain', label: 'Supply chain', Icon: IconLayers },
       { href: '/compliance', label: 'Compliance', Icon: IconCompliance },
     ],
   },
@@ -260,6 +263,11 @@ export function ShellChrome({
           <Link href="/" className="vs-brand-link vs-brand-mobile" aria-label="VectaSec — Overview">
             <BrandMark />
           </Link>
+          {/* The tenant wears a mark, not just a word — the org you are acting in is the single
+              most important piece of context in a multi-tenant console. */}
+          <span aria-hidden="true" className="vs-tenant-mark">
+            {(tenantName || 'V').slice(0, 1).toUpperCase()}
+          </span>
           {memberships.length > 1 ? (
             <form action={switchTenantAction}>
               <select

@@ -2,6 +2,7 @@
 
 import { useActionState, useState } from 'react';
 
+import { IconPlay, IconTrash, IconZap } from '@/components/ui/icons';
 import {
   deleteConnectionAction,
   scanConnectionAction,
@@ -13,8 +14,10 @@ import {
  *
  * Three independent forms (scan / test / delete) rather than one with intent switches, so each
  * keeps its own pending state and the browser's no-JS fallback still posts something sensible.
- * Results render in a shared line under the buttons — the newest action's outcome is the one a
- * human is waiting on, and three stacked status lines in a table cell is noise.
+ * Visually they are now a compact icon-labelled cluster (.vs-actionbtn) that sits quiet until
+ * the row is hovered — three full text buttons per row made every row shout. Results render in
+ * a shared line under the cluster: the newest action's outcome is the one a human is waiting
+ * on, and three stacked status lines in a table cell is noise.
  *
  * Delete is two-step in place: first click arms it, second confirms. It removes the
  * connection and everything collected through it (the server says the counts back), so the
@@ -41,18 +44,19 @@ export function RowActions({
   const state = last === 'scan' ? scanState : last === 'test' ? testState : last === 'delete' ? deleteState : null;
 
   return (
-    <div style={{ display: 'grid', gap: 'var(--space-1)', justifyItems: 'start' }}>
-      <div style={{ display: 'flex', gap: 'var(--space-1)', flexWrap: 'wrap' }}>
+    <div data-row-actions style={{ display: 'grid', gap: 'var(--space-1)', justifyItems: 'start' }}>
+      <div style={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
         <form action={scanAction} onSubmit={() => setLast('scan')} style={{ display: 'contents' }}>
           <input type="hidden" name="connectionId" value={connectionId} />
           <button
             type="submit"
+            className="vs-actionbtn"
             disabled={scanPending || scanActive}
             aria-busy={scanPending || undefined}
             title={scanActive ? 'A scan is already queued or running' : `Queue a scan of ${name}`}
-            style={{ ...btn, fontWeight: 600, opacity: scanPending || scanActive ? 0.55 : 1 }}
           >
-            {scanPending ? 'Queuing…' : scanActive ? 'Scanning…' : 'Scan now'}
+            <IconPlay size={12} />
+            {scanPending ? 'Queuing…' : scanActive ? 'Scanning…' : 'Scan'}
           </button>
         </form>
 
@@ -60,31 +64,45 @@ export function RowActions({
           <input type="hidden" name="connectionId" value={connectionId} />
           <button
             type="submit"
+            className="vs-actionbtn"
             disabled={testPending}
             aria-busy={testPending || undefined}
             title={`Check ${name} is reachable (read-only collect, persists nothing)`}
-            style={{ ...btn, opacity: testPending ? 0.55 : 1 }}
           >
+            <IconZap size={12} />
             {testPending ? 'Testing…' : 'Test'}
           </button>
         </form>
 
         {!armed ? (
-          <button type="button" onClick={() => setArmed(true)} title={`Remove ${name}`} style={btn}>
-            Remove
+          <button
+            type="button"
+            className="vs-actionbtn"
+            data-danger
+            onClick={() => setArmed(true)}
+            title={`Remove ${name} and everything collected through it`}
+            aria-label={`Remove ${name}`}
+          >
+            <IconTrash size={12} />
           </button>
         ) : (
           <form action={deleteAction} onSubmit={() => setLast('delete')} style={{ display: 'contents' }}>
             <input type="hidden" name="connectionId" value={connectionId} />
             <button
               type="submit"
+              className="vs-actionbtn"
               disabled={deletePending}
               aria-busy={deletePending || undefined}
-              style={{ ...btn, color: 'var(--sev-critical-fg)', borderColor: 'var(--sev-critical-fg)', opacity: deletePending ? 0.55 : 1 }}
+              style={{
+                color: 'var(--sev-critical-fg)',
+                borderColor: 'var(--sev-critical-solid)',
+                background: 'var(--sev-critical-bg)',
+                fontWeight: 600,
+              }}
             >
               {deletePending ? 'Removing…' : 'Delete data too — confirm'}
             </button>
-            <button type="button" onClick={() => setArmed(false)} style={btn}>
+            <button type="button" className="vs-actionbtn" onClick={() => setArmed(false)}>
               Keep
             </button>
           </form>
@@ -108,16 +126,3 @@ export function RowActions({
     </div>
   );
 }
-
-const btn: React.CSSProperties = {
-  border: '1px solid var(--border-interactive)',
-  borderRadius: 'var(--radius-md)',
-  background: 'var(--surface-raised)',
-  color: 'var(--text-primary)',
-  fontSize: 'var(--text-2xs)',
-  fontWeight: 500,
-  padding: '0 var(--space-2)',
-  height: 'var(--row-compact)',
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-};
