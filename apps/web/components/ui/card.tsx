@@ -45,7 +45,7 @@ export function CardHeader({ children }: { children: ReactNode }) {
         alignItems: 'center',
         justifyContent: 'space-between',
         gap: 'var(--space-3)',
-        padding: 'var(--space-3) var(--space-4)',
+        padding: 'var(--space-4) var(--space-5)',
         borderBottom: '1px solid var(--border)',
       }}
     >
@@ -90,14 +90,14 @@ export function CardMeta({ children }: { children: ReactNode }) {
 
 export function CardBody({ children, pad = true }: { children: ReactNode; pad?: boolean }) {
   // pad={false} for tables, which bring their own cell padding and want to bleed to the edge.
-  return <div style={{ padding: pad ? 'var(--space-4)' : 0 }}>{children}</div>;
+  return <div style={{ padding: pad ? 'var(--space-5)' : 0 }}>{children}</div>;
 }
 
 export function CardFooter({ children }: { children: ReactNode }) {
   return (
     <div
       style={{
-        padding: 'var(--space-2) var(--space-4)',
+        padding: 'var(--space-3) var(--space-5)',
         borderTop: '1px solid var(--border)',
         fontSize: 'var(--text-xs)',
         color: 'var(--text-secondary)',

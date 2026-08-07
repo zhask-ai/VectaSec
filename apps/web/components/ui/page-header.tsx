@@ -41,10 +41,10 @@ export function PageHeader({
           <h1
             style={{
               margin: 0,
-              fontSize: 'var(--text-xl)',
-              lineHeight: 'var(--leading-xl)',
-              fontWeight: 640,
-              letterSpacing: '-0.011em',
+              fontSize: 'var(--text-2xl)',
+              lineHeight: 'var(--leading-2xl)',
+              fontWeight: 650,
+              letterSpacing: '-0.02em',
               color: 'var(--text-primary)',
             }}
           >
@@ -62,9 +62,9 @@ export function PageHeader({
         <p
           style={{
             margin: 0,
-            maxWidth: '72ch',
-            fontSize: 'var(--text-sm)',
-            lineHeight: 'var(--leading-sm)',
+            maxWidth: '68ch',
+            fontSize: 'var(--text-base)',
+            lineHeight: 'var(--leading-lg)',
             color: 'var(--text-secondary)',
           }}
         >

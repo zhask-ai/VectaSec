@@ -157,9 +157,10 @@
 
   --focus-ring: #c4b5fd;
 
+  /* The Linear-dark tell: a one-pixel light catch on every card's top edge. */
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
-  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.35), 0 2px 12px rgb(0 0 0 / 0.3);
-  --shadow-lift: 0 2px 6px rgb(0 0 0 / 0.4), 0 12px 32px rgb(0 0 0 / 0.45);
+  --shadow-card: inset 0 1px 0 rgb(255 255 255 / 0.04), 0 1px 2px rgb(0 0 0 / 0.35), 0 2px 12px rgb(0 0 0 / 0.3);
+  --shadow-lift: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 2px 6px rgb(0 0 0 / 0.4), 0 12px 32px rgb(0 0 0 / 0.45);
   --shadow-popover: 0 8px 28px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.4);
 
   --graph-dot: #262625;
@@ -224,8 +225,8 @@
     --focus-ring: #c4b5fd;
 
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
-    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.35), 0 2px 12px rgb(0 0 0 / 0.3);
-    --shadow-lift: 0 2px 6px rgb(0 0 0 / 0.4), 0 12px 32px rgb(0 0 0 / 0.45);
+    --shadow-card: inset 0 1px 0 rgb(255 255 255 / 0.04), 0 1px 2px rgb(0 0 0 / 0.35), 0 2px 12px rgb(0 0 0 / 0.3);
+    --shadow-lift: inset 0 1px 0 rgb(255 255 255 / 0.05), 0 2px 6px rgb(0 0 0 / 0.4), 0 12px 32px rgb(0 0 0 / 0.45);
     --shadow-popover: 0 8px 28px rgb(0 0 0 / 0.55), 0 1px 2px rgb(0 0 0 / 0.4);
 
     --graph-dot: #262625;
@@ -323,7 +324,7 @@
 
   --sidebar-width: 236px;
   --sidebar-width-collapsed: 60px;
-  --topbar-height: 52px;
+  --topbar-height: 56px;
   --z-sticky: 10;
   --z-overlay: 100;
 }
@@ -464,7 +465,7 @@ a {
  * beyond that everything is below the fold anyway. */
 .vs-page {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-5);
   max-width: 1280px;
   animation: vs-fade-in var(--motion-standard) var(--ease-out);
 }
@@ -661,8 +662,21 @@ a {
   color: var(--sev-critical-fg);
 }
 
-/* Quiet inline select (cadence, filters): a chip that happens to be a <select>. Chevron is
- * inherited from the native control; the outline is the interactive token as owed. */
+/* Every console select drops the native widget chrome for the house chevron — the single
+ * loudest "unstyled" tell an app can carry. Scoped to .vs-main so the bare auth pages keep
+ * native controls. The chevron hue is the border-interactive gray, legible on both themes;
+ * a data-URI is the only way to draw inside a <select>, so this one lives as a literal. */
+.vs-main select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2377766f' stroke-width='2.25' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  padding-right: 24px;
+}
+
+/* Quiet inline select (cadence, filters): a chip that happens to be a <select>. The outline is
+ * the interactive token as owed. */
 .vs-chipselect {
   height: 24px;
   max-width: 100%;
@@ -1201,7 +1215,7 @@ a {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  height: 34px;
+  height: 36px;
   padding: 0 var(--space-3);
   border-radius: var(--radius-md);
   color: var(--text-secondary);
