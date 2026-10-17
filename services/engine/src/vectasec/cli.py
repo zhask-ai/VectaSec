@@ -10,6 +10,7 @@
     vectasec findings
     vectasec doctor
     vectasec worker
+    vectasec digest --dry-run               # the weekly digest, printed, nothing sent
 """
 import argparse
 import json
@@ -528,6 +529,51 @@ def cmd_doctor(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_digest(args) -> int:
+    """The weekly digest: what changed since the last one. `--dry-run` composes and prints it
+    without delivering or recording; otherwise it goes to every routing rule that names
+    weekly_digest and lands in `digests`. `--all` runs every tenant (the cron entry point)."""
+    from .db import connect
+    from .digest import compose_digest, render_digest_text, send_digest, tenant_ids
+    from datetime import datetime, timedelta, timezone
+
+    with connect() as conn:
+        if args.all:
+            with conn.cursor() as cur:
+                tenants = tenant_ids(cur)
+        else:
+            tenants = [args.tenant or settings.demo_tenant]
+        if not tenants:
+            print("no tenants")
+            return 0
+        failures = 0
+        for tenant in tenants:
+            if args.dry_run:
+                until = datetime.now(timezone.utc)
+                with conn.cursor() as cur:
+                    cur.execute("select max(period_end) from digests where tenant_id = %s", (tenant,))
+                    row = cur.fetchone()
+                    since = row[0] if row and row[0] else until - timedelta(days=7)
+                    digest = compose_digest(cur, tenant, since, until)
+                conn.rollback()
+                print(f"{DIM}tenant {tenant} (dry run — nothing sent){RESET}\n")
+                print(render_digest_text(digest))
+                print()
+                continue
+            result = send_digest(conn, tenant)
+            print(f"{DIM}tenant {tenant} · digest {result['id']}{RESET}\n")
+            print(render_digest_text(result["digest"]))
+            print()
+            for d in result["delivered_to"]:
+                mark = "sent " if d["status"] == "sent" else f"{SEV_COLOR['high']}ERROR{RESET}"
+                print(f"  {mark} {d['type']}/{d['name']}" + (f" — {d['error']}" if d.get("error") else ""))
+                failures += d["status"] != "sent"
+            if not result["delivered_to"]:
+                print(f"  {DIM}no routing rule names weekly_digest in notify_on — recorded, not delivered{RESET}")
+            print()
+    return 1 if failures else 0
+
+
 def cmd_worker(args) -> int:
     """Drain the pgmq scan queue: adopt each queued scan and run it (STATUS.md gaps 0, 2).
 
@@ -632,6 +678,12 @@ def main() -> int:
                         "observation, so it is off by default — run it before telling anyone "
                         "the ledger is tamper-evident.")
     d.set_defaults(fn=cmd_doctor)
+
+    dg = sub.add_parser("digest", help="compose and send the weekly digest (cron: 0 8 * * 1 vectasec digest --all)")
+    dg.add_argument("--tenant", help="tenant uuid (defaults to demo tenant)")
+    dg.add_argument("--all", action="store_true", help="every tenant, one digest each")
+    dg.add_argument("--dry-run", action="store_true", help="print the digest; send and record nothing")
+    dg.set_defaults(fn=cmd_digest)
 
     w = sub.add_parser("worker", help="drain the scan queue (pgmq vectasec_scans) and reap stuck scans")
     w.add_argument("--once", action="store_true", help="drain the queue then exit (for tests/CI)")

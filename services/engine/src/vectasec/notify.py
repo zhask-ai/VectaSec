@@ -1,9 +1,40 @@
 """The action layer: route a finished scan's outcome to the outside world.
 
-Six destination types (`integrations.type`): Slack incoming webhooks, Microsoft Teams
+Eight destination types (`integrations.type`): Slack incoming webhooks, Microsoft Teams
 incoming webhooks (Adaptive Card), generic JSON webhooks (optionally HMAC-signed), email
-over SMTP, Jira Cloud issues, and SIEM export as OCSF Detection Finding (class 2004) JSON.
-`routing_rules.match` decides which findings go where.
+over SMTP, Jira Cloud issues, SIEM export as OCSF Detection Finding (class 2004) JSON, and
+two compliance-automation evidence pushes — Vanta and Drata. `routing_rules.match` decides
+which findings go where.
+
+Event kinds (EVENT_KINDS): `new_findings` and `scan_failed` come from a finished scan (the
+defaults a rule fires on), `weekly_digest` from digest.py (opt-in per rule via notify_on),
+`control_evaluated` is accepted by the senders for a future compliance hook, and `test` is
+only ever sent by POST /integrations/{id}/test.
+
+Vanta / Drata evidence push — provenance of the request shapes, read 2026-10-17:
+  • Vanta, Manage Vanta API "Upload file for document":
+      POST https://api.vanta.com/v1/documents/{documentId}/uploads  (multipart/form-data:
+      file, description?, effectiveAtDate?)  — Bearer token; Gov cloud uses api.vanta-gov.com.
+      https://developer.vanta.com/api-reference/documents/upload-file-for-document
+    Vanta, Build Integrations API "Sync all Custom Resources" (private integrations):
+      PUT https://api.vanta.com/v1/resources/custom_resource  (json: {resourceId,
+      resources:[{displayName, uniqueId, externalUrl, …custom props}]}) — full-state sync.
+      https://developer.vanta.com/api-reference/custom-resources/sync-all-custom-resources
+    The documented API host is api.vanta.com for every region (EU/AU customers differ only in
+    the browser host), so `region` here selects commercial vs gov, not EU vs US.
+  • Drata, Public API "Upload external evidence to map to a control"
+    (operation GRCPublicController_uploadExternalEvidence, developers.drata.com). The operation
+    exists in Drata's OpenAPI reference but its page was not retrievable; the field list below
+    (controlId path, multipart: file, creationDate, renewalDate, renewalScheduleType,
+    description, filename, comment, url) comes from third-party wrappers of that operation and
+    the documented personnel-evidence call (POST /public/users/{userId}/documents, multipart
+    `file`, Bearer API key, base https://public-api.drata.com).
+      https://developers.drata.com/docs/openapi/reference/operation/GRCPublicController_uploadExternalEvidence
+      https://help.drata.com/en/articles/7213389-drata-public-api-upload-evidence-for-a-user
+  Both senders are BEST-EFFORT until exercised against a sandbox: the payloads follow the
+  documented shapes, but the exact Drata path and enum values are unverified, and the
+  evidence content (a JSON file of findings + a pointer to the access-register export) is
+  what we chose to attach, not something either vendor prescribes.
 
 Design rules, in the same spirit as the scan loop:
 
@@ -46,6 +77,9 @@ _SEV_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 # What a rule fires on when its match carries no notify_on of its own.
 DEFAULT_EVENTS = ("new_findings", "scan_failed")
+# Every event kind a rule may name in notify_on. The digest is opt-in: nobody asked for a
+# weekly summary by configuring a Slack hook for new findings.
+EVENT_KINDS = ("new_findings", "scan_failed", "weekly_digest", "control_evaluated")
 
 # ── Integration contracts ─────────────────────────────────────────────────
 # Which config keys are credentials (→ Vault) and which are required to send at all.
@@ -58,6 +92,8 @@ INTEGRATION_SECRET_KEYS: dict[str, tuple[str, ...]] = {
     "email":   (),
     "jira":    ("api_token",),
     "siem":    ("url", "token"),                # token optional bearer for the SIEM endpoint
+    "vanta":   ("api_token",),                  # Manage-API bearer token (or private-integration token)
+    "drata":   ("api_key",),                    # Public API key
 }
 INTEGRATION_REQUIRED: dict[str, tuple[str, ...]] = {
     "slack":   ("webhook_url",),
@@ -66,8 +102,77 @@ INTEGRATION_REQUIRED: dict[str, tuple[str, ...]] = {
     "email":   ("to",),
     "jira":    ("base_url", "project_key", "email", "api_token"),
     "siem":    ("url",),
+    "vanta":   ("api_token", "document_id"),
+    "drata":   ("api_key", "control_id"),
 }
 INTEGRATION_TYPES = tuple(sorted(INTEGRATION_SECRET_KEYS))
+
+
+def _field(key: str, label: str, *, secret: bool = False, required: bool = False,
+           help: str = "") -> dict:
+    return {"key": key, "label": label, "secret": secret, "required": required, "help": help}
+
+
+# The form contract per integration type: what the console renders, in order. Secret flags
+# mirror INTEGRATION_SECRET_KEYS and required flags mirror INTEGRATION_REQUIRED (a test pins
+# both), so apps/web/settings/integrations/integration-fields.ts can be regenerated from this.
+INTEGRATION_FIELDS: dict[str, list[dict]] = {
+    "slack": [
+        _field("webhook_url", "Incoming webhook URL", secret=True, required=True,
+               help="Slack app → Incoming Webhooks. Whoever holds it can post, so it is vaulted."),
+    ],
+    "teams": [
+        _field("webhook_url", "Incoming webhook URL", secret=True, required=True,
+               help="Workflows 'When a Teams webhook request is received' URL or legacy connector URL."),
+    ],
+    "webhook": [
+        _field("url", "Endpoint URL", secret=True, required=True,
+               help="Receives a JSON event body. HTTPS; private/link-local addresses are refused."),
+        _field("hmac_secret", "HMAC signing secret", secret=True,
+               help="Optional. Bodies are signed sha256 into X-VectaSec-Signature."),
+    ],
+    "email": [
+        _field("to", "Recipients", required=True,
+               help="Comma-separated addresses. SMTP settings come from the engine's environment."),
+    ],
+    "jira": [
+        _field("base_url", "Jira Cloud base URL", required=True, help="https://<site>.atlassian.net"),
+        _field("project_key", "Project key", required=True),
+        _field("email", "Account email", required=True, help="The Atlassian account the token belongs to."),
+        _field("api_token", "API token", secret=True, required=True),
+        _field("issue_type", "Issue type", help="Defaults to Task."),
+    ],
+    "siem": [
+        _field("url", "Collector URL", secret=True, required=True,
+               help="Receives an array of OCSF 2004 Detection Finding objects."),
+        _field("token", "Bearer token", secret=True, help="Optional Authorization: Bearer header."),
+    ],
+    "vanta": [
+        _field("api_token", "API token", secret=True, required=True,
+               help="Manage Vanta API bearer token with vanta-api.documents:upload (one-hour tokens: "
+                    "mint a long-lived one via your OAuth client, or rotate here)."),
+        _field("document_id", "Evidence document ID", required=True,
+               help="From GET /v1/documents — the document each push attaches a file to."),
+        _field("resource_id", "Custom resource ID",
+               help="Optional. A private-integration custom resource to sync identities into "
+                    "(PUT /v1/resources/custom_resource). Needs connectors.self:write-resource."),
+        _field("region", "Region", help="us (api.vanta.com, also EU/AU accounts) or gov (api.vanta-gov.com)."),
+        _field("register_url", "Access-register link",
+               help="Optional HTTPS URL of your VectaSec access-register export, cited in the evidence."),
+    ],
+    "drata": [
+        _field("api_key", "Public API key", secret=True, required=True,
+               help="Drata Public API key with read/write on controls and evidence."),
+        _field("control_id", "Control ID", required=True,
+               help="The Drata control the external evidence maps to."),
+        _field("workspace_id", "Workspace ID", help="Optional; multi-workspace accounts."),
+        _field("renewal_schedule_type", "Renewal schedule",
+               help="Optional; Drata's renewal cadence enum for the evidence (left out when empty)."),
+        _field("base_url", "API base URL", help="Defaults to https://public-api.drata.com."),
+        _field("register_url", "Access-register link",
+               help="Optional HTTPS URL of your VectaSec access-register export, cited in the evidence."),
+    ],
+}
 
 
 class NotifyError(Exception):
@@ -122,6 +227,14 @@ def _summary_text(event: dict) -> str:
                 + (f" — {event.get('error')}" if event.get("error") else ""))
     if event["kind"] == "test":
         return "VectaSec test notification — this integration is wired up correctly."
+    if event["kind"] == "weekly_digest":
+        from .digest import render_digest_text    # lazy: digest.py imports deliver() from here
+        return render_digest_text(event.get("digest") or {})
+    if event["kind"] == "control_evaluated":
+        c = event.get("control") or {}
+        return (f"VectaSec: control {c.get('framework') or '?'} {c.get('control_id') or '?'} "
+                f"evaluated → {c.get('status') or 'unknown'}"
+                + (f" — {c.get('title')}" if c.get("title") else ""))
     findings = event.get("findings") or []
     by_sev: dict[str, int] = {}
     for f in findings:
@@ -147,6 +260,8 @@ def _event_body(event: dict) -> dict:
         "connection": event.get("connection"),
         "findings": event.get("findings") or [],
         "error": event.get("error"),
+        **({"digest": event["digest"]} if event.get("digest") is not None else {}),
+        **({"control": event["control"]} if event.get("control") is not None else {}),
     }
 
 
@@ -274,7 +389,11 @@ def send_slack(config: dict, event: dict, client: Optional[httpx.Client] = None)
     url = config.get("webhook_url")
     if not url:
         raise NotifyError("slack: webhook_url is not configured")
-    _post(client, url, dest="slack", json={"text": _summary_text(event)})
+    payload: dict = {"text": _summary_text(event)}
+    if event.get("kind") == "weekly_digest":
+        from .digest import render_digest_slack
+        payload = render_digest_slack(event.get("digest") or {})
+    _post(client, url, dest="slack", json=payload)
 
 
 def send_teams(config: dict, event: dict, client: Optional[httpx.Client] = None) -> None:
@@ -341,6 +460,12 @@ def send_email(config: dict, event: dict, client: Optional[httpx.Client] = None)
         subject = f"[VectaSec] scan failed: {_connection_label(event)}"
     elif event["kind"] == "test":
         subject = "[VectaSec] test notification"
+    elif event["kind"] == "weekly_digest":
+        d = event.get("digest") or {}
+        subject = f"[VectaSec] weekly digest {str(d.get('period_start') or '')[:10]} → {str(d.get('period_end') or '')[:10]}"
+    elif event["kind"] == "control_evaluated":
+        c = event.get("control") or {}
+        subject = f"[VectaSec] control evaluated: {c.get('framework') or '?'} {c.get('control_id') or '?'}"
     else:
         subject = (f"[VectaSec] {len(event.get('findings') or [])} new finding(s): "
                    f"{_connection_label(event)}")
@@ -402,6 +527,151 @@ def send_siem(config: dict, event: dict, client: Optional[httpx.Client] = None) 
           headers=headers)
 
 
+# ── Compliance-automation evidence (Vanta / Drata) ────────────────────────
+def evidence_payload(event: dict) -> dict:
+    """What we attach as evidence, for either vendor. A scan event carries the finding list
+    (rule, severity, resource, observation, status) and a pointer to the access-register
+    export; a weekly_digest event carries the digest summary; control_evaluated carries the
+    control. No secrets: findings never hold credential values."""
+    kind = event.get("kind")
+    base = {
+        "source": "vectasec",
+        "event": kind,
+        "tenant_id": event.get("tenant_id"),
+        "scan_id": event.get("scan_id"),
+        "connection": event.get("connection"),
+        "access_register": {
+            "endpoint": "/reports/access-register?format=csv",
+            "note": "Auditor access register (one row per non-human identity, SOC2 CC6.1-CC6.3, "
+                    "ISO A.5.16-A.5.18, PCI 8.6.x where in CDE scope). Export it from VectaSec.",
+        },
+    }
+    if kind == "weekly_digest":
+        base["digest"] = event.get("digest") or {}
+    elif kind == "control_evaluated":
+        base["control"] = event.get("control") or {}
+    else:
+        base["findings"] = [{
+            "rule": f.get("rule_id"), "severity": f.get("severity"),
+            "resource": f.get("resource_name") or f.get("resource_ext_id"),
+            "resource_kind": f.get("resource_kind"),
+            "observation": f.get("detail"), "status": f.get("status") or "open",
+            "title": f.get("title"),
+        } for f in (event.get("findings") or [])]
+        if event.get("error"):
+            base["error"] = event["error"]
+    return base
+
+
+def _evidence_title(event: dict) -> str:
+    kind = event.get("kind")
+    if kind == "weekly_digest":
+        d = event.get("digest") or {}
+        return f"VectaSec weekly digest {str(d.get('period_start') or '')[:10]} to {str(d.get('period_end') or '')[:10]}"
+    if kind == "control_evaluated":
+        c = event.get("control") or {}
+        return f"VectaSec control evaluation {c.get('framework') or ''} {c.get('control_id') or ''}".strip()
+    if kind == "scan_failed":
+        return f"VectaSec scan failed: {_connection_label(event)}"
+    return f"VectaSec scan evidence: {_connection_label(event)} ({len(event.get('findings') or [])} finding(s))"
+
+
+def _evidence_filename(event: dict) -> str:
+    stem = "".join(ch if ch.isalnum() else "-" for ch in _evidence_title(event).lower()).strip("-")
+    return f"{stem[:80] or 'vectasec-evidence'}.json"
+
+
+_VANTA_HOSTS = {"us": "https://api.vanta.com", "eu": "https://api.vanta.com",
+                "gov": "https://api.vanta-gov.com"}
+
+
+def send_vanta(config: dict, event: dict, client: Optional[httpx.Client] = None) -> None:
+    """Attach the evidence JSON to a Vanta evidence document (POST /v1/documents/{id}/uploads,
+    multipart). When `resource_id` is also set, additionally sync the event's resources into a
+    private-integration custom resource (PUT /v1/resources/custom_resource) — note that call is
+    a full-state sync on Vanta's side, so it only makes sense for a rule that routes everything.
+    See the module docstring for provenance; best-effort until exercised against a sandbox."""
+    token = config.get("api_token")
+    document_id = str(config.get("document_id") or "").strip()
+    if not token or not document_id:
+        raise NotifyError("vanta: api_token and document_id are required")
+    region = str(config.get("region") or "us").strip().lower()
+    base = _VANTA_HOSTS.get(region)
+    if not base:
+        raise NotifyError(f"vanta: unknown region {region!r} (us|eu|gov)")
+    payload = evidence_payload(event)
+    if config.get("register_url"):
+        payload["access_register"]["url"] = config["register_url"]
+    body = json.dumps(payload, default=str, sort_keys=True).encode()
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": "vectasec-notify"}
+    _post(client, f"{base}/v1/documents/{document_id}/uploads", dest="vanta",
+          headers=headers,
+          data={"description": _evidence_title(event)},
+          files={"file": (_evidence_filename(event), body, "application/json")})
+
+    resource_id = str(config.get("resource_id") or "").strip()
+    if resource_id and event.get("kind") not in ("weekly_digest", "control_evaluated"):
+        external = config.get("register_url") or "https://vectasec.io/access-register"
+        resources = [{
+            "displayName": f"{f.get('rule_id')} on {f.get('resource_name') or f.get('resource_ext_id') or '?'}",
+            "uniqueId": str(f.get("id") or f"{f.get('rule_id')}|{f.get('resource_ext_id')}"),
+            "externalUrl": external,
+        } for f in (event.get("findings") or [])]
+        _put(client, f"{base}/v1/resources/custom_resource", dest="vanta",
+             headers={**headers, "Content-Type": "application/json"},
+             content=json.dumps({"resourceId": resource_id, "resources": resources},
+                                default=str).encode())
+
+
+def send_drata(config: dict, event: dict, client: Optional[httpx.Client] = None) -> None:
+    """Upload the evidence JSON as external evidence mapped to a Drata control
+    (POST {base}/public/controls/{controlId}/external-evidence, multipart). Path and field
+    names follow Drata's documented operation as reflected by its wrappers; see the module
+    docstring — best-effort until exercised against a sandbox."""
+    key = config.get("api_key")
+    control_id = str(config.get("control_id") or "").strip()
+    if not key or not control_id:
+        raise NotifyError("drata: api_key and control_id are required")
+    base = str(config.get("base_url") or "https://public-api.drata.com").rstrip("/")
+    payload = evidence_payload(event)
+    if config.get("register_url"):
+        payload["access_register"]["url"] = config["register_url"]
+    body = json.dumps(payload, default=str, sort_keys=True).encode()
+    created = str(event.get("occurred_at") or (event.get("digest") or {}).get("period_end") or "")
+    data = {
+        "description": _evidence_title(event),
+        "filename": _evidence_filename(event),
+    }
+    if created:
+        data["creationDate"] = created
+    if config.get("renewal_schedule_type"):
+        data["renewalScheduleType"] = str(config["renewal_schedule_type"])
+    if config.get("workspace_id"):
+        data["workspaceId"] = str(config["workspace_id"])
+    if config.get("register_url"):
+        data["url"] = str(config["register_url"])
+    _post(client, f"{base}/public/controls/{control_id}/external-evidence", dest="drata",
+          headers={"Authorization": f"Bearer {key}", "User-Agent": "vectasec-notify"},
+          data=data, files={"file": (data["filename"], body, "application/json")})
+
+
+def _put(client: Optional[httpx.Client], url: str, *, dest: str, **kwargs) -> httpx.Response:
+    """PUT twin of _post: same guard, timeout and error mapping."""
+    if client is None:
+        guard_url(url, dest=dest)
+    try:
+        if client is not None:
+            res = client.put(url, **kwargs)
+        else:
+            with httpx.Client(timeout=_TIMEOUT) as c:
+                res = c.put(url, **kwargs)
+    except httpx.HTTPError as e:
+        raise NotifyError(f"{dest}: {type(e).__name__}") from e
+    if res.status_code >= 300:
+        raise NotifyError(f"{dest}: HTTP {res.status_code}: {res.text[:200]}")
+    return res
+
+
 SENDERS: dict[str, Callable[..., None]] = {
     "slack": send_slack,
     "teams": send_teams,
@@ -409,6 +679,8 @@ SENDERS: dict[str, Callable[..., None]] = {
     "email": send_email,
     "jira": send_jira,
     "siem": send_siem,
+    "vanta": send_vanta,
+    "drata": send_drata,
 }
 
 
@@ -421,8 +693,11 @@ def deliver(type_: str, config: dict, event: dict, client: Optional[httpx.Client
 
 # ── Routing (pure — unit-tested without a DB) ─────────────────────────────
 def rule_wants(match: dict, kind: str) -> bool:
-    """Does this rule fire for this event kind? Absent notify_on means both scan events;
+    """Does this rule fire for this event kind? Absent notify_on means both scan events
+    (DEFAULT_EVENTS); weekly_digest / control_evaluated fire only when named explicitly;
     'test' is never routed by rules (it goes through POST /integrations/{id}/test)."""
+    if kind not in EVENT_KINDS:
+        return False
     events = match.get("notify_on") or list(DEFAULT_EVENTS)
     return kind in events
 

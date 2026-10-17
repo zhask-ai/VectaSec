@@ -26,6 +26,7 @@ required members emitted are, at the root: `uuid`, `metadata`, `import-ap`, `res
 import csv
 import io
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 # One source of truth for "which statuses are still an unremediated problem on the asset".
@@ -38,6 +39,12 @@ __all__ = [
     "to_findings_csv",
     "to_executive_summary_markdown",
     "posture_from_counts",
+    "to_access_register_rows",
+    "to_access_register_csv",
+    "to_access_register_markdown",
+    "access_register_coverage",
+    "ACCESS_REGISTER_CSV_COLUMNS",
+    "ACCESS_REGISTER_CONTROLS",
     "FINDINGS_CSV_COLUMNS",
     "OSCAL_VERSION",
 ]
@@ -630,3 +637,390 @@ def _pct(value: Optional[float]) -> str:
     if value is None:
         return "—"
     return f"{round(value * 100)}%"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Auditor access register — "who can touch your data", one row per identity
+# ══════════════════════════════════════════════════════════════════════════
+#
+# The register is the export an auditor asks for when the SOC 2 CC6.x exception reads "no
+# register of service accounts". It is built from the normalized identity/credential/grant
+# resources identity.py derives from every connector, plus the open lifecycle verdicts on them.
+# Same discipline as the rest of this module: pure, no clock (generated_at is passed in and is
+# the reference point for days_idle), deterministic ordering (system, identity), no secrets —
+# a credential row carries only type metadata, never a value.
+#
+# LAST-USED HONESTY (strategy §8). Three distinct renderings, never collapsed into one:
+#   dated    — a connector or runtime evidence recorded an actual timestamp.
+#   "never"  — the connector could read a last-used signal and it was empty (AWS access keys
+#              with no LastUsedDate, a role with no RoleLastUsed).
+#   "unknown"— nothing could read it (Kong, Kubernetes service accounts, Kafka principals…).
+# "unknown" is NOT "unused". The Markdown header names the systems with no last-used source so
+# the reader cannot mistake a blank for an idle credential.
+
+ACCESS_REGISTER_CSV_COLUMNS = (
+    "system",
+    "identity",
+    "identity_type",
+    "owner",
+    "external",
+    "automation",
+    "credentials",
+    "credential_types",
+    "last_used_at",
+    "last_used_source",
+    "days_idle",
+    "grants",
+    "wildcard_grants",
+    "targets",
+    "highest_sensitivity",
+    "verdicts",
+    "controls",
+    "pci_scope",
+)
+
+# The controls a register row is evidence for. Text is a quote-free paraphrase (the TSC and ISO
+# texts are licensed, see docs/research/compliance-mapping.md §10); the PCI rows are gated on
+# CDE scope because PCI applies to system components in or connected to the CDE and nothing
+# else, and 8.6.1/8.6.2 are additionally gated on interactive-login capability, which an
+# inventory cannot establish — so they are listed as "evidence toward", never as satisfied.
+ACCESS_REGISTER_CONTROLS: tuple[dict, ...] = (
+    {"framework": "SOC2_TSC_2017", "control_id": "CC6.1", "cde_only": False,
+     "evidence": "inventory of the non-human principals with logical access to protected assets"},
+    {"framework": "SOC2_TSC_2017", "control_id": "CC6.2", "cde_only": False,
+     "evidence": "each principal is registered with an owner and its access can be reviewed and removed"},
+    {"framework": "SOC2_TSC_2017", "control_id": "CC6.3", "cde_only": False,
+     "evidence": "grants per principal, wildcard grants flagged, for a least-privilege review"},
+    {"framework": "ISO_27001_2022", "control_id": "A.5.16", "cde_only": False,
+     "evidence": "identity life cycle: every identity named, typed, owned, shared/default ones flagged"},
+    {"framework": "ISO_27001_2022", "control_id": "A.5.17", "cde_only": False,
+     "evidence": "authentication information per identity: credential types and lifecycle verdicts"},
+    {"framework": "ISO_27001_2022", "control_id": "A.5.18", "cde_only": False,
+     "evidence": "access rights per identity with last-use, as the input to a periodic review"},
+    {"framework": "PCI_DSS_4_0_1", "control_id": "8.6.1", "cde_only": True,
+     "evidence": "application and system accounts enumerated; interactive-login capability is not established by this export"},
+    {"framework": "PCI_DSS_4_0_1", "control_id": "8.6.2", "cde_only": True,
+     "evidence": "application and system account credentials enumerated by type; hard-coding is not established by this export"},
+    {"framework": "PCI_DSS_4_0_1", "control_id": "8.6.3", "cde_only": True,
+     "evidence": "application and system account credentials with rotation/age verdicts where a connector records them"},
+)
+
+_SENS_RANK = {"high": 3, "medium": 2, "low": 1, "none": 0}
+_VERDICT_PREFIXES = ("CREDENTIAL.LIFECYCLE.", "NHI.")
+_TARGETS_SHOWN = 5
+
+
+def _labels(row: dict) -> dict:
+    labels = row.get("labels") if isinstance(row, dict) else None
+    return labels if isinstance(labels, dict) else {}
+
+
+def _raw(row: dict) -> dict:
+    raw = row.get("raw") if isinstance(row, dict) else None
+    return raw if isinstance(raw, dict) else {}
+
+
+def _flag(value) -> str:
+    """Tri-state label → 'true' | 'false' | 'unknown'. Absent is unknown, never false: a label
+    another agent has not written yet must not read as a negative assertion."""
+    if value is None or value == "":
+        return "unknown"
+    return "true" if str(value).strip().lower() in ("true", "1", "yes") else "false"
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _last_used(identity: dict, creds: list, runtime: Optional[dict]) -> tuple[str, str]:
+    """(last_used_at, source) with the three-way distinction kept intact.
+
+    Precedence: the newest DATED signal across the identity label, its credentials' labels and
+    runtime evidence wins (a dated observation beats a connector's 'never'). With no dated
+    signal, 'never' is reported only when some source positively read an empty last-used; with
+    no source at all the answer is 'unknown'."""
+    dated: list[tuple[datetime, str, str]] = []
+    saw_never = False
+    never_source = ""
+    candidates = [(_labels(identity), "")] + [(_labels(c), "") for c in creds]
+    for labels, _ in candidates:
+        if "last_used_at" not in labels:
+            continue
+        value = labels.get("last_used_at")
+        source = str(labels.get("last_used_source") or "connector")
+        if value is None or str(value).strip().lower() in ("", "never"):
+            saw_never = True
+            never_source = never_source or source
+            continue
+        dt = _parse_iso(str(value))
+        if dt is not None:
+            dated.append((dt, str(value), source))
+    if runtime:
+        value = runtime.get("last_seen") if isinstance(runtime, dict) else runtime
+        dt = _parse_iso(str(value or ""))
+        if dt is not None:
+            source = (runtime.get("source") if isinstance(runtime, dict) else None) or "runtime_evidence"
+            dated.append((dt, str(value), str(source)))
+    if dated:
+        dated.sort(key=lambda t: (t[0], t[1], t[2]))
+        _dt, text, source = dated[-1]
+        return text, source
+    if saw_never:
+        return "never", never_source
+    return "unknown", "unknown"
+
+
+def _days_idle(last_used_at: str, generated_at: str) -> str:
+    if last_used_at in ("never", "unknown", ""):
+        return ""
+    last, gen = _parse_iso(last_used_at), _parse_iso(generated_at)
+    if last is None or gen is None:
+        return ""
+    return str(max(0, (gen - last).days))
+
+
+def _controls_for_row(system: str, cde_systems: Optional[set]) -> tuple[list[str], str]:
+    in_cde = bool(cde_systems) and system in cde_systems
+    ids = [f"{c['framework']}:{c['control_id']}" for c in ACCESS_REGISTER_CONTROLS
+           if not c["cde_only"] or in_cde]
+    if cde_systems is None:
+        pci = "not_declared"
+    else:
+        pci = "in_cde" if in_cde else "out_of_scope"
+    return ids, pci
+
+
+def to_access_register_rows(
+    identities: list,
+    credentials: list,
+    grants: list,
+    *,
+    runtime_last_seen: Optional[dict] = None,
+    generated_at: str,
+    findings: Optional[list] = None,
+    target_sensitivity: Optional[dict] = None,
+    cde_systems: Optional[set] = None,
+) -> list[dict]:
+    """One row per identity resource. Inputs are plain dicts as the console/API select them:
+    {id, ext_id, name, labels, raw}. Credentials attach by labels.owner == identity ext_id,
+    grants by labels.identity == identity ext_id. `findings` (optional) are open findings with
+    rule_id and a resource_ext_id/resource_id; the CREDENTIAL.LIFECYCLE.* / NHI.* ones on the
+    identity, its credentials or its grants become the row's verdicts. `runtime_last_seen` maps
+    principal name → ISO last_seen (or {last_seen, source}). `target_sensitivity` maps a grant
+    target ext_id/name → data_sensitivity label. `cde_systems` (None = the tenant has declared
+    no CDE scope) gates the PCI 8.6.x controls. Ordered by (system, identity, ext_id)."""
+    runtime_last_seen = runtime_last_seen or {}
+    target_sensitivity = target_sensitivity or {}
+
+    creds_by: dict[str, list] = {}
+    for c in credentials or []:
+        creds_by.setdefault(str(_labels(c).get("owner") or _raw(c).get("owner_ext_id") or ""), []).append(c)
+    grants_by: dict[str, list] = {}
+    for g in grants or []:
+        grants_by.setdefault(str(_labels(g).get("identity") or _raw(g).get("identity_ext_id") or ""), []).append(g)
+
+    verdicts_by: dict[str, list[str]] = {}
+    for f in findings or []:
+        if not _is_open(f) or not _is_assessable(f):
+            continue
+        rule = _get(f, "rule_id")
+        if not rule.startswith(_VERDICT_PREFIXES):
+            continue
+        for key in (_get(f, "resource_ext_id"), _get(f, "resource_id")):
+            if key:
+                verdicts_by.setdefault(key, []).append(rule)
+
+    rows = []
+    for ident in identities or []:
+        labels = _labels(ident)
+        raw = _raw(ident)
+        ext_id = str(ident.get("ext_id") or "")
+        name = str(ident.get("name") or raw.get("principal") or ext_id)
+        system = str(labels.get("system") or raw.get("system") or "")
+        creds = sorted(creds_by.get(ext_id, []), key=lambda c: str(c.get("ext_id") or ""))
+        my_grants = sorted(grants_by.get(ext_id, []), key=lambda g: str(g.get("ext_id") or ""))
+
+        cred_types = sorted({str(_labels(c).get("credential_type") or _raw(c).get("credential_type") or "unknown")
+                             for c in creds})
+        wildcard = sum(1 for g in my_grants if _flag(_labels(g).get("wildcard")) == "true")
+        targets: list[str] = []
+        for g in my_grants:
+            target = _labels(g).get("target") or _raw(g).get("target") or ""
+            target = str(target)
+            if target and target not in targets:
+                targets.append(target)
+        targets.sort()
+        highest = "unknown"
+        best = -1
+        for t in targets:
+            sens = str(target_sensitivity.get(t) or "").lower()
+            if sens in _SENS_RANK and _SENS_RANK[sens] > best:
+                best, highest = _SENS_RANK[sens], sens
+        if highest == "unknown" and targets and best < 0:
+            highest = "unknown"
+
+        verdicts: set[str] = set()
+        for key in (ext_id, str(ident.get("id") or "")):
+            verdicts.update(verdicts_by.get(key, []))
+        for r in creds + my_grants:
+            for key in (str(r.get("ext_id") or ""), str(r.get("id") or "")):
+                verdicts.update(verdicts_by.get(key, []))
+
+        last_used_at, source = _last_used(ident, creds, runtime_last_seen.get(name))
+        controls, pci_scope = _controls_for_row(system, cde_systems)
+
+        rows.append({
+            "system": system,
+            "identity": name,
+            "ext_id": ext_id,
+            "identity_type": str(labels.get("identity_type") or raw.get("identity_type") or "unknown"),
+            "owner": str(labels.get("owner_label") or raw.get("owner_label") or ""),
+            "external": _flag(labels.get("external")),
+            "automation": _flag(labels.get("automation")),
+            "credentials": len(creds),
+            "credential_types": cred_types,
+            "last_used_at": last_used_at,
+            "last_used_source": source,
+            "days_idle": _days_idle(last_used_at, generated_at),
+            "grants": len(my_grants),
+            "wildcard_grants": wildcard,
+            "targets": targets[:_TARGETS_SHOWN],
+            "targets_more": max(0, len(targets) - _TARGETS_SHOWN),
+            "highest_sensitivity": highest,
+            "verdicts": sorted(verdicts),
+            "controls": controls,
+            "pci_scope": pci_scope,
+        })
+    rows.sort(key=lambda r: (r["system"], r["identity"], r["ext_id"]))
+    return rows
+
+
+def _targets_cell(row: dict) -> str:
+    cell = "; ".join(row.get("targets") or [])
+    more = int(row.get("targets_more") or 0)
+    return f"{cell} +{more}" if more else cell
+
+
+def to_access_register_csv(rows: list, *, include_header: bool = True) -> str:
+    """Rows → CSV with ACCESS_REGISTER_CSV_COLUMNS, '\\n' line endings, stdlib escaping."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    if include_header:
+        writer.writerow(ACCESS_REGISTER_CSV_COLUMNS)
+    for r in rows or []:
+        writer.writerow([
+            r.get("system", ""), r.get("identity", ""), r.get("identity_type", ""),
+            r.get("owner", ""), r.get("external", ""), r.get("automation", ""),
+            r.get("credentials", 0), "; ".join(r.get("credential_types") or []),
+            r.get("last_used_at", "unknown"), r.get("last_used_source", "unknown"),
+            r.get("days_idle", ""), r.get("grants", 0), r.get("wildcard_grants", 0),
+            _targets_cell(r), r.get("highest_sensitivity", "unknown"),
+            "; ".join(r.get("verdicts") or []), "; ".join(r.get("controls") or []),
+            r.get("pci_scope", "not_declared"),
+        ])
+    return buffer.getvalue()
+
+
+def access_register_coverage(rows: list, *, last_used_capable: Optional[set] = None,
+                             truncated: bool = False, limit: Optional[int] = None) -> dict:
+    """The coverage block the Markdown header prints. `systems_without_last_used` = systems in
+    the register where no row carries any last-used signal (every row is 'unknown') and which
+    are not in `last_used_capable` (connector types that CAN read a last-used source)."""
+    systems = sorted({r.get("system", "") for r in rows or [] if r.get("system")})
+    capable = set(last_used_capable or ())
+    without = []
+    for system in systems:
+        mine = [r for r in rows if r.get("system") == system]
+        if all(r.get("last_used_at") == "unknown" for r in mine) and system not in capable:
+            without.append(system)
+    return {
+        "systems": systems,
+        "systems_without_last_used": without,
+        "rows": len(rows or []),
+        "truncated": bool(truncated),
+        "limit": limit,
+    }
+
+
+def to_access_register_markdown(rows: list, *, tenant_name: str, generated_at: str,
+                                coverage: dict) -> str:
+    """The auditor-facing document: a header that states scope and the unknown≠unused caveat,
+    the controls this register is evidence for, then the table."""
+    rows = list(rows or [])
+    coverage = coverage or {}
+    lines: list[str] = []
+    lines.append(f"# Access register — {tenant_name}")
+    lines.append("")
+    lines.append(f"_Generated: {generated_at}_ · {coverage.get('rows', len(rows))} identit(y/ies)")
+    lines.append("")
+    lines.append("## Coverage")
+    lines.append("")
+    systems = coverage.get("systems") or []
+    lines.append(f"- **Systems contributing:** {', '.join(systems) if systems else 'none'}")
+    without = coverage.get("systems_without_last_used") or []
+    if without:
+        lines.append(
+            f"- **No last-used source:** {', '.join(without)} — for these systems "
+            "`last_used_at` reads `unknown`. **Unknown is not unused**: nothing readable "
+            "records when these identities last authenticated, so no idleness claim is made.")
+    else:
+        lines.append("- **No last-used source:** none — every contributing system has a "
+                     "last-used signal or recorded `never` from one.")
+    lines.append("- `never` means a source positively read an empty last-used value; a dated "
+                 "value is the newest signal across connector telemetry and runtime evidence.")
+    if coverage.get("truncated"):
+        lines.append(f"- **Truncated:** this export stops at {coverage.get('limit')} rows; "
+                     "the tenant has more identities than one document carries.")
+    lines.append("")
+    lines.append("## Controls this register is evidence for")
+    lines.append("")
+    lines.append("| Framework | Control | What the register evidences | Scope |")
+    lines.append("| --- | --- | --- | --- |")
+    for c in ACCESS_REGISTER_CONTROLS:
+        scope = "CDE-scoped systems only" if c["cde_only"] else "all systems"
+        lines.append(f"| {c['framework']} | {c['control_id']} | {c['evidence']} | {scope} |")
+    lines.append("")
+    lines.append("A register is evidence an auditor weighs, never a satisfied control: it can "
+                 "show a principal exists, is owned and is idle; it cannot show the control "
+                 "operates. PCI 8.6.1/8.6.2 are additionally gated on interactive-login "
+                 "capability, which this export does not establish.")
+    lines.append("")
+    lines.append("## Register")
+    lines.append("")
+    lines.append("| System | Identity | Type | Owner | External | Automation | Credentials | "
+                 "Last used | Source | Days idle | Grants | Wildcard | Targets | Sensitivity | "
+                 "Verdicts | PCI scope |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | "
+                 "--- | --- | --- |")
+    for r in rows:
+        creds = f"{r.get('credentials', 0)}"
+        if r.get("credential_types"):
+            creds += f" ({', '.join(r['credential_types'])})"
+        lines.append(
+            f"| {_md(r.get('system'))} | {_md(r.get('identity'))} | {_md(r.get('identity_type'))} | "
+            f"{_md(r.get('owner')) or '—'} | {r.get('external')} | {r.get('automation')} | {creds} | "
+            f"{r.get('last_used_at')} | {_md(r.get('last_used_source'))} | {r.get('days_idle') or '—'} | "
+            f"{r.get('grants', 0)} | {r.get('wildcard_grants', 0)} | {_md(_targets_cell(r)) or '—'} | "
+            f"{r.get('highest_sensitivity')} | {_md('; '.join(r.get('verdicts') or [])) or '—'} | "
+            f"{r.get('pci_scope')} |"
+        )
+    if not rows:
+        lines.append("| — | no identities derived yet | | | | | | | | | | | | | | |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _md(value) -> str:
+    """Escape a table cell: pipes would split the row, newlines would end it."""
+    return str(value or "").replace("|", "\\|").replace("\n", " ")

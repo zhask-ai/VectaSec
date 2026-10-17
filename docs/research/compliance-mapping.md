@@ -668,3 +668,42 @@ not `direct`.
 Sources (documents obtained from, not quoted):
 - [AICPA — 2017 Trust Services Criteria with revised points of focus (2022)](https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022)
 - [ISO — ISO/IEC 27001:2022](https://www.iso.org/standard/27001)
+
+## 11. Addendum (2026-10) — the auditor access register as evidence
+
+`GET /reports/access-register` (report.to_access_register_rows / _csv / _markdown) exports one
+row per non-human identity: system, type, owner, external/automation flags, credential count and
+types, last-used (with its source), days idle, grants, wildcard grants, targets, highest target
+sensitivity, open `CREDENTIAL.LIFECYCLE.*` / `NHI.*` verdicts, and a `controls` column. The
+column is the list of controls the row is **evidence toward** — never a satisfied control; the
+two design rules in §0 apply unchanged. The text per control is a quote-free paraphrase
+(`report.ACCESS_REGISTER_CONTROLS`):
+
+| Framework | Control | What a register row evidences | Gate |
+|---|---|---|---|
+| SOC 2 | CC6.1 | an inventory of the non-human principals with logical access to protected assets | none |
+| SOC 2 | CC6.2 | each principal is registered with an owner and its access can be reviewed and removed | none |
+| SOC 2 | CC6.3 | grants per principal with wildcards flagged, as the input to a least-privilege review | none |
+| ISO 27001:2022 | A.5.16 | identity life cycle: every identity named, typed, owned; shared/default flagged | none |
+| ISO 27001:2022 | A.5.17 | authentication information per identity: credential types and lifecycle verdicts | none |
+| ISO 27001:2022 | A.5.18 | access rights per identity with last-use, as the input to a periodic review | none |
+| PCI DSS 4.0.1 | 8.6.1 | application/system accounts enumerated; interactive-login capability is **not** established | system declared in CDE scope |
+| PCI DSS 4.0.1 | 8.6.2 | account credentials enumerated by type; hard-coding is **not** established | system declared in CDE scope |
+| PCI DSS 4.0.1 | 8.6.3 | account credentials with rotation/age verdicts where a connector records them | system declared in CDE scope |
+
+The PCI rows carry a `pci_scope` value per row: `in_cde`, `out_of_scope`, or `not_declared`
+when the tenant has declared no CDE scope at all (today: always, until scope declaration lands;
+the export then lists no PCI control for any row rather than assuming scope). 8.6.1/8.6.2 keep
+the interactive-login caveat from §1.3 verbatim in the document header.
+
+**Last-used honesty, carried into the export (strategy §8).** `last_used_at` is one of three
+things and the document says which: a dated value (newest across connector telemetry and
+`runtime_evidence`), `never` (a source positively read an empty last-used — AWS access keys
+and roles today), or `unknown` (no source could read it — Kong, Kubernetes service accounts,
+Kafka principals). The Markdown header lists the systems with no last-used source and states
+that unknown is not unused, so a blank cell cannot be read as idleness by an auditor.
+
+**Vanta / Drata push.** notify.py's `vanta` and `drata` integration types attach the same
+material as external evidence (a JSON file of findings or the weekly digest, plus a pointer to
+this export). Shapes and their provenance are documented in the notify.py module docstring;
+both are best-effort until exercised against a vendor sandbox.
