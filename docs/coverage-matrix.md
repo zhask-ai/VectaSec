@@ -105,6 +105,28 @@ toxic-combination rule). 21+18+20+16+24+18+6 per-system + 4 + 2 = 129.
 | **Rules cover** | Mesh mTLS not STRICT (per-policy and mesh-wide default absence), allow-all AuthorizationPolicies, DestinationRule TLS disable, plaintext mesh/API gateways and listeners, Ingress without TLS, LoadBalancer/NodePort exposure, RBAC (anonymous/all-authenticated bound, cluster-admin at cluster scope, wildcard verbs×resources), default-SA with grants + automount, legacy long-lived token secrets, collection-forbidden coverage gaps. |
 | **Not covered** | Cilium and Consul mesh CRDs, NetworkPolicies, Pod/workload security context posture, admission-controller configuration, runtime behaviour (no sensor), managed-control-plane specifics (EKS/GKE/AKS APIs are not called — only what the cluster API itself serves). Traefik/NGINX are seen only insofar as they implement Gateway API/Ingress; their native config files are not read. |
 
+### Zapier — `connect/zapier.py`, `detect/zapier.py` (6 rules: 1 high, 3 medium, 1 low, 1 info)
+
+| | |
+|---|---|
+| **Reads** | Zapier Workflow API (`https://api.zapier.com`, OAuth2 bearer token), GETs only: `GET /v1/profiles/me` (scope `profile` — the token's user, used as owner of every connection it can see), `GET /v2/zaps?expand=steps.action,steps.authentication` (scope `zap:all`, or `zap:account:all` + `include_shared` when an Account ID is set — with the narrower `zap` scope the inventory is only the partner's own integration and the account resource says so), and `GET /v2/authentications?app=<id>` (scope `connection:read`) once per app seen in the Zaps, which also surfaces connections no Zap uses. Every 401/403/404 is recorded **per endpoint** as not-readable, never as "no Zaps". |
+| **Kinds** | `zapier_account`, `zapier_zap`, `zapier_connection` (a stored third-party authentication — id, app, title, owner, expiry; never a token), `zapier_webhook_trigger` (a Zap triggered by Webhooks by Zapier catch hook — a public URL with no authentication by design) |
+| **Edges** | Yes — `account --owns--> zap`, `account --holds--> connection`, `zap --uses--> connection`, `webhook_trigger --triggers--> zap`. |
+| **NHI** | Yes — every `zapier_connection` becomes an `identity` (`automation_connection`, `automation=true`) + a `credential` (`oauth2` / `api_key` when the API states the auth type, otherwise `app_connection` — the current schema does not return it, so it is recorded as unknown rather than guessed; present=True, never a value) + one `grant` per distinct `<app>.<action>` the Zaps perform with it (`labels.target` = the app), `grants_access`-edged to each Zap. |
+| **Rules cover** | Webhook-triggered Zaps (`ZAPIER.ZAP.WEBHOOK_TRIGGER_UNAUTHENTICATED`, critical when the Zap writes to a production-shaped app, info when paused), anonymous-trigger → production write (`ZAPIER.ZAP.WRITES_TO_PRODUCTION_SYSTEM`: AWS/Postgres/MySQL/Snowflake/Salesforce/Stripe/Slack-admin/Google-Workspace-admin/GitHub…; not-assessable when steps came back unexpanded), one connection used by ≥5 Zaps (`ZAPIER.CONNECTION.SHARED_ACROSS_ZAPS`, threshold configurable via `zapier_shared_threshold`), ownerless / deactivated-owner / expired connections (`ZAPIER.CONNECTION.OWNER_LEFT_OR_UNKNOWN`; not-assessable when the profile endpoint was unreadable), paused Zaps still holding live connections (`ZAPIER.ZAP.PAUSED_WITH_LIVE_CONNECTION`), and the coverage gap itself (`ZAPIER.ACCOUNT.NOT_ASSESSED` when zaps/authentications were unreadable). |
+| **Not covered** | Zap run history and the account **Audit Log** (Team/Enterprise; UI export only, no public read API), Zapier Manager events, Zap step *inputs* (deliberately not stored), the webhook URL itself (not returned by the API), connections shared *with* the user but not owned (the Authentications endpoint returns owned ones only; a Zap that uses one still names it), per-connection auth mechanism (not in the API schema), and Zapier Tables/Interfaces/Agents. **Plan-tier caveat:** on a Free/Professional account the token sees one user's Zaps; account-wide inventory needs a Team/Enterprise account and the `zap:account:all` scope, and the shared/owner rules are only as complete as that scope. |
+
+### Integration-as-code — `connect/iac.py`, `detect/iac.py` (8 rules: see `SUPPLY.IAC.*`)
+
+| | |
+|---|---|
+| **Reads** | Files only, read-only, no repository is cloned: docker-compose, Kubernetes workload manifests, Kafka Connect connector JSON, RabbitMQ `definitions.json` exports, Kong declarative config (`_format_version`) and Helm `values*.yaml`. Literal secrets are fingerprinted (sha256/12) and **dropped**. |
+| **Kinds** | `iac_file`, `iac_workload` (one synthetic workload per RabbitMQ-definitions / Kong-declarative / Helm-values file) |
+| **Edges** | Yes — `iac_file --declares--> iac_workload`. |
+| **NHI** | Not as identities — but **principal names** are recorded for the "Also in git" column: `raw.principals = [{name, kind, key, file, line}]` and `labels.principals` (comma-joined unique names, sorted, capped at 50) on every workload and on the file. Kinds: `sasl_user` (SASL_USERNAME/KAFKA_USER env, JAAS `username="…"`, Helm `sasl.user`), `amqp_user` (RABBITMQ_DEFAULT_USER/AMQP_USER, definitions `users[].name`), `kong_consumer` (KONG_CONSUMER, declarative `consumers[].username` and credential owners), `aws_access_key_id` (AWS_ACCESS_KEY_ID — a name, no longer fingerprinted as a secret; the paired secret key still is), `client_id`, `username` (USER/USERNAME, Helm `auth.username`). A value whose key matched the secret regex is never stored as a principal; `${VAR}` references, booleans and URLs are skipped. The Access page matches these names against live-connector identity names. |
+| **Rules cover** | Literal and default credentials, anonymous-access toggles, plaintext listeners, public port bindings, privileged containers, unpinned images, unparseable manifests as not-assessable. |
+| **Not covered** | Terraform/CloudFormation cloud posture, git history (only the working tree is read), TruffleHog/GitGuardian ingestion (planned as a webhook, not a scanner), DataWeave and gateway policy files. |
+
 ### Cross-cutting packs (run on every connector's output)
 
 | Pack | Rules | Runs on | Notes |
@@ -127,7 +149,6 @@ category completion, then the long tail.
 
 **Wave 2 (category completion):**
 
-- n8n (public API)
 - MuleSoft Anypoint
 - NATS
 - IBM MQ (REST admin)
@@ -145,5 +166,5 @@ category completion, then the long tail.
 - Apollo GraphOS, LiteLLM / AI-gateway posture
 
 Also not supported anywhere: runtime/east-west traffic observation (no sensor), SBOM/CVE scanning
-(the version rules above are version-floor checks), and integration-as-code static analysis
-(DataWeave, gateway policy files, workflow JSON).
+(the version rules above are version-floor checks), and integration-as-code static analysis beyond
+the manifests the IaC row names (DataWeave, gateway policy files, workflow JSON).

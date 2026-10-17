@@ -213,24 +213,31 @@ def test_ensure_connection_without_secrets_sets_no_ref():
 # ── The migration's backfill map must match the registry ───────────────────
 def test_migration_secret_map_matches_registry_declarations():
     """20260723000002_vault_creds.sql hardcodes a per-type secret-key snapshot for the backfill
-    (SQL cannot read the Python registry). If a connector's declared secrets drift from that
-    snapshot, a fresh apply on a pre-vault database would leave secrets in plain config."""
+    (SQL cannot read the Python registry). Applied migrations are never edited, so a connector
+    added later gets its own `*_vault_creds_*.sql` extension carrying the same literal for just
+    the new type(s). The UNION of every snapshot, in filename order, must equal what the
+    connectors declare — otherwise a fresh apply on a pre-vault database would leave that
+    connector's secrets in plain config."""
     import pathlib
     import re
     from vectasec.registry import CONNECTORS
 
-    sql = None
+    migrations = None
     for parent in pathlib.Path(__file__).resolve().parents:
-        candidate = parent / "supabase" / "migrations" / "20260723000002_vault_creds.sql"
-        if candidate.exists():
-            sql = candidate.read_text()
+        candidate = parent / "supabase" / "migrations"
+        if (candidate / "20260723000002_vault_creds.sql").exists():
+            migrations = candidate
             break
-    if sql is None:
+    if migrations is None:
         pytest.skip("migration file not reachable from the test tree")
 
-    m = re.search(r"secret_map constant jsonb := '(\{.*?\})'", sql, re.S)
-    assert m, "secret_map literal not found in the migration"
-    sql_map = {k: sorted(v) for k, v in json.loads(m.group(1)).items()}
+    sql_map: dict = {}
+    for path in sorted(migrations.glob("*_vault_creds*.sql")):
+        m = re.search(r"secret_map constant jsonb := '(\{.*?\})'", path.read_text(), re.S)
+        assert m, f"secret_map literal not found in {path.name}"
+        for k, v in json.loads(m.group(1)).items():
+            assert k not in sql_map, f"{k} re-declared in {path.name}; one snapshot per type"
+            sql_map[k] = sorted(v)
     registry_map = {t: sorted(secret_keys(t)) for t in CONNECTORS if secret_keys(t)}
     assert sql_map == registry_map
 

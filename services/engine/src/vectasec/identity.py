@@ -57,6 +57,23 @@ def derive_identities(type_: str, collected: Collected) -> Collected:
     return collected
 
 
+# ── automation labelling ─────────────────────────────────────────────────────
+# Systems whose identities are held by an automation or agent rather than a service a human
+# operates directly. The strategy doc's "Belongs to an automation or agent" column is answered
+# from this label on every identity / credential / grant, so the console never has to know which
+# connector a row came from. A tag of "automation" on the identity sets it too, for connectors
+# (Kafka, Kong, …) whose principal is used by an automation even though the system is not one.
+AUTOMATION_SYSTEMS = {"n8n", "zapier", "workato", "boomi", "mulesoft", "mcp", "airflow"}
+
+
+def _is_automation(system: str, tags: list | None = None) -> bool:
+    return system in AUTOMATION_SYSTEMS or "automation" in (tags or [])
+
+
+def _bool_label(v: bool) -> str:
+    return "true" if v else "false"
+
+
 # ── builders ────────────────────────────────────────────────────────────────
 def _slug(s: str) -> str:
     return "".join(c if c.isalnum() else "-" for c in (s or "").lower()).strip("-") or "unknown"
@@ -69,14 +86,17 @@ def _grant_ext(system: str, identity_ext: str, action: str, target: str) -> str:
 
 def _mk_identity(system: str, itype: str, name: str, *, external: bool = False,
                  tags: list | None = None, source_ext: str = "", extra: dict | None = None) -> Resource:
+    automation = _is_automation(system, tags)
     return Resource(
         kind="identity",
         name=name,
         ext_id=f"identity:{system}:{_slug(name)}",
         labels={"identity_type": itype, "system": system,
-                "external": "true" if external else "false"},
+                "external": "true" if external else "false",
+                "automation": _bool_label(automation)},
         raw={"identity_type": itype, "system": system, "principal": name,
              "external": external, "tags": tags or [], "source_ext_id": source_ext,
+             "automation": automation,
              **(extra or {})},
     )
 
@@ -91,7 +111,8 @@ def _mk_credential(system: str, owner_ext: str, ctype: str, *, name: str,
         # `owner` is in labels (not just raw) so the console can group a credential under its
         # identity without ever selecting the leak-risk `raw` column.
         labels={"credential_type": ctype, "system": system, "owner": owner_ext,
-                "hashing": hashing, "default": "true" if is_default else "false"},
+                "hashing": hashing, "default": "true" if is_default else "false",
+                "automation": _bool_label(_is_automation(system))},
         raw={"credential_type": ctype, "system": system, "owner_ext_id": owner_ext,
              "hashing": hashing, "is_default": is_default, "present": present,
              "plaintext": plaintext, "count": count, **(extra or {})},
@@ -106,9 +127,13 @@ def _mk_grant(system: str, identity_ext: str, action: str, target: str, *,
         name=f"{action} → {target}" if target else action,
         ext_id=_grant_ext(system, identity_ext, action, target),
         namespace=scope or None,
-        # `identity` in labels lets the console link a grant to its holder without reading `raw`.
+        # `identity` in labels lets the console link a grant to its holder without reading `raw`;
+        # `target` is there for the same reason — the Access page renders "can <action> <target>"
+        # from labels alone, never from the leak-risk `raw` column.
         labels={"system": system, "action": action, "identity": identity_ext,
-                "wildcard": "true" if wildcard else "false", "permission": permission},
+                "target": target or "",
+                "wildcard": "true" if wildcard else "false", "permission": permission,
+                "automation": _bool_label(_is_automation(system))},
         raw={"system": system, "identity_ext_id": identity_ext, "action": action,
              "target": target, "wildcard": wildcard, "permission": permission,
              "scope": scope, **(extra or {})},

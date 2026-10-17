@@ -1,0 +1,133 @@
+{
+  "_doc": "Golden Zapier Workflow API bodies, shaped per docs.zapier.com (Get Zaps [v2] with expand=steps.action,steps.authentication; Get Authentications; User profile). Ids are synthetic.",
+  "profile": [
+    {"id": 88998899, "first_name": "Ada", "last_name": "Ops", "full_name": "Ada Ops",
+     "email": "ada.ops@example.com", "email_confirmed": true, "timezone": "UTC"}
+  ],
+  "zaps": [
+    {
+      "links": {"next": null, "prev": null},
+      "meta": {"count": 8, "offset": 0, "limit": 100},
+      "data": [
+        {
+          "type": "zap", "id": "zap-hook-prod", "is_enabled": true,
+          "last_successful_run_date": "2026-10-10T08:00:00Z", "updated_at": "2026-09-01T00:00:00Z",
+          "title": "Order webhook -> Postgres",
+          "links": {"html_editor": "https://zapier.com/editor/zap-hook-prod"},
+          "steps": [
+            {"action": {"id": "act-catch", "key": "catch_hook", "type": "READ_BULK", "action_type": "READ_BULK", "is_instant": true, "title": "Catch Hook", "description": "",
+                        "app": {"id": "app-webhook", "key": "WebHookAPI", "title": "Webhooks by Zapier"}},
+             "authentication": null, "inputs": {}, "title": "Catch Hook"},
+            {"action": {"id": "act-pg-insert", "key": "new_row", "type": "WRITE", "action_type": "WRITE", "is_instant": false, "title": "New Row", "description": "",
+                        "app": {"id": "app-postgres", "key": "PostgreSQLAPI", "title": "PostgreSQL"}},
+             "authentication": {"type": "authentication", "id": "auth-pg", "app": "app-postgres", "is_expired": false, "title": "PostgreSQL orders-db"},
+             "inputs": {"table": "orders"}, "title": "New Row"}
+          ]
+        },
+        {
+          "type": "zap", "id": "zap-hook-sheet", "is_enabled": true,
+          "last_successful_run_date": null, "updated_at": "2026-09-01T00:00:00Z",
+          "title": "Form webhook -> Google Sheet",
+          "links": {"html_editor": "https://zapier.com/editor/zap-hook-sheet"},
+          "steps": [
+            {"action": {"id": "act-catch", "key": "catch_raw_hook", "type": "READ_BULK", "action_type": "READ_BULK", "is_instant": true, "title": "Catch Raw Hook", "description": "",
+                        "app": {"id": "app-webhook", "key": "WebHookAPI", "title": "Webhooks by Zapier"}},
+             "authentication": null, "inputs": {}, "title": "Catch Raw Hook"},
+            {"action": {"id": "act-sheet-row", "key": "add_row", "type": "WRITE", "action_type": "WRITE", "is_instant": false, "title": "Create Spreadsheet Row", "description": "",
+                        "app": {"id": "app-sheets", "key": "GoogleSheetsV2API", "title": "Google Sheets"}},
+             "authentication": {"type": "authentication", "id": "auth-sheets", "app": "app-sheets", "is_expired": false, "title": "Google Sheets ada.ops@example.com"},
+             "inputs": {}, "title": "Create Spreadsheet Row"}
+          ]
+        },
+        {
+          "type": "zap", "id": "zap-hook-paused", "is_enabled": false,
+          "last_successful_run_date": "2025-01-01T00:00:00Z", "updated_at": "2025-01-01T00:00:00Z",
+          "title": "Old webhook -> Slack",
+          "links": {"html_editor": "https://zapier.com/editor/zap-hook-paused"},
+          "steps": [
+            {"action": {"id": "act-catch", "key": "catch_hook", "type": "READ_BULK", "action_type": "READ_BULK", "is_instant": true, "title": "Catch Hook", "description": "",
+                        "app": {"id": "app-webhook", "key": "WebHookAPI", "title": "Webhooks by Zapier"}},
+             "authentication": null, "inputs": {}, "title": "Catch Hook"},
+            {"action": {"id": "act-slack-msg", "key": "channel_message", "type": "WRITE", "action_type": "WRITE", "is_instant": false, "title": "Send Channel Message", "description": "",
+                        "app": {"id": "app-slack", "key": "SlackAPI", "title": "Slack"}},
+             "authentication": {"type": "authentication", "id": "auth-slack", "app": "app-slack", "is_expired": false, "title": "Slack acme.slack.com"},
+             "inputs": {}, "title": "Send Channel Message"}
+          ]
+        },
+        {
+          "type": "zap", "id": "zap-sf-1", "is_enabled": true, "last_successful_run_date": "2026-10-11T00:00:00Z", "updated_at": "2026-09-01T00:00:00Z",
+          "title": "New lead -> Slack 1", "links": {},
+          "steps": [
+            {"action": {"id": "act-sf-new", "key": "new_record", "type": "READ", "action_type": "READ", "is_instant": true, "title": "New Record", "description": "",
+                        "app": {"id": "app-salesforce", "key": "SalesforceAPI", "title": "Salesforce"}},
+             "authentication": {"type": "authentication", "id": "auth-sf", "app": "app-salesforce", "is_expired": false, "title": "Salesforce acme"}, "inputs": {}, "title": null},
+            {"action": {"id": "act-slack-msg", "key": "channel_message", "type": "WRITE", "action_type": "WRITE", "is_instant": false, "title": "Send Channel Message", "description": "",
+                        "app": {"id": "app-slack", "key": "SlackAPI", "title": "Slack"}},
+             "authentication": {"type": "authentication", "id": "auth-slack", "app": "app-slack", "is_expired": false, "title": "Slack acme.slack.com"}, "inputs": {}, "title": null}
+          ]
+        },
+        {
+          "type": "zap", "id": "zap-sf-2", "is_enabled": true, "last_successful_run_date": null, "updated_at": "2026-09-01T00:00:00Z",
+          "title": "New lead -> Slack 2", "links": {},
+          "steps": [
+            {"action": {"id": "act-sf-new", "key": "new_record", "type": "READ", "action_type": "READ", "is_instant": true, "title": "New Record", "description": "",
+                        "app": {"id": "app-salesforce", "key": "SalesforceAPI", "title": "Salesforce"}},
+             "authentication": {"type": "authentication", "id": "auth-sf", "app": "app-salesforce", "is_expired": false, "title": "Salesforce acme"}, "inputs": {}, "title": null},
+            {"action": {"id": "act-slack-msg", "key": "channel_message", "type": "WRITE", "action_type": "WRITE", "is_instant": false, "title": "Send Channel Message", "description": "",
+                        "app": {"id": "app-slack", "key": "SlackAPI", "title": "Slack"}},
+             "authentication": {"type": "authentication", "id": "auth-slack", "app": "app-slack", "is_expired": false, "title": "Slack acme.slack.com"}, "inputs": {}, "title": null}
+          ]
+        },
+        {
+          "type": "zap", "id": "zap-sf-3", "is_enabled": true, "last_successful_run_date": null, "updated_at": "2026-09-01T00:00:00Z",
+          "title": "New lead -> Slack 3", "links": {},
+          "steps": [
+            {"action": {"id": "act-sf-new", "key": "new_record", "type": "READ", "action_type": "READ", "is_instant": true, "title": "New Record", "description": "",
+                        "app": {"id": "app-salesforce", "key": "SalesforceAPI", "title": "Salesforce"}},
+             "authentication": {"type": "authentication", "id": "auth-sf", "app": "app-salesforce", "is_expired": false, "title": "Salesforce acme"}, "inputs": {}, "title": null},
+            {"action": {"id": "act-slack-msg", "key": "channel_message", "type": "WRITE", "action_type": "WRITE", "is_instant": false, "title": "Send Channel Message", "description": "",
+                        "app": {"id": "app-slack", "key": "SlackAPI", "title": "Slack"}},
+             "authentication": {"type": "authentication", "id": "auth-slack", "app": "app-slack", "is_expired": false, "title": "Slack acme.slack.com"}, "inputs": {}, "title": null}
+          ]
+        },
+        {
+          "type": "zap", "id": "zap-sf-4", "is_enabled": false, "last_successful_run_date": null, "updated_at": "2026-09-01T00:00:00Z",
+          "title": "New lead -> Slack 4 (paused)", "links": {},
+          "steps": [
+            {"action": {"id": "act-sf-new", "key": "new_record", "type": "READ", "action_type": "READ", "is_instant": true, "title": "New Record", "description": "",
+                        "app": {"id": "app-salesforce", "key": "SalesforceAPI", "title": "Salesforce"}},
+             "authentication": {"type": "authentication", "id": "auth-sf", "app": "app-salesforce", "is_expired": false, "title": "Salesforce acme"}, "inputs": {}, "title": null},
+            {"action": {"id": "act-slack-msg", "key": "channel_message", "type": "WRITE", "action_type": "WRITE", "is_instant": false, "title": "Send Channel Message", "description": "",
+                        "app": {"id": "app-slack", "key": "SlackAPI", "title": "Slack"}},
+             "authentication": {"type": "authentication", "id": "auth-slack", "app": "app-slack", "is_expired": false, "title": "Slack acme.slack.com"}, "inputs": {}, "title": null}
+          ]
+        },
+        {
+          "type": "zap", "id": "zap-unexpanded", "is_enabled": true, "last_successful_run_date": null, "updated_at": "2026-09-01T00:00:00Z",
+          "title": "Unexpanded steps", "links": {},
+          "steps": [
+            {"action": {"id": "act-catch", "key": "catch_hook", "type": "READ_BULK", "action_type": "READ_BULK", "is_instant": true, "title": "Catch Hook", "description": "",
+                        "app": {"id": "app-webhook", "key": "WebHookAPI", "title": "Webhooks by Zapier"}},
+             "authentication": null, "inputs": {}, "title": "Catch Hook"},
+            {"action": "uag:opaque-action-id", "authentication": "auth-expired", "inputs": {}, "title": null}
+          ]
+        }
+      ]
+    }
+  ],
+  "authentications": {
+    "app-postgres": {"links": {"next": null, "prev": null}, "meta": {"count": 1, "limit": 100, "offset": 0},
+      "data": [{"type": "authentication", "id": "auth-pg", "app": "app-postgres", "is_expired": false, "title": "PostgreSQL orders-db"}]},
+    "app-sheets": {"links": {"next": null, "prev": null}, "meta": {"count": 1, "limit": 100, "offset": 0},
+      "data": [{"type": "authentication", "id": "auth-sheets", "app": "app-sheets", "is_expired": false, "title": "Google Sheets ada.ops@example.com"}]},
+    "app-slack": {"links": {"next": null, "prev": null}, "meta": {"count": 2, "limit": 100, "offset": 0},
+      "data": [
+        {"type": "authentication", "id": "auth-slack", "app": "app-slack", "is_expired": false, "title": "Slack acme.slack.com"},
+        {"type": "authentication", "id": "auth-slack-orphan", "app": "app-slack", "is_expired": false, "title": "Slack old-workspace (unused)"}
+      ]},
+    "app-salesforce": {"links": {"next": null, "prev": null}, "meta": {"count": 1, "limit": 100, "offset": 0},
+      "data": [{"type": "authentication", "id": "auth-sf", "app": "app-salesforce", "is_expired": false, "title": "Salesforce acme", "auth_type": "oauth2"}]},
+    "app-github": {"links": {"next": null, "prev": null}, "meta": {"count": 1, "limit": 100, "offset": 0},
+      "data": [{"type": "authentication", "id": "auth-expired", "app": {"id": "app-github", "key": "GitHubAPI", "title": "GitHub"}, "is_expired": true, "title": "GitHub bob (left)", "auth_type": "api_key"}]}
+  }
+}

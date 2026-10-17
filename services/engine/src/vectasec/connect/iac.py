@@ -16,6 +16,16 @@ connector JSON). It does not attempt Terraform/CloudFormation cloud-posture anal
 different product's job, the rules would be thousands deep, and claiming it on the strength of a
 handful of checks is exactly the coverage dishonesty this codebase refuses everywhere else.
 
+ALSO READ (sprint 1 of the SMB strategy, "Also in git"): principal NAMES. A SASL username, a
+RabbitMQ definitions user, a Kong consumer, an AWS access key ID or an OAuth client_id in a
+manifest is an identity, not a secret — the live connectors report the same names from the
+running system, and matching the two answers "is this credential also committed to a repo?".
+Names are recorded on each workload (raw["principals"], labels["principals"]) and on the file.
+To carry them the parser also reads RabbitMQ definitions.json exports, Kong declarative config
+(`_format_version`) and Helm values files, as one synthetic workload per file. Values that sit
+next to those names (password_hash, key-auth keys) stay on the secret path: fingerprinted,
+never stored.
+
 WHAT IT NEVER DOES. It never resolves a secret. When a literal credential is found, the value
 is hashed to a short fingerprint and DROPPED — findings carry the key, the file, the line and
 the fingerprint, never the secret. That is the same discipline connect/rabbitmq.py applies to a
@@ -85,6 +95,33 @@ _ANON_KEYS = {
     "AUTH_ENABLED": "authentication toggle",
 }
 
+# Env keys whose VALUE is a principal NAME — an identity, not a secret. Suffix-matched on the
+# key (RABBITMQ_DEFAULT_USER, KAFKA_SASL_USERNAME, connection.user, auth.username …), first match
+# wins, so the specific kinds come before the generic USERNAME/USER. The value IS stored: it is a
+# name, and the Access page matches it against identity names from the live connectors to answer
+# the "Also in git" column. An AWS access key ID (AKIA…/ASIA…) is a principal name too — the
+# paired AWS_SECRET_ACCESS_KEY stays on the secret path above and is never stored.
+_PRINCIPAL_KEYS = (
+    ("AWS_ACCESS_KEY_ID", "aws_access_key_id"),
+    ("SASL_USERNAME", "sasl_user"), ("SASL_USER", "sasl_user"), ("SASL.USER", "sasl_user"),
+    ("SASL.USERNAME", "sasl_user"), ("KAFKA_USER", "sasl_user"), ("KAFKA_USERNAME", "sasl_user"),
+    ("RABBITMQ_DEFAULT_USER", "amqp_user"), ("RABBITMQ_USER", "amqp_user"),
+    ("RABBITMQ_USERNAME", "amqp_user"), ("AMQP_USER", "amqp_user"), ("AMQP_USERNAME", "amqp_user"),
+    ("KONG_CONSUMER", "kong_consumer"),
+    ("CLIENT_ID", "client_id"),
+    ("USERNAME", "username"), ("USER", "username"),
+)
+# Kafka JAAS: `... required username="alice" password="…";` — the username is a SASL principal,
+# the password beside it is the secret the key-regex already fingerprints and drops.
+_JAAS_USERNAME = re.compile(r"username\s*=\s*[\"']([^\"']+)[\"']", re.I)
+_MAX_PRINCIPALS_LABEL = 50
+_MAX_PRINCIPAL_LEN = 128
+
+# File-level formats that carry principals but are not compose/k8s workloads.
+_RABBIT_HINT = re.compile(r'"(rabbit_version|rabbitmq_version|vhosts)"')
+_KONG_HINT = re.compile(r"^_format_version\s*:", re.M)
+_VALUES_NAMES = re.compile(r"(^|/)values(-[\w.]+)?\.ya?ml$", re.I)
+
 # Images whose presence marks this workload as part of the integration layer. Used only to
 # decide whether a workload is IN SCOPE — never to conclude anything about its security.
 _INTEGRATION_IMAGES = re.compile(
@@ -114,6 +151,67 @@ def _line_of(text: str, needle: str) -> int | None:
         if needle in line:
             return i
     return None
+
+
+def _principal_kind(key: str) -> str | None:
+    up = str(key or "").upper()
+    for suffix, kind in _PRINCIPAL_KEYS:
+        if up == suffix or up.endswith("_" + suffix) or up.endswith("." + suffix):
+            return kind
+    return None
+
+
+def _principals_from_env(env, *, filename: str, text: str) -> list[dict]:
+    """Principal NAMES in env/config pairs: [{name, kind, key, file, line}]. Never a value whose
+    key matched the secret regex (AWS_ACCESS_KEY_ID excepted — it is an id, not a secret), never a
+    reference (${VAR}), never a URL (a connection URL can embed a password)."""
+    out: list[dict] = []
+    for key, value in env:
+        sval = str(value if value is not None else "").strip()
+        if not sval or _is_reference(sval) or sval.lower() in _BOOLEANISH:
+            continue
+        kind = _principal_kind(key)
+        if kind and (kind == "aws_access_key_id" or not _SECRET_KEY.search(key)):
+            if "://" not in sval and len(sval) <= _MAX_PRINCIPAL_LEN:
+                out.append({"name": sval, "kind": kind, "key": key, "file": filename,
+                            "line": _line_of(text, key)})
+        if "jaas" in key.lower() or "loginmodule" in sval.lower():
+            for m in _JAAS_USERNAME.finditer(sval):
+                out.append({"name": m.group(1), "kind": "sasl_user", "key": key,
+                            "file": filename, "line": _line_of(text, key)})
+    return _dedupe_principals(out)
+
+
+def _dedupe_principals(items: list[dict]) -> list[dict]:
+    seen, out = set(), []
+    for p in items:
+        k = (p.get("name"), p.get("kind"))
+        if p.get("name") and k not in seen:
+            seen.add(k)
+            out.append(p)
+    return out
+
+
+def _principals_label(principals: list[dict]) -> str:
+    names = sorted({p["name"] for p in principals})[:_MAX_PRINCIPALS_LABEL]
+    return ",".join(names)
+
+
+def _flatten(d: dict, prefix: str = "", _out=None, _budget=None) -> list[tuple[str, object]]:
+    """Nested Helm values → dotted (key, scalar) pairs, so `auth.username` / `auth.password`
+    flow through the same key-based principal/secret matching as an env block."""
+    out = [] if _out is None else _out
+    budget = [2000] if _budget is None else _budget
+    for k, v in (d or {}).items():
+        if budget[0] <= 0:
+            break
+        key = f"{prefix}{k}"
+        if isinstance(v, dict):
+            _flatten(v, key + ".", out, budget)
+        elif isinstance(v, (str, int, float)) and not isinstance(v, bool):
+            out.append((key, v))
+            budget[0] -= 1
+    return out
 
 
 def _parse_image(image: str) -> dict:
@@ -189,20 +287,27 @@ def _ports_of(spec: dict) -> list[dict]:
     return out
 
 
-def _workload_from(name: str, spec: dict, *, source: str, filename: str, text: str) -> Resource:
-    """One deployable unit (a compose service or a k8s container) → an `iac_workload`."""
+def _workload_from(name: str, spec: dict, *, source: str, filename: str, text: str,
+                   extra_principals: list | None = None,
+                   extra_secrets: list | None = None) -> Resource:
+    """One deployable unit (a compose service or a k8s container) → an `iac_workload`. The
+    file-level formats (RabbitMQ definitions, Kong declarative config, Helm values) come through
+    here too, as one synthetic workload per file with their principals/secrets pre-extracted."""
     image = _parse_image(spec.get("image") or "")
     # Kubernetes calls it `env`; compose and a Kafka Connect config block both use the
     # `environment` shape. Selecting on "is it compose" alone silently read nothing for Connect
     # configs, so every secret in a connector JSON went unreported.
     env = _env_pairs(spec.get("env") if source == "kubernetes" else spec.get("environment"))
 
-    secrets, defaults, anon = [], [], []
+    secrets, defaults, anon = list(extra_secrets or []), [], []
     for key, value in env:
         sval = str(value if value is not None else "")
         is_toggle = (sval.strip().lower() in _BOOLEANISH
                      or any(key.upper().endswith(a) for a in _ANON_KEYS))
-        if _SECRET_KEY.search(key) and not _is_reference(sval) and not is_toggle:
+        # An AWS access key ID is a principal name (recorded below), not a secret.
+        is_principal_id = _principal_kind(key) == "aws_access_key_id"
+        if (_SECRET_KEY.search(key) and not _is_reference(sval) and not is_toggle
+                and not is_principal_id):
             secrets.append({"key": key, "fingerprint": _fingerprint(sval),
                             "length": len(sval), "line": _line_of(text, key)})
             if sval.strip().lower() in _DEFAULT_CREDENTIALS:
@@ -220,16 +325,23 @@ def _workload_from(name: str, spec: dict, *, source: str, filename: str, text: s
 
     listeners = [str(v) for k, v in env if "LISTENER" in k.upper() or "ADVERTISED" in k.upper()]
     plaintext_listeners = [l for l in listeners if "PLAINTEXT://" in l.upper()]
+    principals = _dedupe_principals(
+        list(extra_principals or []) + _principals_from_env(env, filename=filename, text=text))
 
     ext = f"iac-{filename}-{name}"
+    labels = {"image": image["repository"] or "?", "source": source,
+              "integration": "true" if _INTEGRATION_IMAGES.search(
+                  image["repository"] or name) else "false"}
+    if principals:
+        # Names only (never a secret), comma-joined and capped, so the Access page can match
+        # identity names against repos without reading `raw`.
+        labels["principals"] = _principals_label(principals)
     return Resource(
         kind="iac_workload",
         name=name,
         ext_id=ext,
         namespace=filename,
-        labels={"image": image["repository"] or "?", "source": source,
-                "integration": "true" if _INTEGRATION_IMAGES.search(
-                    image["repository"] or name) else "false"},
+        labels=labels,
         raw={
             "workload": name,
             "file": filename,
@@ -247,8 +359,80 @@ def _workload_from(name: str, spec: dict, *, source: str, filename: str, text: s
             "anonymous_access": anon,
             "plaintext_listeners": plaintext_listeners,
             "listener_count": len(listeners),
+            # Principal NAMES declared here — identities, not secrets. Each is a name a live
+            # connector could also report (a SASL user, a Kong consumer, an AWS key id), which is
+            # how "this credential is also in git" gets answered.
+            "principals": principals,
         },
     )
+
+
+# ── file-level formats: principals and secrets out of a whole document ─────────
+def _rabbitmq_definitions(doc: dict, *, filename: str, text: str) -> tuple[list, list]:
+    """RabbitMQ definitions export: users[].name are AMQP principals; users[].password_hash is a
+    credential and is fingerprinted, never kept."""
+    principals, secrets = [], []
+    for u in doc.get("users") or []:
+        if not isinstance(u, dict) or not u.get("name"):
+            continue
+        name = str(u["name"])
+        principals.append({"name": name, "kind": "amqp_user", "key": "users[].name",
+                           "file": filename, "line": _line_of(text, f'"{name}"')})
+        ph = u.get("password_hash")
+        if ph and not _is_reference(str(ph)):
+            secrets.append({"key": f"users[{name}].password_hash",
+                            "fingerprint": _fingerprint(str(ph)),
+                            "length": len(str(ph)), "line": _line_of(text, str(ph))})
+    return principals, secrets
+
+
+_KONG_CRED_FIELDS = {"keyauth_credentials": "key", "basicauth_credentials": "password",
+                     "jwt_secrets": "secret", "hmac_auth_credentials": "secret",
+                     "oauth2_credentials": "client_secret"}
+
+
+def _kong_declarative(doc: dict, *, filename: str, text: str) -> tuple[list, list]:
+    """Kong declarative (deck / DB-less) config: consumers[].username are API consumers;
+    key-auth keys, basic-auth passwords, jwt / hmac / oauth2 secrets are credentials —
+    fingerprinted only. Credentials may be nested under a consumer or listed top-level."""
+    principals, secrets = [], []
+
+    def _creds(owner: str, block: dict):
+        for coll, field in _KONG_CRED_FIELDS.items():
+            for c in block.get(coll) or []:
+                if not isinstance(c, dict):
+                    continue
+                val = c.get(field)
+                if val and not _is_reference(str(val)):
+                    secrets.append({"key": f"consumers[{owner}].{coll}[].{field}",
+                                    "fingerprint": _fingerprint(str(val)), "length": len(str(val)),
+                                    "line": _line_of(text, str(val))})
+                for pk in ("username", "client_id"):
+                    if c.get(pk):
+                        principals.append({"name": str(c[pk]), "kind": "kong_consumer",
+                                           "key": f"{coll}[].{pk}", "file": filename,
+                                           "line": _line_of(text, str(c[pk]))})
+
+    for c in doc.get("consumers") or []:
+        if not isinstance(c, dict):
+            continue
+        uname = c.get("username") or c.get("custom_id")
+        if uname:
+            principals.append({"name": str(uname), "kind": "kong_consumer",
+                               "key": "consumers[].username", "file": filename,
+                               "line": _line_of(text, str(uname))})
+        _creds(str(uname or "?"), c)
+    for coll in _KONG_CRED_FIELDS:
+        for c in doc.get(coll) or []:
+            if isinstance(c, dict):
+                owner = c.get("consumer")
+                owner = (owner.get("username") or owner.get("id")) if isinstance(owner, dict) else owner
+                if owner:
+                    principals.append({"name": str(owner), "kind": "kong_consumer",
+                                       "key": f"{coll}[].consumer", "file": filename,
+                                       "line": _line_of(text, str(owner))})
+                _creds(str(owner or "?"), {coll: [c]})
+    return principals, secrets
 
 
 def parse_iac(files: dict, *, unreadable: dict | None = None) -> Collected:
@@ -267,6 +451,7 @@ def parse_iac(files: dict, *, unreadable: dict | None = None) -> Collected:
         parsed_ok, parse_error, kind_guess = True, None, "unknown"
         workloads: list[tuple[str, dict, str]] = []
 
+        extras: dict[str, tuple[list, list]] = {}      # workload name → (principals, secrets)
         try:
             if _CONNECT_HINT.search(text or ""):
                 kind_guess = "kafka-connect"
@@ -274,12 +459,33 @@ def parse_iac(files: dict, *, unreadable: dict | None = None) -> Collected:
                 cfg = doc.get("config") if isinstance(doc.get("config"), dict) else doc
                 workloads.append((str(doc.get("name") or "connector"),
                                   {"environment": cfg}, "kafka-connect"))
+            elif _RABBIT_HINT.search(text or "") and (text or "").lstrip().startswith("{"):
+                kind_guess = "rabbitmq-definitions"
+                doc = json.loads(text)
+                if isinstance(doc.get("users"), list):
+                    wname = "rabbitmq-definitions"
+                    extras[wname] = _rabbitmq_definitions(doc, filename=filename, text=text)
+                    workloads.append((wname, {}, "rabbitmq-definitions"))
+                else:
+                    parsed_ok, parse_error = False, "no users[] in definitions document"
             else:
                 docs = [d for d in yaml.safe_load_all(text or "") if isinstance(d, dict)]
                 if not docs:
                     parsed_ok, parse_error = False, "no YAML document found"
                 for doc in docs:
-                    if _COMPOSE_NAMES.search(filename) or "services" in doc:
+                    if "_format_version" in doc:
+                        # Kong declarative config also has a `services:` list — test before compose.
+                        kind_guess = "kong-declarative"
+                        wname = "kong-declarative"
+                        extras[wname] = _kong_declarative(doc, filename=filename, text=text)
+                        workloads.append((wname, {}, "kong-declarative"))
+                    elif (_VALUES_NAMES.search(filename) and "services" not in doc
+                          and not doc.get("kind")):
+                        kind_guess = "helm-values"
+                        wname = os.path.splitext(os.path.basename(filename))[0]
+                        workloads.append((wname, {"environment": dict(_flatten(doc))},
+                                          "helm-values"))
+                    elif _COMPOSE_NAMES.search(filename) or "services" in doc:
                         kind_guess = "compose"
                         for svc_name, svc in (doc.get("services") or {}).items():
                             if isinstance(svc, dict):
@@ -318,10 +524,21 @@ def parse_iac(files: dict, *, unreadable: dict | None = None) -> Collected:
             },
         ))
 
+        file_res = resources[-1]
+        file_principals: list[dict] = []
         for wname, spec, source in workloads:
-            r = _workload_from(wname, spec, source=source, filename=filename, text=text or "")
+            ep, es = extras.get(wname, ([], []))
+            r = _workload_from(wname, spec, source=source, filename=filename, text=text or "",
+                               extra_principals=ep, extra_secrets=es)
             resources.append(r)
             edges.append(Edge(src_ext_id=file_ext, dst_ext_id=r.ext_id, kind="declares"))
+            file_principals.extend(r.raw.get("principals") or [])
+        # The manifest resource carries the union of its workloads' principals, so a repo-level
+        # match ("is this SASL user in this file?") needs only the file row.
+        file_principals = _dedupe_principals(file_principals)
+        file_res.raw["principals"] = file_principals
+        if file_principals:
+            file_res.labels["principals"] = _principals_label(file_principals)
 
     # Files we were asked for but could not open at all (permissions, vanished mid-walk). Named
     # so the console can show that the requested scope was not fully covered.
@@ -353,7 +570,9 @@ def _looks_like_iac(path: str, head: str) -> bool:
         return True
     if base.endswith((".yaml", ".yml")) and _K8S_HINT.search(head):
         return True
-    if base.endswith(".json") and _CONNECT_HINT.search(head):
+    if base.endswith(".json") and (_CONNECT_HINT.search(head) or _RABBIT_HINT.search(head)):
+        return True
+    if base.endswith((".yaml", ".yml")) and (_KONG_HINT.search(head) or _VALUES_NAMES.search(path)):
         return True
     return False
 
