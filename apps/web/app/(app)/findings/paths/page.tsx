@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/icons';
 import { Page } from '@/components/ui/page';
 import { PageHeader, SectionHeader } from '@/components/ui/page-header';
+import { FindingsTabs } from '../tabs';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatTile } from '@/components/ui/stat';
 import { StatusPill } from '@/components/ui/status-pill';
@@ -56,7 +57,7 @@ import {
  * note appears when the two disagree.
  */
 
-export const metadata = { title: 'Attack paths · VectaSec' };
+export const metadata = { title: 'Findings · Priority paths · VectaSec' };
 
 const ROW_CAP = 1000;
 
@@ -300,7 +301,8 @@ export default async function AttackPathsPage() {
   if (findingsRes.error) {
     return (
       <Page>
-        <PageHeader title="Attack paths" description={HEAD_DESC} />
+        <PageHeader title="Findings" description={HEAD_DESC} />
+        <FindingsTabs />
         <Card>
           <CardBody>
             <EmptyState tone="error" title="Could not load attack paths" description={findingsRes.error.message} />
@@ -357,10 +359,11 @@ export default async function AttackPathsPage() {
   return (
     <Page>
       <PageHeader
-        title="Attack paths"
+        title="Findings"
         description={HEAD_DESC}
         meta={`${totalCount} path${totalCount === 1 ? '' : 's'} · ${typeCount} type${typeCount === 1 ? '' : 's'}${truncated ? ` · showing first ${findingRows.length}` : ''}${asOf}`}
       />
+      <FindingsTabs />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: 'var(--space-3)' }}>
         <Card hover>
@@ -555,9 +558,10 @@ function SetupState() {
   return (
     <Page>
       <PageHeader
-        title="Attack paths"
-        description="Where an exposed surface, an over-privileged non-human identity and sensitive data line up on one resource graph."
+        title="Findings"
+        description="Priority paths: where an exposed surface, an over-privileged non-human identity and sensitive data line up on one resource graph."
       />
+      <FindingsTabs />
       <Card>
         <CardBody>
           <EmptyState
@@ -565,7 +569,7 @@ function SetupState() {
             title="No scan yet"
             description="Attack paths are correlated across what the connectors read. Connect and scan a system and any toxic combinations — exposure, over-privilege and sensitive data lined up on one path — surface here."
             action={
-              <Link href="/connections" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
+              <Link href="/estate" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
                 Go to Connections &rarr;
               </Link>
             }
@@ -580,9 +584,10 @@ function CleanState({ resourceCount }: { resourceCount: number }) {
   return (
     <Page>
       <PageHeader
-        title="Attack paths"
-        description="Where an exposed surface, an over-privileged non-human identity and sensitive data line up on one resource graph."
+        title="Findings"
+        description="Priority paths: where an exposed surface, an over-privileged non-human identity and sensitive data line up on one resource graph."
       />
+      <FindingsTabs />
       <Explainer />
       <Card>
         <CardBody>

@@ -5,6 +5,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { IconForType } from '@/components/ui/icons';
 import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
+import { AccessTabs } from '../tabs';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 
@@ -21,7 +22,7 @@ import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
  * than implying the answer is "unused".
  */
 
-export const metadata = { title: 'Runtime · VectaSec' };
+export const metadata = { title: 'Access · Live connections · VectaSec' };
 
 // Both mirror runtime_evidence.py. If they drift, this page and the engine disagree
 // about whether an identity may be called unused.
@@ -485,10 +486,13 @@ export default async function RuntimePage() {
 
 function Head({ meta }: { meta?: string }) {
   return (
-    <PageHeader
-      title="Runtime evidence"
-      description="Who is actually using the estate right now, read from the brokers themselves. Observation, not exploitation — and explicit about how long it has been watching."
-      meta={meta}
-    />
+    <>
+      <PageHeader
+        title="Access"
+        description="Who is actually connected right now, read from the brokers themselves. Observation, not exploitation — and explicit about how long it has been watching. This is the evidence behind the register's “last seen”."
+        meta={meta}
+      />
+      <AccessTabs />
+    </>
   );
 }

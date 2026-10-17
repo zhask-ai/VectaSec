@@ -58,6 +58,12 @@ export type IdentityDetail = {
   scope: 'external' | 'internal' | 'unknown';
   connector: { type: string; name: string } | null;
   isDefault: boolean;
+  /** Owner label inferred from a tag / annotation on the principal (null when none). */
+  owner: string | null;
+  /** Last-seen signal, with its provenance. `unknown` = no source collects it for this system. */
+  lastSeen: { state: 'seen' | 'never' | 'unknown'; at: string | null; source: string };
+  /** Highest naming-inferred sensitivity across this identity's grants ('' when none). */
+  sensitivity: string;
   worst: Severity | null;
   creds: CredMeta[];
   grants: GrantMeta[];
@@ -126,6 +132,14 @@ export function IdentityDetailButton({ detail }: { detail: IdentityDetail }) {
               Observed on connector <span style={{ fontFamily: 'var(--font-mono)' }}>{d.connector.type}/{d.connector.name}</span>
             </p>
           )}
+          <p style={metaLine}>
+            Owner: {d.owner ?? 'no owner tag'} · Last seen:{' '}
+            {d.lastSeen.state === 'seen'
+              ? `${d.lastSeen.at} (${d.lastSeen.source})`
+              : d.lastSeen.state === 'never'
+                ? 'reported never used'
+                : 'unknown — no source collects it for this system'}
+          </p>
         </Section>
 
         {/* Credentials — METADATA ONLY. A row proves a secret exists and states its shape. */}

@@ -3,6 +3,8 @@ import { Card, CardBody, CardFooter, CardHeader, CardMeta, CardTitle } from '@/c
 import { EmptyState } from '@/components/ui/empty-state';
 import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
+import { FindingsTabs } from './tabs';
+import { Lenses } from './lenses';
 import { getFindingsView, LIST_LIMIT } from './data';
 import { FindingsTable } from './findings-table';
 import { Filters } from './filters';
@@ -50,6 +52,8 @@ export default async function FindingsPage({ searchParams }: PageProps<'/finding
         actions={view.state === 'ok' && view.tenantId ? <LiveFindings tenantId={view.tenantId} /> : undefined}
       />
 
+      <FindingsTabs />
+
       {view.state === 'error' && <ErrorPanel message={view.message} />}
 
       {view.state === 'no-connections' && (
@@ -79,6 +83,7 @@ export default async function FindingsPage({ searchParams }: PageProps<'/finding
 
       {view.state === 'ok' && (
         <>
+          <Lenses filters={filters} />
           <Filters filters={filters} facets={view.facets} assessmentFacet={view.assessmentFacet} total={view.total} />
 
           <Card>

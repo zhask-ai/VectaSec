@@ -2,7 +2,7 @@
 
 import { useActionState, useEffect, useRef } from 'react';
 
-import { CONNECTORS } from '../../connections/connector-fields';
+import { CONNECTORS } from '../../estate/connector-fields';
 import { addRoutingRuleAction, deleteRoutingRuleAction, type ActionState } from './actions';
 
 /* Routing rules — "findings at or above this severity (optionally from this connector type)

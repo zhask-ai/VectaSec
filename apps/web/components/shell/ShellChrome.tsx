@@ -14,24 +14,17 @@ import {
   IconFindings,
   IconSystems,
   IconIdentities,
-  IconData,
-  IconAssets,
-  IconAttackPaths,
   IconCompliance,
-  IconScans,
   IconSettings,
   IconMenu,
   IconClose,
-  IconActivity,
-  IconLayers,
-  IconRadar,
   type IconProps,
 } from '@/components/ui/icons';
 import { ThemeToggle } from './ThemeToggle';
 import { GlobalSearch } from './GlobalSearch';
 import { UserMenu } from './UserMenu';
 
-/* The app shell — the persistent chrome every authed route inherits: a grouped left sidebar, a
+/* The app shell — the persistent chrome every authed route inherits: a six-item left sidebar, a
  * top bar (tenant, search, live posture, theme, account), and the main region.
  *
  * It is a CLIENT component for exactly two reasons — the active nav item needs usePathname, and
@@ -40,12 +33,25 @@ import { UserMenu } from './UserMenu';
  * server and passes them down as plain props, and the server-rendered pages arrive as `children`
  * through this boundary untouched. So the shell stays a frame, and the pages stay server work.
  *
- * The nav is defined here (not passed in) so the icon components never have to cross the RSC
- * boundary. Order is deliberate: Overview ("what do I do now") and Findings (the workhorse) sit
- * above the fold; Inventory is the estate; Assurance is the auditor's view; Operations is the tail
- * you visit when you asked for work, not where you live. Settings is tenant admin, pinned to the
- * bottom and shown to admins only — hiding it is coherence, not security (every settings page and
- * action re-checks the role server-side; RLS is the boundary).
+ * SIX ITEMS, NO GROUPS. The previous shell had fifteen entries in four groups, and prospect
+ * feedback (docs/vectasec-smb-strategy-2026-10.md §1, §3) was blunt about what that did: a buyer
+ * with no security team could not find the one thing only this product shows them. The
+ * consolidation is:
+ *
+ *   Overview     — what do I do now.
+ *   Findings     — the queue; attack paths are its "Priority paths" tab, CVE/EOL a facet.
+ *   Access       — the anchor: every API key / service account / OAuth client the connected
+ *                  systems accept, with owner, last used, sensitivity. Absorbs Identities,
+ *                  Runtime (last seen / live connections) and the Data lens (a column, not a page).
+ *   Estate       — Connected / Unmonitored / Inventory / What we can assess. Absorbs Connections,
+ *                  Discovery, Assets and the Systems catalogue; scan history is a drawer per row.
+ *   Compliance   — controls, plus "Reports & exports" (SBOM / VEX / licensing / evidence bundle).
+ *   Settings     — tenant admin, pinned to the bottom, admins only (a courtesy, not a boundary:
+ *                  every settings page and action re-checks the role server-side).
+ *
+ * The old routes still resolve — next.config.ts redirects each to its new home — so a pasted link
+ * never breaks. The nav is defined here (not passed in) so the icon components never cross the
+ * RSC boundary.
  */
 
 type NavItem = {
@@ -58,43 +64,12 @@ type NavItem = {
   also?: Route[];
 };
 
-const NAV_GROUPS: { label?: string; items: NavItem[] }[] = [
-  {
-    items: [
-      { href: '/', label: 'Overview', Icon: IconOverview, exact: true },
-      { href: '/findings', label: 'Findings', Icon: IconFindings },
-    ],
-  },
-  {
-    label: 'Inventory',
-    items: [
-      // ONE entry for the estate. Connected (/connections) and Coverage (/systems) are tabs of
-      // that one section, not rival sidebar items: both answer "what systems?", and two
-      // near-synonymous nav labels made the reader choose before they knew the difference.
-      // Landing on /connections because the operational view is where an operator lives; the
-      // catalogue is reference, one tab away.
-      { href: '/connections', label: 'Systems', Icon: IconSystems, also: ['/systems'] },
-      // Discovery sits with Inventory rather than Operations: its output is estate, and its
-      // headline finding — middleware nobody monitors — is an inventory gap, not a scan result.
-      { href: '/discovery', label: 'Discovery', Icon: IconRadar },
-      { href: '/identities', label: 'Identities', Icon: IconIdentities },
-      { href: '/data', label: 'Data', Icon: IconData },
-      { href: '/assets', label: 'Assets', Icon: IconAssets },
-    ],
-  },
-  {
-    label: 'Assurance',
-    items: [
-      { href: '/attack-paths', label: 'Attack paths', Icon: IconAttackPaths },
-      { href: '/runtime', label: 'Runtime', Icon: IconActivity },
-      { href: '/supply-chain', label: 'Supply chain', Icon: IconLayers },
-      { href: '/compliance', label: 'Compliance', Icon: IconCompliance },
-    ],
-  },
-  {
-    label: 'Operations',
-    items: [{ href: '/scans', label: 'Scans', Icon: IconScans }],
-  },
+const NAV_ITEMS: NavItem[] = [
+  { href: '/', label: 'Overview', Icon: IconOverview, exact: true },
+  { href: '/findings', label: 'Findings', Icon: IconFindings },
+  { href: '/access', label: 'Access', Icon: IconIdentities },
+  { href: '/estate', label: 'Estate', Icon: IconSystems },
+  { href: '/compliance', label: 'Compliance', Icon: IconCompliance },
 ];
 
 const SETTINGS_ITEM: NavItem = { href: '/settings', label: 'Settings', Icon: IconSettings };
@@ -158,32 +133,29 @@ export function ShellChrome({
 
   const NavList = () => (
     <nav aria-label="Primary" className="vs-nav">
-      {NAV_GROUPS.map((group, gi) => (
-        <div key={gi} className="vs-nav-group">
-          {group.label && <div className="vs-nav-group-label">{group.label}</div>}
-          <ul className="vs-nav-list">
-            {group.items.map((item) => {
-              const active = isActive(pathname, item);
-              return (
-                <li key={item.href}>
-                  <Link
-                    href={item.href}
-                    className="vs-navitem"
-                    data-active={active || undefined}
-                    aria-current={active ? 'page' : undefined}
-                    onClick={() => setMobileOpen(false)}
-                  >
-                    <span aria-hidden="true" className="vs-navitem-icon">
-                      <item.Icon size={18} />
-                    </span>
-                    <span className="vs-nav-label">{item.label}</span>
-                  </Link>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      ))}
+      <div className="vs-nav-group">
+        <ul className="vs-nav-list">
+          {NAV_ITEMS.map((item) => {
+            const active = isActive(pathname, item);
+            return (
+              <li key={item.href}>
+                <Link
+                  href={item.href}
+                  className="vs-navitem"
+                  data-active={active || undefined}
+                  aria-current={active ? 'page' : undefined}
+                  onClick={() => setMobileOpen(false)}
+                >
+                  <span aria-hidden="true" className="vs-navitem-icon">
+                    <item.Icon size={18} />
+                  </span>
+                  <span className="vs-nav-label">{item.label}</span>
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
 
       {isSuperAdmin && (
         <div className="vs-nav-group">

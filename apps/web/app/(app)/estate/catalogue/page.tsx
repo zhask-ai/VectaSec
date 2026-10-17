@@ -14,11 +14,11 @@ import { PageHeader, SectionHeader } from '@/components/ui/page-header';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatTile } from '@/components/ui/stat';
 import { StatusPill } from '@/components/ui/status-pill';
-import { RouteTabs } from '@/components/ui/route-tabs';
+import { EstateTabs } from '../tabs';
 import { Donut } from '@/components/charts/Donut';
 // The connect flow is one component shared by both tabs of this section: connecting from the
 // catalogue must open the same drawer, not bounce the user to the other tab to start over.
-import { ConnectDrawer } from '../connections/connect-drawer';
+import { ConnectDrawer } from '../connect-drawer';
 
 /* /systems — the coverage catalogue. The falsifiable "any integration platform" story.
  *
@@ -43,7 +43,7 @@ import { ConnectDrawer } from '../connections/connect-drawer';
  * worst-severity mark — the same posture the /connections page proved.
  */
 
-export const metadata = { title: 'Systems · VectaSec' };
+export const metadata = { title: 'Estate · What we can assess · VectaSec' };
 
 /** Bound on the per-connection open-finding sample (feeds the worst-severity mark only; the open
  * COUNT beside it is count:'exact' and is never truncated). Mirrors /connections. */
@@ -394,20 +394,12 @@ export default async function SystemsPage() {
   return (
     <Page>
       <PageHeader
-        title="Systems"
+        title="Estate"
         description="Every integration-layer system VectaSec can assess, grouped by class — with your connected estate and its live findings mapped onto it. This is the coverage claim, made falsifiable."
         meta={headerMeta}
         actions={editable ? <ConnectDrawer /> : undefined}
       />
-      {/* Connected and Coverage are two views of one subject, so they are tabs of a single
-          section rather than two sidebar entries competing to mean the same thing. */}
-      <RouteTabs
-        aria-label="Systems views"
-        tabs={[
-          { href: '/connections' as Route, label: 'Connected' },
-          { href: '/systems' as Route, label: 'Coverage' },
-        ]}
-      />
+      <EstateTabs />
 
       {!engineOk && (
         <Card style={{ borderColor: 'var(--sev-medium-solid)' }}>

@@ -71,8 +71,8 @@ async function authorizeConnection(connectionId: string) {
 }
 
 function revalidateAll(): void {
-  revalidatePath('/connections');
-  revalidatePath('/scans');
+  revalidatePath('/estate');
+  revalidatePath('/estate/inventory');
   revalidatePath('/');
 }
 
@@ -176,7 +176,7 @@ export async function testConnectionAction(_prev: ActionState, form: FormData): 
   );
   if (!res.ok) return { ok: false, message: res.message };
 
-  revalidatePath('/connections');
+  revalidatePath('/estate');
   if (!res.data.ok) {
     return { ok: false, message: `“${auth.name}” is not reachable: ${res.data.error ?? 'unknown error'}` };
   }
@@ -229,7 +229,7 @@ export async function setCadenceAction(_prev: ActionState, form: FormData): Prom
   );
   if (!res.ok) return { ok: false, message: res.message };
 
-  revalidatePath('/connections');
+  revalidatePath('/estate');
   const applied = res.data.scan_interval_minutes;
   return {
     ok: true,
@@ -262,4 +262,29 @@ export async function deleteConnectionAction(_prev: ActionState, form: FormData)
     ok: true,
     message: `Removed “${auth.name}” (${res.data.resources} resources, ${res.data.findings} findings). Scan history is kept.`,
   };
+}
+
+/* ── Scan history (read-only; the per-connection drawer) ──────────────────── */
+export type ScanHistoryRow = {
+  id: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  stats: { resources?: number; findings?: number; error?: string; detector_errors?: unknown[]; suppressed?: number } | null;
+};
+
+/** The last scans of ONE connection, for the history drawer on its row. A read, not a mutation:
+ * it runs under the caller's RLS session exactly like the page, so a viewer can see history
+ * without being able to queue a scan. Bounded, newest first — history past this is a query. */
+export async function listScansAction(connectionId: string): Promise<{ ok: true; rows: ScanHistoryRow[] } | { ok: false; message: string }> {
+  if (!isUuid(connectionId)) return { ok: false, message: 'Not a connection id.' };
+  const supabase = await createClient();
+  const res = await supabase
+    .from('scans')
+    .select('id, status, started_at, finished_at, stats')
+    .eq('connection_id', connectionId)
+    .order('started_at', { ascending: false })
+    .limit(50);
+  if (res.error) return { ok: false, message: res.error.message };
+  return { ok: true, rows: (res.data ?? []) as unknown as ScanHistoryRow[] };
 }

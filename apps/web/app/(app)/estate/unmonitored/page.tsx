@@ -14,6 +14,7 @@ import {
 } from '@/components/ui/icons';
 import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
+import { EstateTabs } from '../tabs';
 import { StatTile } from '@/components/ui/stat';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
@@ -31,7 +32,7 @@ import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
  * tell.
  */
 
-export const metadata = { title: 'Discovery · VectaSec' };
+export const metadata = { title: 'Estate · Unmonitored · VectaSec' };
 
 type ServiceRow = {
   id: string;
@@ -146,7 +147,7 @@ export default async function DiscoveryPage() {
               description="Add a discovery connection with the hosts or CIDRs you are authorized to probe. VectaSec fingerprints middleware read-only and pre-authentication — it never sends a credential."
             />
             <p style={{ textAlign: 'center', margin: 0 }}>
-              <Link href="/connections" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
+              <Link href="/estate" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
                 Go to Connections →
               </Link>
             </p>
@@ -272,11 +273,14 @@ export default async function DiscoveryPage() {
 
 function Head({ meta }: { meta?: string }) {
   return (
-    <PageHeader
-      title="Discovery"
-      description="Middleware found by probing the network, and which of it matches something you actually monitor."
-      meta={meta}
-    />
+    <>
+      <PageHeader
+        title="Estate"
+        description="Middleware found by probing the network, and which of it matches something you actually monitor — the shadow list."
+        meta={meta}
+      />
+      <EstateTabs />
+    </>
   );
 }
 

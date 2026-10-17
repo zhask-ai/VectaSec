@@ -6,7 +6,7 @@ import { Page } from '@/components/ui/page';
 import { SeverityBadge } from '@/components/ui/severity';
 import { canEdit, getOwnMembership, getRoleInTenant } from '@/lib/role';
 import { getClaims } from '@/lib/supabase/server';
-import { AttackChain, chainFromClaims } from '../../attack-paths/_chain';
+import { AttackChain, chainFromClaims } from '../paths/_chain';
 import { NotAssessedBadge } from '../assessment';
 import { getActionContext, getFinding, type EvidenceItem, type FindingDetail, type TriageView } from '../data';
 import { shortId } from '../format';

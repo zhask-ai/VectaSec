@@ -7,6 +7,8 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { IconForType } from '@/components/ui/icons';
 import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
+import { ComplianceTabs } from '../tabs';
+import { ExportPanel } from './export-panel';
 import { SeverityBadge } from '@/components/ui/severity';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
@@ -25,7 +27,7 @@ import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
  * travel with it.
  */
 
-export const metadata = { title: 'Supply chain · VectaSec' };
+export const metadata = { title: 'Compliance · Reports & exports · VectaSec' };
 
 // Mirrors sbom.py::CPE_VENDOR_PRODUCT. The first version of this map stored the vendor ONLY
 // and reused `product` as the CPE product name — which silently emitted `konghq:kong` (real:
@@ -201,10 +203,13 @@ export default async function SupplyChainPage() {
   return (
     <Page>
       <PageHeader
-        title="Supply chain"
-        description="The component versions actually running in the estate, with the identifiers that reach a vulnerability feed."
+        title="Compliance"
+        description="Reports & exports — the documents an auditor asks for: the evidence bundle, a runtime SBOM and VEX, and the component versions actually running with the identifiers that reach a vulnerability feed."
         meta={components.length ? `${components.length} distinct component${components.length === 1 ? '' : 's'}` : undefined}
       />
+      <ComplianceTabs />
+
+      <ExportPanel />
 
       <Card>
         <CardHeader>
@@ -263,6 +268,16 @@ export default async function SupplyChainPage() {
         </CardBody>
       </Card>
 
+      {/* Licensing is parked by default (docs/vectasec-smb-strategy-2026-10.md §3: not a security
+          outcome). Still resolved engine-side and one click away for the buyer who needs it. */}
+      <details>
+        <summary style={{ cursor: 'pointer', fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-secondary)', padding: 'var(--space-2) 0' }}>
+          Licensing inventory
+          <span style={{ marginLeft: 'var(--space-2)', fontSize: 'var(--text-2xs)', fontWeight: 400, color: 'var(--text-muted)' }}>
+            {licensing ? `${licensing.components.length} component${licensing.components.length === 1 ? '' : 's'} · hidden by default` : 'needs the engine · hidden by default'}
+          </span>
+        </summary>
+        <div style={{ paddingTop: 'var(--space-3)' }}>
       <Card>
         <CardHeader>
           <CardTitle>Licensing</CardTitle>
@@ -373,6 +388,8 @@ export default async function SupplyChainPage() {
           )}
         </CardBody>
       </Card>
+        </div>
+      </details>
 
       <Card>
         <CardHeader>

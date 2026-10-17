@@ -92,7 +92,7 @@ export default async function OverviewPage() {
         <Card><CardBody>
           <EmptyState tone="setup" title="Connect your first system"
             description="VectaSec scans the integration layer — Kafka, RabbitMQ, Kong, Redis, MCP and more. Nothing is connected yet."
-            action={<Link href="/connections" style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Go to Connections →</Link>} />
+            action={<Link href="/estate" style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Go to Connections →</Link>} />
         </CardBody></Card>
       </Frame>
     );
@@ -330,7 +330,7 @@ export default async function OverviewPage() {
         </Card>
 
         <Card>
-          <CardHeader><CardTitle>Systems coverage</CardTitle><CardMeta><Link href="/connections" style={{ color: 'var(--text-secondary)' }}>systems →</Link></CardMeta></CardHeader>
+          <CardHeader><CardTitle>Systems coverage</CardTitle><CardMeta><Link href="/estate" style={{ color: 'var(--text-secondary)' }}>estate →</Link></CardMeta></CardHeader>
           <CardBody>
             <Donut data={systemSlices} caption="Connections by system type" />
           </CardBody>
@@ -369,7 +369,7 @@ export default async function OverviewPage() {
       {/* 5 · Lenses — the two things this product sees that others don't */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 'var(--space-5)' }}>
         <Card>
-          <CardHeader><CardTitle>Non-human identities</CardTitle><CardMeta><Link href="/identities" style={{ color: 'var(--text-secondary)' }}>identities →</Link></CardMeta></CardHeader>
+          <CardHeader><CardTitle>Non-human identities</CardTitle><CardMeta><Link href="/access" style={{ color: 'var(--text-secondary)' }}>access →</Link></CardMeta></CardHeader>
           <CardBody>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 'var(--space-5)' }}>
               <StatTile label="Identities" value={identities} size="sm" />
@@ -383,7 +383,7 @@ export default async function OverviewPage() {
         </Card>
 
         <Card>
-          <CardHeader><CardTitle>Sensitive data</CardTitle><CardMeta><Link href="/assets" style={{ color: 'var(--text-secondary)' }}>assets →</Link></CardMeta></CardHeader>
+          <CardHeader><CardTitle>Sensitive data</CardTitle><CardMeta><Link href="/estate/inventory" style={{ color: 'var(--text-secondary)' }}>inventory →</Link></CardMeta></CardHeader>
           <CardBody>
             <StatTile label="High-sensitivity resources" value={sensitiveHigh} size="sm" tone={sensitiveHigh > 0 ? 'warn' : 'neutral'} sub="where regulated data likely flows" />
             {hasClasses ? (
@@ -463,7 +463,7 @@ export default async function OverviewPage() {
       {/* 7 · Recent scans */}
       {recentScans.length > 0 && (
         <Card>
-          <CardHeader><CardTitle>Recent scans</CardTitle><CardMeta><Link href="/scans" style={{ color: 'var(--text-secondary)' }}>all scans →</Link></CardMeta></CardHeader>
+          <CardHeader><CardTitle>Recent scans</CardTitle><CardMeta><Link href="/estate" style={{ color: 'var(--text-secondary)' }}>estate →</Link></CardMeta></CardHeader>
           <CardBody pad={false}>
             <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
               {recentScans.map((scan) => {

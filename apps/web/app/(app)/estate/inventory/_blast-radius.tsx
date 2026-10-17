@@ -315,7 +315,7 @@ export function BlastRadius({
                 y={l.inbound[i].y}
                 resource={n.resource}
                 risk={n.resource ? risk[n.resource.id] : undefined}
-                href={n.resource ? `/assets/${n.resource.id}` : undefined}
+                href={n.resource ? `/estate/inventory/${n.resource.id}` : undefined}
               />
             ))}
             {shownOut.map((n, i) => (
@@ -325,7 +325,7 @@ export function BlastRadius({
                 y={l.outbound[i].y}
                 resource={n.resource}
                 risk={n.resource ? risk[n.resource.id] : undefined}
-                href={n.resource ? `/assets/${n.resource.id}` : undefined}
+                href={n.resource ? `/estate/inventory/${n.resource.id}` : undefined}
               />
             ))}
 
@@ -448,7 +448,7 @@ export function BlastRadiusExplorer({
                   y={pos.get(n.id)!.y}
                   resource={n}
                   risk={risk[n.id]}
-                  href={`/assets/${n.id}`}
+                  href={`/estate/inventory/${n.id}`}
                 />
               ))}
 

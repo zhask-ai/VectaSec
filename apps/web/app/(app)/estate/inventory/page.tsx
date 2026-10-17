@@ -10,6 +10,7 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { IconForType } from '@/components/ui/icons';
 import { Page as PageShell } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
+import { EstateTabs } from '../tabs';
 import { SeverityBadge } from '@/components/ui/severity';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 import { Toolbar, ToolbarField } from '@/components/ui/toolbar';
@@ -54,7 +55,7 @@ type ConnectionRow = { id: string; name: string; type: string };
 
 type Asset = ResourceRow & { open: number; worst: Severity | null };
 
-export const metadata = { title: 'Assets · VectaSec' };
+export const metadata = { title: 'Estate · Inventory · VectaSec' };
 
 export default async function AssetsPage({
   searchParams,
@@ -124,7 +125,7 @@ export default async function AssetsPage({
               tone="setup"
               title="No systems connected"
               description="Assets are discovered by scanning a connected system. Connect one to build the inventory."
-              action={<LinkButton href={'/connections'}>Go to Connections</LinkButton>}
+              action={<LinkButton href={'/estate'}>Go to Connections</LinkButton>}
             />
           </CardBody>
         </Card>
@@ -219,7 +220,7 @@ export default async function AssetsPage({
               title="No assets match these filters"
               description="Every asset was excluded by the current kind or connection filter. The inventory itself is not empty."
               meta={`${totalUnfiltered} asset${totalUnfiltered === 1 ? '' : 's'} total`}
-              action={<LinkButton href={'/assets'}>Clear filters</LinkButton>}
+              action={<LinkButton href={'/estate/inventory'}>Clear filters</LinkButton>}
             />
           </CardBody>
         </Card>
@@ -268,7 +269,7 @@ export default async function AssetsPage({
                             }}
                           >
                             <Link
-                              href={`/assets/${a.id}`}
+                              href={`/estate/inventory/${a.id}`}
                               style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}
                             >
                               {a.name}
@@ -340,10 +341,11 @@ function Page({ children, meta }: { children: React.ReactNode; meta?: string }) 
   return (
     <PageShell>
       <PageHeader
-        title="Assets"
-        description="The inventory discovery built from your connected systems — every resource a scan has returned."
+        title="Estate"
+        description="The inventory built from your connected systems — every resource a scan has returned."
         meta={meta}
       />
+      <EstateTabs />
       {children}
     </PageShell>
   );
@@ -373,7 +375,7 @@ function Filters({
             <Button type="submit" variant="secondary" size="sm">
               Apply
             </Button>
-            {active && <LinkButton href={'/assets'}>Clear</LinkButton>}
+            {active && <LinkButton href={'/estate/inventory'}>Clear</LinkButton>}
           </>
         }
       >

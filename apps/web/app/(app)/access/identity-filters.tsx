@@ -15,33 +15,55 @@ const WILDCARD_OPTIONS = [
   { value: 'only', label: 'Wildcard-granted only' },
 ];
 
+const SENSITIVITY_OPTIONS = [
+  { value: '', label: 'Any' },
+  { value: 'high', label: 'High' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'low', label: 'Low' },
+];
+
+const SEEN_OPTIONS = [
+  { value: '', label: 'Any' },
+  { value: 'dormant', label: 'Dormant 90d+ or never used' },
+  { value: 'seen', label: 'Seen recently' },
+  { value: 'unknown', label: 'No last-used signal' },
+];
+
+type FilterState = { system: string; type: string; wildcard: string; sensitivity: string; seen: string };
+
 export function IdentityFilters({
   systems,
   types,
   system,
   type,
   wildcard,
+  sensitivity,
+  seen,
 }: {
   systems: string[];
   types: string[];
   system: string;
   type: string;
   wildcard: string;
+  sensitivity: string;
+  seen: string;
 }) {
   const router = useRouter();
   const pathname = usePathname();
 
-  function hrefFor(overrides: Partial<{ system: string; type: string; wildcard: string }>): Route {
-    const merged = { system, type, wildcard, ...overrides };
+  function hrefFor(overrides: Partial<FilterState>): Route {
+    const merged: FilterState = { system, type, wildcard, sensitivity, seen, ...overrides };
     const next = new URLSearchParams();
     if (merged.system) next.set('system', merged.system);
     if (merged.type) next.set('type', merged.type);
     if (merged.wildcard) next.set('wildcard', merged.wildcard);
+    if (merged.sensitivity) next.set('sensitivity', merged.sensitivity);
+    if (merged.seen) next.set('seen', merged.seen);
     const qs = next.toString();
     return (qs ? `${pathname}?${qs}` : pathname) as Route;
   }
 
-  const active = Boolean(system || type || wildcard);
+  const active = Boolean(system || type || wildcard || sensitivity || seen);
 
   return (
     <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-end', flexWrap: 'wrap' }}>
@@ -71,8 +93,24 @@ export function IdentityFilters({
         </select>
       </Field>
 
+      <Field label="Sensitive data">
+        <select value={sensitivity} onChange={(e) => router.push(hrefFor({ sensitivity: e.target.value }))} style={selectStyle} aria-label="Filter by inferred data sensitivity of what the identity reaches">
+          {SENSITIVITY_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </Field>
+
+      <Field label="Last seen">
+        <select value={seen} onChange={(e) => router.push(hrefFor({ seen: e.target.value }))} style={selectStyle} aria-label="Filter by last-seen state">
+          {SEEN_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </Field>
+
       {active && (
-        <button type="button" onClick={() => router.push(hrefFor({ system: '', type: '', wildcard: '' }))} style={clearStyle}>
+        <button type="button" onClick={() => router.push(hrefFor({ system: '', type: '', wildcard: '', sensitivity: '', seen: '' }))} style={clearStyle}>
           Clear filters
         </button>
       )}

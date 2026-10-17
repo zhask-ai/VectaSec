@@ -15,11 +15,12 @@ import { StatTile } from '@/components/ui/stat';
 import { StatusPill, type StatusTone } from '@/components/ui/status-pill';
 import { Toolbar } from '@/components/ui/toolbar';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
-import { RouteTabs } from '@/components/ui/route-tabs';
+import { EstateTabs } from './tabs';
 import { CONNECTORS } from './connector-fields';
 import { ConnectDrawer } from './connect-drawer';
 import { CadenceSelect } from './cadence-select';
 import { RowActions } from './row-actions';
+import { ScanHistoryButton } from './scan-history';
 
 /* Connected systems — the coverage view AND the connect-and-scan surface. "What are we NOT
  * seeing" is the question this page exists to answer, so a broken connection has to be
@@ -71,7 +72,7 @@ const CONNECTOR_COUNT = CONNECTORS.length;
 /** A few names for the empty state, so "connect something" has concrete examples. */
 const CONNECTOR_EXAMPLES = ['kafka', 'rabbitmq', 'kong', 'redis', 'mcp'];
 
-export const metadata = { title: 'Connected systems · VectaSec' };
+export const metadata = { title: 'Estate · Connected · VectaSec' };
 
 function relative(iso: string): string {
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
@@ -259,9 +260,9 @@ export default async function ConnectionsPage({
         : rows;
 
   const filters: { key: string; label: string; href: Route; count: number }[] = [
-    { key: 'all', label: 'All', href: '/connections' as Route, count: rows.length },
-    { key: 'attention', label: 'Needs attention', href: '/connections?status=attention' as Route, count: attention },
-    { key: 'healthy', label: 'Healthy', href: '/connections?status=healthy' as Route, count: rows.length - attention },
+    { key: 'all', label: 'All', href: '/estate' as Route, count: rows.length },
+    { key: 'attention', label: 'Needs attention', href: '/estate?status=attention' as Route, count: attention },
+    { key: 'healthy', label: 'Healthy', href: '/estate?status=healthy' as Route, count: rows.length - attention },
   ];
   const activeFilter = statusFilter === 'attention' || statusFilter === 'healthy' ? statusFilter : 'all';
 
@@ -390,7 +391,7 @@ export default async function ConnectionsPage({
                   : 'Every connection currently needs attention.'
               }
               action={
-                <Link href={'/connections' as Route} style={clearFilterStyle}>
+                <Link href={'/estate' as Route} style={clearFilterStyle}>
                   Clear filter
                 </Link>
               }
@@ -451,6 +452,10 @@ export default async function ConnectionsPage({
                         // Never-scanned is not "0 findings", and the two must not read alike.
                         <span style={{ color: 'var(--sev-medium-fg)', fontWeight: 600 }}>never</span>
                       )}
+                      {/* The scan history drawer — the former /scans page, scoped to this row. */}
+                      <span style={{ display: 'block', marginTop: 4 }}>
+                        <ScanHistoryButton connectionId={r.id} name={r.name} />
+                      </span>
                       {r.scan && r.scan.status !== 'done' && (
                         <span
                           style={{
@@ -487,7 +492,7 @@ export default async function ConnectionsPage({
                       {r.counts.total === 0 ? (
                         <span style={{ color: 'var(--text-muted)' }}>0</span>
                       ) : (
-                        <Link href={`/assets?connection=${r.id}`} style={{ color: 'var(--text-primary)' }}>
+                        <Link href={`/estate/inventory?connection=${r.id}`} style={{ color: 'var(--text-primary)' }}>
                           {r.counts.total}
                           {r.counts.stale > 0 && (
                             <span style={{ color: 'var(--sev-medium-fg)' }}> ({r.counts.stale} stale)</span>
@@ -533,22 +538,16 @@ function Shell({ children, editable }: { children: React.ReactNode; editable?: b
   return (
     <Page>
       <PageHeader
-        title="Systems"
+        title="Estate"
         description="The systems VectaSec is collecting from, and how healthy that collection is. A broken connection is louder than a clean one — it is the coverage gap."
         meta="read-only"
         actions={editable ? <ConnectDrawer /> : undefined}
       />
       {/* No counts in the tabs. The connectable list here (connector-fields.ts, a mirror of the
-          registry) and the engine's live registry on Coverage can legitimately differ by a
+          registry) and the engine's live registry on the catalogue can legitimately differ by a
           connector between regenerations — and two adjacent numbers that disagree read as a bug
           even when both are honest. Each page states its own count, from its own source. */}
-      <RouteTabs
-        aria-label="Systems views"
-        tabs={[
-          { href: '/connections' as Route, label: 'Connected' },
-          { href: '/systems' as Route, label: 'Coverage' },
-        ]}
-      />
+      <EstateTabs />
       {children}
     </Page>
   );

@@ -5,7 +5,7 @@ import { revalidatePath } from 'next/cache';
 import { engineDelete, enginePost } from '@/lib/engine';
 import { getOwnMembership, isAdmin } from '@/lib/role';
 import { getVerifiedUser } from '@/lib/supabase/server';
-import { CONNECTORS } from '../../connections/connector-fields';
+import { CONNECTORS } from '../../estate/connector-fields';
 import { integrationSpecFor } from './integration-fields';
 
 /* Alert integrations and routing rules — admin-only, engine-written.

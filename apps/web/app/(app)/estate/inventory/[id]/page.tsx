@@ -245,7 +245,7 @@ export default async function AssetDetailPage({
   return (
     <Page>
       <div style={{ display: 'grid', gap: 'var(--space-2)' }}>
-        <Breadcrumbs items={[{ label: 'Assets', href: '/assets' }, { label: resource.name }]} />
+        <Breadcrumbs items={[{ label: 'Estate', href: '/estate' }, { label: 'Inventory', href: '/estate/inventory' }, { label: resource.name }]} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
           <span aria-hidden="true" className="vs-icontile" data-size="lg" data-tone="accent">
             <IconForType type={resource.kind} size={18} />
@@ -310,7 +310,7 @@ export default async function AssetDetailPage({
             <Term>Connection</Term>
             <Def>
               {resource.connections ? (
-                <Link href={'/connections'} style={{ color: 'var(--text-primary)' }}>
+                <Link href={'/estate'} style={{ color: 'var(--text-primary)' }}>
                   {resource.connections.name}
                   <span style={{ color: 'var(--text-secondary)' }}>
                     {' '}
@@ -421,7 +421,7 @@ export default async function AssetDetailPage({
                 {([1, 2, 3] as const).map((r) => (
                   <Link
                     key={r}
-                    href={`/assets/${resource.id}${r === 1 ? '' : `?radius=${r}`}`}
+                    href={`/estate/inventory/${resource.id}${r === 1 ? '' : `?radius=${r}`}`}
                     className="vs-filterpill"
                     data-active={radius === r || undefined}
                     aria-current={radius === r ? 'true' : undefined}
@@ -487,7 +487,7 @@ export default async function AssetDetailPage({
                               }}
                             >
                               <Link
-                                href={`/assets/${n.resource.id}`}
+                                href={`/estate/inventory/${n.resource.id}`}
                                 style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}
                               >
                                 {n.resource.name}

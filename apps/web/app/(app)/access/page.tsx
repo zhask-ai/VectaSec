@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase/server';
 import { SEVERITY_RANK, type Severity } from '@/lib/types';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
+import { DataClassChips } from '@/components/ui/data-class';
 import { EmptyState } from '@/components/ui/empty-state';
 import { IconBroadcast, IconForType, IconIdentity, IconKey, IconUnlock } from '@/components/ui/icons';
 import { Page } from '@/components/ui/page';
@@ -15,8 +16,22 @@ import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 
 import { IdentityDetailButton, type IdentityDetail } from './identity-detail';
 import { IdentityFilters } from './identity-filters';
+import { AccessTabs } from './tabs';
 
-/* Identities — VectaSec's positioning wedge: the cross-system Non-Human Identity inventory.
+/* Access — the anchor page (docs/vectasec-smb-strategy-2026-10.md §2): every API key, service
+ * account, broker user, ACL principal and OAuth client the connected systems ACCEPT, with who
+ * owns it, when it was last used, how far it reaches and whether that reach is named like
+ * sensitive data. Formerly "Identities"; absorbed the Runtime "last seen" signal and the Data
+ * page's sensitivity lens as columns, because a buyer with no security team asks one question —
+ * who can touch my data — not three.
+ *
+ * LAST SEEN is honest by construction. It is assembled from two independent sources and the row
+ * says which: (a) `runtime_evidence` — the broker itself reported this principal connected
+ * (RabbitMQ connections, Redis CLIENT LIST, NATS connz, PgBouncer, Kafka consumer groups), and
+ * (b) a `last_used_at` label the connector derived from the provider's own telemetry (AWS IAM
+ * Access Advisor / access-key last-used / CloudTrail). Where neither exists the cell says
+ * "unknown", never "unused" — Kong and Kubernetes have no agentless last-used signal, and saying
+ * "unused" there would be the exact lie §8 of the strategy warns about.
  *
  * This is the page a flat scanner cannot produce. The service accounts, API consumers, broker
  * users, ACL principals and OAuth clients from EVERY connected system, normalized into one model,
@@ -36,7 +51,7 @@ import { IdentityFilters } from './identity-filters';
  * two disagree the table says so rather than silently truncating.
  */
 
-export const metadata = { title: 'Identities · VectaSec' };
+export const metadata = { title: 'Access · VectaSec' };
 
 const ROW_CAP = 1000;
 
@@ -57,7 +72,26 @@ type FindingRow = {
   resource_id: string | null;
 };
 
+type EvidenceRow = { principal: string | null; source: string; last_seen: string };
+
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
+
+const SENS_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+const IDLE_DAYS = 90; // mirrors detect/credential_lifecycle.py _IDLE_DAYS
+
+/** Days since an ISO timestamp, or null when unparseable. */
+function daysSince(iso: string): number | null {
+  const t = new Date(iso).getTime();
+  return Number.isNaN(t) ? null : Math.floor((Date.now() - t) / 86_400_000);
+}
+
+function relative(iso: string): string {
+  const d = daysSince(iso);
+  if (d === null) return iso;
+  if (d < 1) return 'today';
+  if (d === 1) return 'yesterday';
+  return `${d}d ago`;
+}
 
 function lbl(r: { labels: Record<string, string> | null }, k: string): string {
   return (r.labels ?? {})[k] ?? '';
@@ -130,10 +164,12 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
   const fSystem = one(sp.system);
   const fType = one(sp.type);
   const fWildcard = one(sp.wildcard);
+  const fSensitivity = one(sp.sensitivity);
+  const fSeen = one(sp.seen);
 
   const supabase = await createClient();
 
-  const [countRes, identitiesRes, credsRes, grantsRes] = await Promise.all([
+  const [countRes, identitiesRes, credsRes, grantsRes, evidenceRes] = await Promise.all([
     supabase.from('resources').select('*', { count: 'exact', head: true }).eq('kind', 'identity'),
     supabase
       .from('resources')
@@ -143,7 +179,20 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
       .limit(ROW_CAP),
     supabase.from('resources').select('id, ext_id, name, labels').eq('kind', 'credential').limit(ROW_CAP),
     supabase.from('resources').select('id, ext_id, name, labels').eq('kind', 'grant').limit(ROW_CAP),
+    // The brokers' own account of who connected. Newest first and bounded; a principal's
+    // newest sighting is what the register needs, and the full window lives on the Live tab.
+    supabase.from('runtime_evidence').select('principal, source, last_seen').order('last_seen', { ascending: false }).limit(ROW_CAP),
   ]);
+
+  // runtime_evidence is OPTIONAL input: a tenant with no runtime-capable connector has an empty
+  // table, and a read error here must degrade to "unknown" cells, never hide the register.
+  const evidence = (evidenceRes.error ? [] : (evidenceRes.data ?? [])) as unknown as EvidenceRow[];
+  const seenByPrincipal = new Map<string, EvidenceRow>();
+  for (const e of evidence) {
+    if (!e.principal) continue;
+    const key = e.principal.toLowerCase();
+    if (!seenByPrincipal.has(key)) seenByPrincipal.set(key, e); // newest first already
+  }
 
   const err = identitiesRes.error ?? credsRes.error ?? grantsRes.error;
   if (err) {
@@ -234,6 +283,28 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
     }
     findings.sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
 
+    // Last seen: the newest of (connector-derived last_used_at on the identity or any of its
+    // credentials) and (the broker's runtime evidence for this principal). Absent both → unknown.
+    const candidates: { at: string; source: string }[] = [];
+    for (const r of [idr, ...myCreds]) {
+      const v = lbl(r, 'last_used_at');
+      if (v && v !== 'never') candidates.push({ at: v, source: lbl(r, 'last_used_source') || 'provider telemetry' });
+    }
+    const ev = seenByPrincipal.get(leaf(idr.name).toLowerCase()) ?? seenByPrincipal.get(idr.name.toLowerCase());
+    if (ev) candidates.push({ at: ev.last_seen, source: `${ev.source} runtime evidence` });
+    candidates.sort((a, b) => (a.at < b.at ? 1 : -1));
+    const neverSignal = [idr, ...myCreds].some((r) => lbl(r, 'last_used_at') === 'never');
+    const lastSeen: IdentityDetail['lastSeen'] = candidates[0]
+      ? { state: 'seen', at: candidates[0].at, source: candidates[0].source }
+      : neverSignal
+        ? { state: 'never', at: null, source: 'provider telemetry' }
+        : { state: 'unknown', at: null, source: '' };
+
+    const sensitivity = myGrants
+      .map((g) => lbl(g, 'sensitivity'))
+      .filter((v) => v in SENS_RANK)
+      .sort((a, b) => SENS_RANK[a] - SENS_RANK[b])[0] ?? '';
+
     return {
       id: idr.id,
       name: idr.name,
@@ -242,6 +313,9 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
       scope: scopeOf(idr),
       connector: idr.connections ?? null,
       isDefault: isDefault(idr.name) || lbl(idr, 'shared') === 'true',
+      owner: lbl(idr, 'owner_label') || null,
+      lastSeen,
+      sensitivity,
       worst,
       findings,
       creds: myCreds.map((c) => {
@@ -271,6 +345,10 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
   const wildcardGranted = details.filter((d) => d.grants.some((g) => g.wildcard)).length;
   const externalCount = details.filter((d) => d.scope === 'external').length;
   const defaultCount = details.filter((d) => d.isDefault).length;
+  const isDormant = (d: IdentityDetail) =>
+    d.lastSeen.state === 'never' || (d.lastSeen.state === 'seen' && (daysSince(d.lastSeen.at!) ?? 0) >= IDLE_DAYS);
+  const dormantCount = details.filter(isDormant).length;
+  const knownSeen = details.filter((d) => d.lastSeen.state !== 'unknown').length;
   const truncated = identities.length < exactTotal;
 
   // Filter options + filtered rows.
@@ -280,9 +358,13 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
     (d) =>
       (!fSystem || d.system === fSystem) &&
       (!fType || d.identityType === fType) &&
-      (fWildcard !== 'only' || d.grants.some((g) => g.wildcard)),
+      (fWildcard !== 'only' || d.grants.some((g) => g.wildcard)) &&
+      (!fSensitivity || d.sensitivity === fSensitivity) &&
+      (fSeen !== 'dormant' || isDormant(d)) &&
+      (fSeen !== 'unknown' || d.lastSeen.state === 'unknown') &&
+      (fSeen !== 'seen' || d.lastSeen.state === 'seen'),
   );
-  const filtersActive = Boolean(fSystem || fType || fWildcard);
+  const filtersActive = Boolean(fSystem || fType || fWildcard || fSensitivity || fSeen);
 
   // Lifecycle lens: split real findings (open) from not-assessable (a coverage gap, not a result).
   const lifecycle = (lifecycleRes.data ?? []) as unknown as FindingRow[];
@@ -294,10 +376,11 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
   return (
     <Page>
       <PageHeader
-        title="Identities"
-        description="Every non-human identity across your connected systems — service accounts, API consumers, broker users and OAuth clients — normalized into one model with its credentials, grants and reach."
+        title="Access"
+        description="Every API key, service account, OAuth client and automation credential your connected systems accept — who owns it, when it was last used, what it can reach, and whether that reach is named like sensitive data."
         meta={`${exactTotal} identities · ${systemsSet.size} systems`}
       />
+      <AccessTabs />
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 'var(--space-3)' }}>
         <KpiCard>
@@ -311,6 +394,15 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
         </KpiCard>
         <KpiCard>
           <StatTile label="Shared / default" value={defaultCount} tone={defaultCount ? 'warn' : 'good'} icon={<IconUnlock size={13} />} sub="unattributable principals" />
+        </KpiCard>
+        <KpiCard>
+          <StatTile
+            label={`Dormant ${IDLE_DAYS}d+`}
+            value={dormantCount}
+            tone={dormantCount ? 'warn' : knownSeen ? 'good' : 'neutral'}
+            icon={<IconIdentity size={13} />}
+            sub={knownSeen ? `of ${knownSeen} with a last-used signal` : 'no last-used signal collected yet'}
+          />
         </KpiCard>
       </div>
 
@@ -405,7 +497,15 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
           </CardMeta>
         </CardHeader>
         <CardBody>
-          <IdentityFilters systems={systemOptions} types={typeOptions} system={fSystem} type={fType} wildcard={fWildcard} />
+          <IdentityFilters
+            systems={systemOptions}
+            types={typeOptions}
+            system={fSystem}
+            type={fType}
+            wildcard={fWildcard}
+            sensitivity={fSensitivity}
+            seen={fSeen}
+          />
         </CardBody>
         <CardBody pad={false}>
           {filtered.length === 0 ? (
@@ -414,7 +514,7 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
               title="No identities match these filters"
               description="No non-human identity matches the current system, type and grant filters."
               action={
-                <Link href="/identities" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
+                <Link href="/access" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
                   Clear filters
                 </Link>
               }
@@ -423,15 +523,17 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
             <Table density="relaxed" caption="Non-human identities across all connected systems">
               <THead>
                 <TR>
-                  <TH width="22%">Identity</TH>
-                  <TH width="10%">System</TH>
-                  <TH width="12%">Type</TH>
-                  <TH width="10%">Scope</TH>
-                  <TH width="8%" numeric>Creds</TH>
-                  <TH width="8%" numeric>Grants</TH>
-                  <TH width="10%">Wildcard</TH>
-                  <TH width="8%">Risk</TH>
-                  <TH width="8%"><span className="vs-visually-hidden">Detail</span></TH>
+                  <TH width="20%">Identity</TH>
+                  <TH width="8%">System</TH>
+                  <TH width="10%">Type</TH>
+                  <TH width="10%">Owner</TH>
+                  <TH width="11%">Last seen</TH>
+                  <TH width="9%">Sensitive data</TH>
+                  <TH width="6%" numeric>Creds</TH>
+                  <TH width="6%" numeric>Grants</TH>
+                  <TH width="8%">Wildcard</TH>
+                  <TH width="6%">Risk</TH>
+                  <TH width="6%"><span className="vs-visually-hidden">Detail</span></TH>
                 </TR>
               </THead>
               <TBody>
@@ -460,10 +562,23 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
                       )}
                     </TD>
                     <TD>
-                      {d.scope === 'external' ? (
-                        <Chip tone="medium">external</Chip>
-                      ) : d.scope === 'internal' ? (
-                        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>internal</span>
+                      {d.owner ? (
+                        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-primary)' }}>{d.owner}</span>
+                      ) : (
+                        <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }} title="No owner tag or annotation on this principal">no owner</span>
+                      )}
+                      {d.scope === 'external' && (
+                        <span style={{ display: 'block', marginTop: 2 }}>
+                          <Chip tone="medium">external</Chip>
+                        </span>
+                      )}
+                    </TD>
+                    <TD>
+                      <LastSeenCell seen={d.lastSeen} />
+                    </TD>
+                    <TD>
+                      {d.sensitivity ? (
+                        <DataClassChips classes={[...new Set(d.grants.flatMap((g) => g.dataClasses))].slice(0, 3)} sensitivity={d.sensitivity} />
                       ) : (
                         <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>—</span>
                       )}
@@ -496,11 +611,44 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
       </Card>
 
       <p style={{ margin: 0, fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)', maxWidth: 760 }}>
-        Non-human identities are derived from what each connector already reads — Kafka ACL principals, Kong consumers,
+        “Last seen” is read from the brokers (connections, client lists, consumer groups) and from provider telemetry
+        where a connector collects it (AWS IAM Access Advisor, access-key last-used, CloudTrail). Where neither exists
+        the cell says unknown — never unused. Sensitivity is inferred from the names of what a grant reaches, not from
+        payloads. Non-human identities are derived from what each connector already reads — Kafka ACL principals, Kong consumers,
         RabbitMQ users, Redis ACL users, MCP OAuth clients — and normalized into one model. Credentials shown are metadata
         only; VectaSec never reads or stores a secret value.
       </p>
     </Page>
+  );
+}
+
+/** Last seen, with the state carried in words — "unknown" is a different fact from "never", and
+ * a dormant principal is flagged in the medium hue plus text, never hue alone. */
+function LastSeenCell({ seen }: { seen: IdentityDetail['lastSeen'] }) {
+  if (seen.state === 'unknown') {
+    return (
+      <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }} title="No last-used signal is collected for this system (no runtime evidence, no provider telemetry)">
+        unknown
+      </span>
+    );
+  }
+  if (seen.state === 'never') {
+    return (
+      <span style={{ fontSize: 'var(--text-2xs)', fontWeight: 600, color: 'var(--sev-medium-fg)' }} title={`Reported never used · ${seen.source}`}>
+        never used
+      </span>
+    );
+  }
+  const days = daysSince(seen.at!) ?? 0;
+  const dormant = days >= IDLE_DAYS;
+  return (
+    <span style={{ display: 'grid', gap: 1 }} title={`${seen.at} · ${seen.source}`}>
+      <span style={{ fontSize: 'var(--text-xs)', fontWeight: dormant ? 600 : 400, color: dormant ? 'var(--sev-medium-fg)' : 'var(--text-primary)' }}>
+        {relative(seen.at!)}
+        {dormant ? ' · dormant' : ''}
+      </span>
+      <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>{seen.source}</span>
+    </span>
   );
 }
 
@@ -517,9 +665,10 @@ function SetupState() {
   return (
     <>
       <PageHeader
-        title="Identities"
-        description="The cross-system inventory of every non-human identity that can act on your integration layer."
+        title="Access"
+        description="Every API key, service account and OAuth client that can act on your integration layer — in one register."
       />
+      <AccessTabs />
       <Card>
         <CardBody>
           <EmptyState
@@ -527,7 +676,7 @@ function SetupState() {
             title="No non-human identities yet"
             description="Connect and scan a system with users, consumers, ACLs or OAuth clients and its identities appear here — normalized across systems, with their credentials, grants and reach."
             action={
-              <Link href="/connections" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
+              <Link href="/estate" style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)' }}>
                 Go to Connections →
               </Link>
             }
