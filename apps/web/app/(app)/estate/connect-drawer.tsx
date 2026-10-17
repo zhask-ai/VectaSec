@@ -5,15 +5,18 @@ import { useActionState, useEffect, useMemo, useRef, useState } from 'react';
 import { Drawer } from '@/components/ui/drawer';
 import { IconSearch } from '@/components/ui/icons';
 import { CONNECTORS, specFor, type ConnectorSpec } from './connector-fields';
+import { CARD_OF, SHELF, SWEEP_TYPE, onShelf } from './shelf';
 import { addConnectionAction, type ActionState } from './actions';
 
 /* The connect flow — the reason this console exists ends up flowing through here: pick a
  * system, say how to reach it, get a scan queued.
  *
- * THIS IS A DRAWER, AND IT IS TWO STEPS, because the registry has 37 connectors. The previous
- * version expanded all 37 as cards inline at the FOOT of the connections page, so connecting
- * anything meant: scroll past the table, click, scroll past 37 cards, then scroll again to the
- * fields. Depth beats length here — a searchable list, then only the chosen connector's fields.
+ * THIS IS A DRAWER, AND IT IS TWO STEPS, because the registry has 39 connectors. The previous
+ * version expanded all of them as cards inline at the FOOT of the connections page, so connecting
+ * anything meant: scroll past the table, click, scroll past 39 cards, then scroll again to the
+ * fields. Depth beats length here — the twelve-card SHELF (estate/shelf.ts) first, everything
+ * else under an "Enterprise, on request" toggle, then only the chosen connector's fields. Search
+ * spans both tiers, so an operator who knows they run Solace is never told it is unsupported.
  * The trigger lives in the page header, so the entry point never moves as the table grows.
  *
  * A <form> around a Server Action (works without JS, re-verifies server-side). Nothing is
@@ -114,18 +117,33 @@ export function ConnectDrawer({ label = '+ Connect a system' }: { label?: string
 
 function PickStep({ onPick }: { onPick: (s: ConnectorSpec) => void }) {
   const [q, setQ] = useState('');
+  const [enterprise, setEnterprise] = useState(false);
+  // A multi-type card (Kafka → Apache Kafka / Confluent / Redpanda) opens its variants inline
+  // rather than guessing; a single-type card picks straight away.
+  const [expanded, setExpanded] = useState<string | null>(null);
 
-  // Search is the primary affordance at 37 items; the list is alphabetical so an unsearched
-  // scan is at least predictable. Matching includes the blurb, so "queue" finds the brokers
-  // even though none of them are called that.
+  const byType = useMemo(() => new Map(CONNECTORS.map((c) => [c.type, c])), []);
+  const shelfCards = useMemo(() => SHELF.filter((card) => card.types.some((t) => byType.has(t))), [byType]);
+  const enterpriseSpecs = useMemo(
+    () => CONNECTORS.filter((c) => !onShelf(c.type) && c.type !== SWEEP_TYPE).sort((a, b) => a.label.localeCompare(b.label)),
+    [],
+  );
+  const sweep = byType.get(SWEEP_TYPE) ?? null;
+
+  // Search spans BOTH tiers — the tier is a default, not a capability claim. Matching includes
+  // the blurb, so "queue" finds the brokers even though none of them are called that.
+  const needle = q.trim().toLowerCase();
   const matches = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    const all = [...CONNECTORS].sort((a, b) => a.label.localeCompare(b.label));
-    if (!needle) return all;
-    return all.filter((c) =>
-      `${c.label} ${c.type} ${c.blurb}`.toLowerCase().includes(needle),
-    );
-  }, [q]);
+    if (!needle) return null;
+    return [...CONNECTORS]
+      .sort((a, b) => a.label.localeCompare(b.label))
+      .filter((c) => `${c.label} ${c.type} ${c.blurb} ${CARD_OF[c.type]?.label ?? ''}`.toLowerCase().includes(needle));
+  }, [needle]);
+
+  function pickType(type: string) {
+    const spec = byType.get(type);
+    if (spec) onPick(spec);
+  }
 
   return (
     <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
@@ -147,50 +165,116 @@ function PickStep({ onPick }: { onPick: (s: ConnectorSpec) => void }) {
           type="search"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder={`Search ${CONNECTORS.length} connectors…`}
+          placeholder={`Search all ${CONNECTORS.length} connectors…`}
           aria-label="Search connectors"
           autoFocus
           style={{ ...inputStyle, paddingLeft: 30 }}
         />
       </div>
 
-      {matches.length === 0 ? (
-        <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
-          No connector matches “{q}”. VectaSec assesses the integration layer — brokers, gateways,
-          iPaaS and MCP servers. If yours is missing, the roadmap on Coverage names what is not
-          supported yet.
-        </p>
+      {matches ? (
+        matches.length === 0 ? (
+          <p style={{ margin: 0, fontSize: 'var(--text-xs)', color: 'var(--text-secondary)' }}>
+            No connector matches “{q}”. VectaSec assesses the integration layer — brokers, gateways,
+            iPaaS and MCP servers. If yours is missing, the catalogue on “What we can assess” names what
+            is not supported yet.
+          </p>
+        ) : (
+          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 'var(--space-1)' }}>
+            {matches.map((c) => (
+              <li key={c.type}>
+                <SpecRow spec={c} onPick={() => onPick(c)} tier={onShelf(c.type) ? null : c.type === SWEEP_TYPE ? 'sweep' : 'enterprise'} />
+              </li>
+            ))}
+          </ul>
+        )
       ) : (
-        <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 'var(--space-1)' }}>
-          {matches.map((c) => (
-            <li key={c.type}>
-              <button type="button" onClick={() => onPick(c)} style={pickRowStyle}>
-                <span style={{ display: 'grid', gap: 2, minWidth: 0 }}>
-                  <span style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)' }}>
-                    <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)' }}>
-                      {c.label}
-                    </span>
-                    <span data-numeric style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
-                      {c.rules} checks
-                    </span>
-                  </span>
-                  <span
-                    style={{
-                      fontSize: 'var(--text-2xs)',
-                      lineHeight: 'var(--leading-2xs)',
-                      color: 'var(--text-secondary)',
-                    }}
+        <>
+          {/* Tier 1 — the shelf. */}
+          <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 'var(--space-1)' }}>
+            {shelfCards.map((card) => {
+              const single = card.types.length === 1 ? byType.get(card.types[0]) : null;
+              const open = expanded === card.id;
+              return (
+                <li key={card.id}>
+                  <button
+                    type="button"
+                    onClick={() => (single ? onPick(single) : setExpanded(open ? null : card.id))}
+                    aria-expanded={single ? undefined : open}
+                    style={pickRowStyle}
                   >
-                    {c.blurb}
-                  </span>
+                    <span style={{ display: 'grid', gap: 2, minWidth: 0 }}>
+                      <span style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)' }}>
+                        <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)' }}>{card.label}</span>
+                        <span data-numeric style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
+                          {card.types.reduce((n, t) => n + (byType.get(t)?.rules ?? 0), 0)} checks
+                        </span>
+                      </span>
+                      <span style={{ fontSize: 'var(--text-2xs)', lineHeight: 'var(--leading-2xs)', color: 'var(--text-secondary)' }}>{card.blurb}</span>
+                    </span>
+                    <span aria-hidden="true" style={{ color: 'var(--text-muted)', flexShrink: 0 }}>
+                      {single ? '→' : open ? '▾' : '▸'}
+                    </span>
+                  </button>
+                  {!single && open && (
+                    <ul style={{ listStyle: 'none', margin: 'var(--space-1) 0 0 var(--space-4)', padding: 0, display: 'grid', gap: 'var(--space-1)' }}>
+                      {card.types.map((t) => {
+                        const spec = byType.get(t);
+                        return spec ? (
+                          <li key={t}>
+                            <SpecRow spec={spec} onPick={() => pickType(t)} tier={null} />
+                          </li>
+                        ) : null;
+                      })}
+                      {card.note && (
+                        <li style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)', padding: '0 var(--space-2)' }}>{card.note}</li>
+                      )}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+
+          {/* The free external scan — not a system, so not a tier. */}
+          {sweep && (
+            <SpecRow spec={sweep} onPick={() => onPick(sweep)} tier="sweep" />
+          )}
+
+          {/* Tier 2 — everything else the engine supports, on request. */}
+          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 'var(--space-3)' }}>
+            <button
+              type="button"
+              onClick={() => setEnterprise((v) => !v)}
+              aria-expanded={enterprise}
+              style={{ ...buttonStyle, width: '100%', justifyContent: 'space-between', display: 'flex', alignItems: 'center' }}
+            >
+              <span>
+                Enterprise, on request
+                <span data-numeric style={{ marginLeft: 'var(--space-2)', fontWeight: 400, color: 'var(--text-muted)' }}>
+                  {enterpriseSpecs.length} more connectors
                 </span>
-                <span aria-hidden="true" style={{ color: 'var(--text-muted)', flexShrink: 0 }}>
-                  →
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
+              </span>
+              <span aria-hidden="true" style={{ color: 'var(--text-muted)' }}>{enterprise ? '▾' : '▸'}</span>
+            </button>
+            {enterprise && (
+              <>
+                <p style={{ margin: 'var(--space-2) 0', fontSize: 'var(--text-2xs)', lineHeight: 'var(--leading-2xs)', color: 'var(--text-secondary)' }}>
+                  Fully supported and scanned the same way — IBM MQ, Solace, MuleSoft, Boomi, Workato, Vault,
+                  Keycloak, NATS, Pulsar and the rest. They are off the shelf only because most teams new to
+                  cloud do not run them.
+                </p>
+                <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 'var(--space-1)' }}>
+                  {enterpriseSpecs.map((c) => (
+                    <li key={c.type}>
+                      <SpecRow spec={c} onPick={() => onPick(c)} tier={null} />
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </div>
+        </>
       )}
 
       <details>
@@ -202,6 +286,29 @@ function PickStep({ onPick }: { onPick: (s: ConnectorSpec) => void }) {
         </div>
       </details>
     </div>
+  );
+}
+
+/** One connector as a pick row: label, check count, blurb, and — when it matters — which tier
+ * it came from, so a search hit from the enterprise tier says so. */
+function SpecRow({ spec, onPick, tier }: { spec: ConnectorSpec; onPick: () => void; tier: 'enterprise' | 'sweep' | null }) {
+  return (
+    <button type="button" onClick={onPick} style={pickRowStyle}>
+      <span style={{ display: 'grid', gap: 2, minWidth: 0 }}>
+        <span style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 'var(--text-sm)', fontWeight: 600, color: 'var(--text-primary)' }}>{spec.label}</span>
+          <span data-numeric style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>{spec.rules} checks</span>
+          {tier === 'enterprise' && (
+            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>· enterprise, on request</span>
+          )}
+          {tier === 'sweep' && (
+            <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>· free external scan, no credentials</span>
+          )}
+        </span>
+        <span style={{ fontSize: 'var(--text-2xs)', lineHeight: 'var(--leading-2xs)', color: 'var(--text-secondary)' }}>{spec.blurb}</span>
+      </span>
+      <span aria-hidden="true" style={{ color: 'var(--text-muted)', flexShrink: 0 }}>→</span>
+    </button>
   );
 }
 

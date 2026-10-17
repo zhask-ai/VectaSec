@@ -19,8 +19,14 @@ import { Donut } from '@/components/charts/Donut';
 // The connect flow is one component shared by both tabs of this section: connecting from the
 // catalogue must open the same drawer, not bounce the user to the other tab to start over.
 import { ConnectDrawer } from '../connect-drawer';
+import { SHELF, SWEEP_TYPE, onShelf } from '../shelf';
 
-/* /systems — the coverage catalogue. The falsifiable "any integration platform" story.
+/* /estate/catalogue — "What we can assess". The falsifiable coverage catalogue.
+ *
+ * TWO TIERS (docs/vectasec-smb-strategy-2026-10.md §3, estate/shelf.ts): the twelve-card shelf an
+ * SMB new to cloud recognises is shown open; the other 27 connectors sit under "Enterprise, on
+ * request", collapsed. Every connector is still live in the engine and still connectable — the
+ * tier is what a first session sees, not what the product supports.
  *
  * Three sources, three trust levels, kept honestly separate:
  *
@@ -361,9 +367,17 @@ export default async function SystemsPage() {
     }
   }
 
-  // Group catalogue entries by category, in the fixed category order (+ Other last).
+  // Tiering: shelf types (and the sweep) are rendered above; the category grouping below is the
+  // enterprise tier only, so a connector never appears twice.
+  const shelfTypes = entries.filter((e) => onShelf(e.type)).map((e) => e.type);
+  const sweepEntry = entries.find((e) => e.type === SWEEP_TYPE) ?? null;
+  const enterpriseEntries = entries.filter((e) => !onShelf(e.type) && e.type !== SWEEP_TYPE);
+  const shelfConnected = shelfTypes.filter((t) => (rollup.get(t)?.connCount ?? 0) > 0).length;
+  const enterpriseConnected = enterpriseEntries.filter((e) => (rollup.get(e.type)?.connCount ?? 0) > 0).length;
+
+  // Group the ENTERPRISE entries by category, in the fixed category order (+ Other last).
   const byCategory = new Map<string, SystemEntry[]>();
-  for (const e of entries) {
+  for (const e of enterpriseEntries) {
     const list = byCategory.get(e.categoryId) ?? [];
     list.push(e);
     byCategory.set(e.categoryId, list);
@@ -395,7 +409,7 @@ export default async function SystemsPage() {
     <Page>
       <PageHeader
         title="Estate"
-        description="Every integration-layer system VectaSec can assess, grouped by class — with your connected estate and its live findings mapped onto it. This is the coverage claim, made falsifiable."
+        description="What we can assess: the twelve systems on the shelf, the rest on request, and your connected estate with its live findings mapped onto both. This is the coverage claim, made falsifiable."
         meta={headerMeta}
         actions={editable ? <ConnectDrawer /> : undefined}
       />
@@ -487,7 +501,50 @@ export default async function SystemsPage() {
         </CardBody>
       </Card>
 
-      {/* The catalogue, by category. */}
+      {/* Tier 1 — the shelf. A card can front several connector types; counts are summed. */}
+      <section style={{ display: 'grid', gap: 'var(--space-3)' }}>
+        <SectionHeader
+          title="On the shelf"
+          meta={`${SHELF.length} cards · ${shelfTypes.length} connectors · ${shelfConnected} connected`}
+        />
+        <p style={{ margin: 0, maxWidth: '80ch', fontSize: 'var(--text-xs)', lineHeight: 'var(--leading-xs)', color: 'var(--text-secondary)' }}>
+          The systems a team new to cloud actually runs. Each connects read-only in minutes — a CloudFormation
+          role, a read-only broker user, a service account — and feeds the Access register and the findings queue.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(238px, 1fr))', gap: 'var(--space-3)' }}>
+          {SHELF.map((card) => {
+            const members = entries.filter((e) => card.types.includes(e.type));
+            const merged: SystemEntry = {
+              type: card.types.join(' · '),
+              label: card.label,
+              categoryId: card.id,
+              rules: engineOk ? members.reduce((n, e) => n + (e.rules ?? 0), 0) : null,
+              fieldCount: null,
+            };
+            const roll = mergeRollups(card.types.map((t) => rollup.get(t)));
+            return <SystemCard key={card.id} entry={merged} rollup={roll} findingsError={findingsError} connError={connError} note={card.note} />;
+          })}
+        </div>
+        {sweepEntry && (
+          <p style={{ margin: 0, fontSize: 'var(--text-2xs)', color: 'var(--text-secondary)' }}>
+            Plus the <strong style={{ color: 'var(--text-primary)' }}>network discovery sweep</strong> — the free external exposure
+            scan behind the Unmonitored tab{sweepEntry.rules != null ? ` (${sweepEntry.rules} rules)` : ''}; no credentials needed.
+          </p>
+        )}
+      </section>
+
+      {/* Tier 2 — everything else, collapsed. Still grouped by class so a buyer who runs Solace
+          finds it under the class they would look in. */}
+      <details>
+        <summary style={{ cursor: 'pointer', padding: 'var(--space-2) 0' }}>
+          <span style={{ fontSize: 'var(--text-2xs)', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
+            Enterprise, on request
+          </span>
+          <span style={{ marginLeft: 'var(--space-2)', fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
+            {enterpriseEntries.length} connectors · {enterpriseConnected} connected · fully supported, hidden by default
+          </span>
+        </summary>
+        <div style={{ display: 'grid', gap: 'var(--space-5)', paddingTop: 'var(--space-3)' }}>
       {orderedCategories.map((cat) => {
         const list = (byCategory.get(cat.id) ?? []).slice().sort((a, b) => (b.rules ?? -1) - (a.rules ?? -1));
         const connectedInCat = list.filter((e) => (rollup.get(e.type)?.connCount ?? 0) > 0).length;
@@ -513,6 +570,8 @@ export default async function SystemsPage() {
           </section>
         );
       })}
+        </div>
+      </details>
 
       {/* The honest gap. */}
       <section style={{ display: 'grid', gap: 'var(--space-3)' }}>
@@ -541,6 +600,26 @@ export default async function SystemsPage() {
   );
 }
 
+/** Sum the per-type rollups behind one shelf card (Kafka = kafka + confluent + redpanda). The
+ * worst tone and worst severity win; counts add. undefined when no member type is connected. */
+function mergeRollups(parts: (TypeRollup | undefined)[]): TypeRollup | undefined {
+  const present = parts.filter((p): p is TypeRollup => Boolean(p));
+  if (present.length === 0) return undefined;
+  const out: TypeRollup = { connCount: 0, neverScanned: 0, tone: 'ok', toneLabel: 'connected', open: 0, worstSev: null, sevCounts: {} };
+  for (const p of present) {
+    out.connCount += p.connCount;
+    out.neverScanned += p.neverScanned;
+    out.open += p.open;
+    if (TONE_RANK[p.tone] < TONE_RANK[out.tone]) {
+      out.tone = p.tone;
+      out.toneLabel = p.toneLabel;
+    }
+    if (p.worstSev && (out.worstSev === null || SEVERITY_RANK[p.worstSev] < SEVERITY_RANK[out.worstSev])) out.worstSev = p.worstSev;
+    for (const [sev, n] of Object.entries(p.sevCounts) as [Severity, number][]) out.sevCounts[sev] = (out.sevCounts[sev] ?? 0) + n;
+  }
+  return out;
+}
+
 /* ── System card ─────────────────────────────────────────────────────────── */
 
 function SystemCard({
@@ -548,11 +627,14 @@ function SystemCard({
   rollup,
   findingsError,
   connError,
+  note,
 }: {
   entry: SystemEntry;
   rollup: TypeRollup | undefined;
   findingsError: boolean;
   connError: string | null;
+  /** Shelf cards only: where a related system lives ("MSK via AWS"). */
+  note?: string;
 }) {
   const connectedCount = rollup?.connCount ?? 0;
   const isConnected = connectedCount > 0;
@@ -580,6 +662,7 @@ function SystemCard({
               </span>
             )}
           </div>
+          {note && <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>{note}</span>}
 
           <div style={{ height: 1, background: 'var(--border)' }} aria-hidden="true" />
 
