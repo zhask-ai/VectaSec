@@ -24,6 +24,13 @@ Provenance warning that must not be lost: the PCI requirement text below is quot
 *vendor reproduction* of PCI DSS v4.0.1, not from the standard (the PCI SSC PDF is behind a
 click-through). It must be diffed against the official PDF before any customer-facing use.
 See docs/research/compliance-mapping.md §8.
+
+Second provenance warning, same weight: the SOC 2 (AICPA TSC 2017, 2022 points of focus) and
+ISO/IEC 27001:2022 Annex A rows below are *paraphrases*, not quotations. Both texts are
+copyrighted and licensed (the TSC by the AICPA, ISO 27001 by ISO); neither was reproduced here.
+`requirement` for those two frameworks states the control's title and intent in our own words
+and says so inline. Before any customer-facing use the paraphrase must be checked against the
+licensed text, and the UI must present it as a paraphrase, never as the criterion's wording.
 """
 import json
 from typing import NamedTuple, Optional
@@ -64,12 +71,18 @@ _DORA_SRC = "https://www.digital-operational-resilience-act.com/Article_9.html"
 _NIS2_SRC = "https://www.nis-2-directive.com/NIS_2_Directive_Article_21.html"
 _HIPAA_SRC = "https://www.law.cornell.edu/cfr/text/45/164.312"
 _MCP_SRC = "https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization"
+# Licensed texts: the URL is where the document is obtained, not where its text was copied from.
+_SOC2_SRC = ("https://www.aicpa-cima.com/resources/download/"
+             "2017-trust-services-criteria-with-revised-points-of-focus-2022")
+_ISO27001_SRC = "https://www.iso.org/standard/27001"
 
 PCI = "PCI_DSS_4_0_1"
 DORA = "DORA"
 NIS2 = "NIS2"
 HIPAA = "HIPAA"
 MCP_SPEC = "MCP_SPEC_2025_11_25"   # pinned: MCP revisions move fast enough to invalidate detectors
+SOC2 = "SOC2_TSC_2017"             # 2017 TSC with the 2022 revised points of focus
+ISO27001 = "ISO_27001_2022"        # Annex A control ids follow the 2022 numbering
 
 
 # ── CONTROL_CATALOGUE ─────────────────────────────────────────────────────
@@ -289,6 +302,131 @@ CONTROL_CATALOGUE: dict[str, dict[str, Control]] = {
             "MUST use the S256 code challenge method when technically capable.",
             _MCP_SRC),
     },
+
+    # SOC 2 Trust Services Criteria (AICPA, 2017, with the 2022 revised points of focus).
+    # PARAPHRASED, NOT QUOTED. The TSC is a licensed AICPA document and its text is not
+    # reproduced here; each `requirement` restates the criterion's intent in our words and says
+    # so. Check every row against the licensed TSC before customer-facing use (module header).
+    # SOC 2 is also an *attestation* framework: the criteria are met by the service organisation's
+    # own controls, so a failing row is evidence an auditor would weigh against a CC6/CC7 control,
+    # not a verdict on the report. No asset gate — the tenant's framework declaration is scope.
+    SOC2: {
+        "CC6.1": Control(
+            "Logical access security over protected information assets",
+            "The entity implements logical access security software, infrastructure, and "
+            "architectures over protected information assets to protect them from security "
+            "events to meet its objectives. (Paraphrase of CC6.1 — not the TSC wording.)",
+            _SOC2_SRC),
+        "CC6.2": Control(
+            "Registration, authorization and removal of system access",
+            "Before issuing system credentials and granting access, the entity registers and "
+            "authorizes new internal and external users; it removes access when a user's access "
+            "is no longer authorized. (Paraphrase of CC6.2 — not the TSC wording.)",
+            _SOC2_SRC),
+        "CC6.3": Control(
+            "Access is authorized, modified and removed on roles and least privilege",
+            "The entity authorizes, modifies, or removes access to data, software, functions, and "
+            "other protected information assets based on roles, responsibilities, or the system "
+            "design and changes, giving consideration to least privilege and segregation of "
+            "duties. (Paraphrase of CC6.3 — not the TSC wording.)",
+            _SOC2_SRC),
+        "CC6.6": Control(
+            "Logical access security against threats from outside system boundaries",
+            "The entity implements logical access security measures to protect against threats "
+            "from sources outside its system boundaries. (Paraphrase of CC6.6 — not the TSC "
+            "wording.)",
+            _SOC2_SRC),
+        "CC6.7": Control(
+            "Transmission, movement and removal of information is restricted and protected",
+            "The entity restricts the transmission, movement, and removal of information to "
+            "authorized internal and external users and processes, and protects it during "
+            "transmission, movement, or removal. (Paraphrase of CC6.7 — not the TSC wording.)",
+            _SOC2_SRC),
+        "CC7.1": Control(
+            "Detection of configuration changes and newly discovered vulnerabilities",
+            "The entity uses detection and monitoring procedures to identify changes to "
+            "configurations that result in the introduction of new vulnerabilities, and "
+            "susceptibilities to newly discovered vulnerabilities. (Paraphrase of CC7.1 — not "
+            "the TSC wording.)",
+            _SOC2_SRC),
+        "CC7.2": Control(
+            "Monitoring of system components for anomalies",
+            "The entity monitors system components and their operation for anomalies that are "
+            "indicative of malicious acts, natural disasters, and errors affecting its "
+            "objectives, and analyzes anomalies to determine whether they are security events. "
+            "(Paraphrase of CC7.2 — not the TSC wording.)",
+            _SOC2_SRC),
+    },
+
+    # ISO/IEC 27001:2022 Annex A. PARAPHRASED, NOT QUOTED. The standard is ISO copyright and
+    # sold under licence; only each control's title and intent are restated here, in our words,
+    # and every row says so. Annex A controls are also *selected* via the entity's Statement of
+    # Applicability — a row here is evidence against a control the SoA includes, not a verdict
+    # against the certificate. Check against the licensed text before customer-facing use.
+    # A.8.8 (technical vulnerability management) is the honest ISO home for the CVE/version
+    # rules and is deliberately NOT in this catalogue yet: adding it means adding it to the
+    # research doc first. Until then those rules carry SOC 2 CC7.1 only.
+    ISO27001: {
+        "A.5.15": Control(
+            "Access control",
+            "Rules to control physical and logical access to information and other associated "
+            "assets are established and implemented based on business and information security "
+            "requirements. (Paraphrase of A.5.15 — not the ISO wording.)",
+            _ISO27001_SRC),
+        "A.5.16": Control(
+            "Identity management",
+            "The full life cycle of identities is managed; identities are assigned to a single "
+            "person or entity, and shared identities are permitted only where necessary for "
+            "business or operational reasons. (Paraphrase of A.5.16 — not the ISO wording.)",
+            _ISO27001_SRC),
+        "A.5.17": Control(
+            "Authentication information",
+            "Allocation and management of authentication information is controlled by a "
+            "management process, including protecting it in storage and in transit, changing "
+            "default authentication information, and guidance on its proper handling. "
+            "(Paraphrase of A.5.17 — not the ISO wording.)",
+            _ISO27001_SRC),
+        "A.5.18": Control(
+            "Access rights",
+            "Access rights to information and other associated assets are provisioned, "
+            "reviewed, modified and removed in accordance with the access control policy and "
+            "rules. (Paraphrase of A.5.18 — not the ISO wording.)",
+            _ISO27001_SRC),
+        "A.8.2": Control(
+            "Privileged access rights",
+            "The allocation and use of privileged access rights is restricted and managed. "
+            "(Paraphrase of A.8.2 — not the ISO wording.)",
+            _ISO27001_SRC),
+        "A.8.3": Control(
+            "Information access restriction",
+            "Access to information and other associated assets is restricted in accordance with "
+            "the established access control policy. (Paraphrase of A.8.3 — not the ISO wording.)",
+            _ISO27001_SRC),
+        "A.8.5": Control(
+            "Secure authentication",
+            "Secure authentication technologies and procedures are implemented based on "
+            "information access restrictions and the access control policy. (Paraphrase of "
+            "A.8.5 — not the ISO wording.)",
+            _ISO27001_SRC),
+        "A.8.9": Control(
+            "Configuration management",
+            "Configurations, including security configurations, of hardware, software, services "
+            "and networks are established, documented, implemented, monitored and reviewed. "
+            "(Paraphrase of A.8.9 — not the ISO wording.)",
+            _ISO27001_SRC),
+        "A.8.20": Control(
+            "Networks security",
+            "Networks and network devices are secured, managed and controlled to protect "
+            "information in systems and applications. (Paraphrase of A.8.20 — not the ISO "
+            "wording.)",
+            _ISO27001_SRC),
+        "A.8.24": Control(
+            "Use of cryptography",
+            "Rules for the effective use of cryptography, including cryptographic key "
+            "management, are defined and implemented. (Paraphrase of A.8.24 — not the ISO "
+            "wording.)",
+            _ISO27001_SRC),
+    },
 }
 
 
@@ -337,6 +475,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(HIPAA, "164.312(e)(1)", confidence="B", gate=(GATE_EPHI,),
              note="Encryption is Addressable under 164.312(e)(2)(ii); a documented equivalent "
                   "alternative satisfies the Required (e)(1) standard."),
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
     ),
     # The rule *is* 8.3.2's gate: SASL_PLAINTEXT means the credential itself crosses the wire in
     # the clear, so what is conditional for a bare PLAINTEXT listener is unconditional here.
@@ -349,6 +490,12 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(e)(1)", confidence="B", gate=(GATE_EPHI,),
              note="Encryption is Addressable under 164.312(e)(2)(ii)."),
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
+        _ref(ISO27001, "A.5.17",
+             note="A.5.17 covers protection of authentication information in transit; the "
+                  "credential itself crosses the wire in the clear."),
     ),
     "KAFKA.INTERBROKER.PLAINTEXT": (
         _ref(PCI, "2.2.5"),
@@ -358,6 +505,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(e)(1)", confidence="B", gate=(GATE_EPHI,),
              note="Encryption is Addressable under 164.312(e)(2)(ii)."),
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
     ),
     # SASL mechanisms whose credentials are exposed without TLS. 8.3.2's "unreadable during
     # transmission" is exactly this, and needs no gate — the rule already proves the condition.
@@ -367,6 +517,12 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "2.2.1"),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
+        _ref(ISO27001, "A.5.17",
+             note="A.5.17 covers protection of authentication information in transit; the "
+                  "credential itself crosses the wire in the clear."),
     ),
     "KAFKA.SASL.SCRAM_WITHOUT_TLS": (
         _ref(PCI, "8.3.2"),
@@ -374,6 +530,12 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "2.2.1"),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
+        _ref(ISO27001, "A.5.17",
+             note="A.5.17 covers protection of authentication information in transit; the "
+                  "credential itself crosses the wire in the clear."),
     ),
     "KAFKA.SASL.OAUTHBEARER_UNSECURED_JWT": (
         _ref(PCI, "8.3.2"),
@@ -383,6 +545,8 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
              note="Art. 9(4) requires strong authentication 'based on relevant standards'; an "
                   "unsecured JWT is the standard's own explicitly non-production mode."),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.8.5"),
     ),
     # 4.2.1's first bullet — "Only trusted keys and certificates are accepted" — is squarely
     # about verification, which is what these two rules read. Still gated: 4.2.1's scope words
@@ -395,6 +559,10 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
                   "PAN over open, public networks."),
         _ref(DORA, "Art.9(3)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.7", confidence="B",
+             note="TLS is on but peer trust is not validated; assert where the channel carries "
+                  "protected information."),
+        _ref(ISO27001, "A.8.24"),
     ),
     "KAFKA.SSL.CLIENT_AUTH_NOT_REQUIRED": (
         _ref(PCI, "2.2.1"),
@@ -402,6 +570,11 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "7.2.1"),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.1", confidence="B",
+             note="Assert where the client certificate is the authentication mechanism rather than "
+                  "one of several."),
+        _ref(ISO27001, "A.8.5", confidence="B",
+             note="Assert where mTLS is the intended authentication mechanism."),
     ),
 
     # ── Kafka: authorization ──────────────────────────────────────────────
@@ -418,6 +591,10 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(HIPAA, "164.312(a)(1)", confidence="B", gate=(GATE_EPHI,),
              note="164.312(a)(1) reaches machine identity natively — 'persons or software "
                   "programs that have been granted access rights'."),
+        _ref(SOC2, "CC6.1"),
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.3"),
     ),
     "KAFKA.AUTHZ.ALLOW_EVERYONE_IF_NO_ACL": (
         _ref(PCI, "2.2.6"),  # the definitional misuse-enabling security parameter
@@ -427,6 +604,10 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(a)(1)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.1"),
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.3"),
     ),
     # Family prefix: 7.2.5's "Access is limited to the systems, applications, or processes that
     # specifically require their use" is the negation of a wildcard ACL, sentence for sentence.
@@ -438,6 +619,11 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(a)(1)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.18"),
+        _ref(ISO27001, "A.8.3"),
+        _ref(ISO27001, "A.8.2", confidence="B",
+             note="Assert where the wildcard grants admin-equivalent rights."),
     ),
     "KAFKA.ACL.ANONYMOUS_PRINCIPAL": (
         _ref(PCI, "7.2.5"),
@@ -448,6 +634,13 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(d)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.1"),
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.8.5"),
+        _ref(ISO27001, "A.8.3"),
+        _ref(ISO27001, "A.5.16", confidence="B",
+             note="An anonymous principal is an identity assigned to no one; assert where the grant "
+                  "is not a deliberate public-read design."),
     ),
 
     # ── Kafka: ZooKeeper legacy mode ──────────────────────────────────────
@@ -457,6 +650,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "1.2.6"),
         _ref(DORA, "Art.9(3)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
     ),
     "KAFKA.ZK.LEGACY_MODE_UNSECURED_ZNODES": (
         _ref(PCI, "7.2.1"),   # cluster metadata with no access control model behind it
@@ -464,6 +660,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "2.2.1"),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.8.3"),
+        _ref(ISO27001, "A.8.9", relation="supports", confidence="B"),
     ),
 
     # ── Kafka: topics ─────────────────────────────────────────────────────
@@ -471,6 +670,11 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "2.2.6"),
         _ref(PCI, "2.2.4"),   # unnecessary functionality enabled by default
         _ref(PCI, "2.2.1"),
+        _ref(SOC2, "CC7.1", relation="supports", confidence="B",
+             note="Auto-created topics are configuration change nobody reviewed; evidence toward "
+                  "CC7.1, not a failure of it."),
+        _ref(ISO27001, "A.8.9", relation="supports", confidence="B",
+             note="A security-relevant default left at the vendor's non-hardened value."),
     ),
 
     # ── Kong: admin plane ─────────────────────────────────────────────────
@@ -487,6 +691,11 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "1.4.2", confidence="B", gate=(GATE_PUBLIC_FACING,)),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.6", confidence="B", gate=(GATE_PUBLIC_FACING,),
+             note="CC6.6 is about threats from outside the system boundary; assert where the "
+                  "listener is reachable from one."),
+        _ref(ISO27001, "A.8.20"),
+        _ref(ISO27001, "A.8.9", relation="supports", confidence="B"),
     ),
     # 2.2.7's home turf. It says *non-console administrative* access — the Kong Admin API over
     # HTTP is the textbook instance, unlike a data-plane listener.
@@ -497,6 +706,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "1.2.6"),
         _ref(DORA, "Art.9(3)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
     ),
     "KONG.ADMIN.UNAUTHENTICATED": (
         _ref(PCI, "7.2.1"),
@@ -508,12 +720,21 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(a)(1)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.5"),
+        _ref(ISO27001, "A.8.2"),
     ),
     "KONG.RBAC.DISABLED": (
         _ref(PCI, "7.2.1"),
         _ref(PCI, "2.2.1"),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.2", confidence="B",
+             note="Without RBAC every Admin API caller is a full administrator; assert where more "
+                  "than one caller exists."),
     ),
 
     # ── Kong: data plane ──────────────────────────────────────────────────
@@ -528,6 +749,12 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(a)(1)", confidence="B", gate=(GATE_EPHI,)),
         _ref(HIPAA, "164.312(d)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.5"),
+        _ref(SOC2, "CC6.6", confidence="B", gate=(GATE_PUBLIC_FACING,),
+             note="CC6.6 is about threats from outside the system boundary; assert where the "
+                  "listener is reachable from one."),
     ),
     "KONG.AUTH.ANONYMOUS_FALLBACK": (
         _ref(PCI, "7.2.1"),
@@ -535,6 +762,8 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(d)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.8.5"),
     ),
     # An identity that exists but cannot authenticate is an unreviewed identity: 7.2.5.1's
     # periodic-review requirement is the honest home, and our inventory *is* the review artifact.
@@ -544,6 +773,11 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
              note="Assert where the credential-less consumer is reachable via an anonymous "
                   "fallback rather than merely dormant."),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.2", relation="supports", confidence="B",
+             note="An identity nobody can authenticate as is an access record that was never "
+                  "removed; evidence toward the removal half of CC6.2."),
+        _ref(ISO27001, "A.5.16", relation="supports", confidence="B"),
+        _ref(ISO27001, "A.5.18", relation="supports", confidence="B"),
     ),
     "KONG.ROUTE.HTTP_PROTOCOL_ALLOWED": (
         _ref(PCI, "2.2.5"),
@@ -555,21 +789,33 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(e)(1)", confidence="B", gate=(GATE_EPHI,),
              note="Encryption is Addressable under 164.312(e)(2)(ii)."),
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
     ),
     "KONG.CORS.WILDCARD_WITH_CREDENTIALS": (
         _ref(PCI, "2.2.6"),
         _ref(PCI, "7.2.1", confidence="B",
              note="Assert where the route's credentials carry authorization decisions."),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.6", confidence="B",
+             note="A browser on any origin is a source outside the system boundary; assert where "
+                  "the route serves browser clients."),
+        _ref(ISO27001, "A.8.9", relation="supports", confidence="B"),
     ),
     "KONG.PLUGIN.SECURITY_PLUGIN_DISABLED": (
         _ref(PCI, "2.2.1"),
         _ref(PCI, "2.2.6"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC7.1", relation="supports", confidence="B",
+             note="A security plugin flipped to disabled is the configuration change CC7.1 wants "
+                  "detected; the rule is the detection, not proof it was missed."),
+        _ref(ISO27001, "A.8.9"),
     ),
     "KONG.ROUTE.WILDCARD_HOST_OR_PRESERVE_HOST": (
         _ref(PCI, "2.2.6"),
         _ref(PCI, "2.2.1"),
+        _ref(ISO27001, "A.8.9", relation="supports", confidence="B"),
     ),
 
     # ── Kong / RabbitMQ: known vulnerabilities ────────────────────────────
@@ -581,16 +827,19 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(NIS2, "21(2)(e)", relation="supports"),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B",
              note="Art. 9(4) requires documented patch management policies."),
+        _ref(SOC2, "CC7.1"),
     ),
     "RABBITMQ.VERSION.": (
         _ref(PCI, "2.2.1"),
         _ref(NIS2, "21(2)(e)", relation="supports"),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC7.1"),
     ),
     "RABBITMQ.CVE.": (
         _ref(PCI, "2.2.1"),
         _ref(NIS2, "21(2)(e)", relation="supports"),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC7.1"),
     ),
 
     # ── RabbitMQ: default credentials ─────────────────────────────────────
@@ -604,6 +853,14 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
                   "account is established as unused."),
         _ref(NIS2, "21(2)(g)", relation="supports"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.2", confidence="B",
+             note="A vendor-shipped account nobody registered or authorized; assert once it is "
+                  "established as unused."),
+        _ref(ISO27001, "A.5.16"),
+        _ref(ISO27001, "A.5.17", confidence="B",
+             note="A.5.17 asks that default authentication information be changed; this rule "
+                  "proves the account exists, not that the password is still 'guest' (that is "
+                  "GUEST_DEFAULT_PASSWORD_REMOTE)."),
     ),
     "RABBITMQ.USER.GUEST_DEFAULT_PASSWORD_REMOTE": (
         _ref(PCI, "2.2.2"),
@@ -618,6 +875,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(HIPAA, "164.312(d)", confidence="B", gate=(GATE_EPHI,),
              note="A shared, world-known default defeats 'verify that a person or entity ... is "
                   "the one claimed'."),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.17"),
+        _ref(ISO27001, "A.8.5"),
     ),
     "RABBITMQ.USER.GUEST_REMOTE_LOGIN": (
         _ref(PCI, "2.2.2"),
@@ -625,11 +885,16 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "1.2.5"),
         _ref(NIS2, "21(2)(g)", relation="supports"),
         _ref(HIPAA, "164.312(d)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.1", confidence="B",
+             note="Assert where the guest account's password is unconfirmed; a confirmed "
+                  "default is GUEST_DEFAULT_PASSWORD_REMOTE."),
+        _ref(ISO27001, "A.5.16"),
     ),
     # A vhost is not an account, so 2.2.2 does not reach it however tempting. Vendor hardening
     # guidance does — 2.2.1 alone.
     "RABBITMQ.VHOST.DEFAULT_VHOST_IN_USE": (
         _ref(PCI, "2.2.1"),
+        _ref(ISO27001, "A.8.9", relation="supports", confidence="B"),
     ),
 
     # ── RabbitMQ: authn / authz ───────────────────────────────────────────
@@ -640,6 +905,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(d)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.5"),
     ),
     "RABBITMQ.PERMISSION.": (
         _ref(PCI, "7.2.5"),
@@ -648,6 +916,11 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(a)(1)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.18"),
+        _ref(ISO27001, "A.8.3"),
+        _ref(ISO27001, "A.8.2", confidence="B",
+             note="Assert where the wildcard grants admin-equivalent rights."),
     ),
     "RABBITMQ.USER.ADMIN_TAG_SPRAWL": (
         _ref(PCI, "7.2.5"),
@@ -656,6 +929,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(a)(1)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.8.2"),
+        _ref(ISO27001, "A.5.18"),
     ),
     # 8.3.2's text is "unreadable during transmission AND STORAGE" — the storage clause makes
     # this ungated and direct.
@@ -664,6 +940,11 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "2.2.1"),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.17"),
+        _ref(ISO27001, "A.8.24", relation="supports", confidence="B",
+             note="A.8.24 governs algorithm choice; a password hash is a cryptographic use, but the "
+                  "control is written about rules, not instances."),
     ),
 
     # ── RabbitMQ: transport ───────────────────────────────────────────────
@@ -678,6 +959,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(e)(1)", confidence="B", gate=(GATE_EPHI,),
              note="Encryption is Addressable under 164.312(e)(2)(ii)."),
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
     ),
     "RABBITMQ.MGMT.HTTP_API_NO_TLS": (
         _ref(PCI, "2.2.7"),   # the management API is non-console administrative access
@@ -686,6 +970,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "1.2.6"),
         _ref(DORA, "Art.9(3)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
     ),
     "RABBITMQ.TLS.PEER_VERIFICATION_DISABLED": (
         _ref(PCI, "2.2.1"),
@@ -694,6 +981,10 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
              note="4.2.1 requires that only trusted, valid certificates are accepted."),
         _ref(DORA, "Art.9(3)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(h)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.7", confidence="B",
+             note="TLS is on but peer trust is not validated; assert where the channel carries "
+                  "protected information."),
+        _ref(ISO27001, "A.8.24"),
     ),
     # Peer verification off while x509 *is* the authentication mechanism is an authn failure,
     # not merely a TLS hygiene one: the certificate is the credential.
@@ -704,6 +995,8 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(d)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.8.5"),
     ),
     "RABBITMQ.CLUSTER.DIST_PORT_EXPOSED": (
         _ref(PCI, "1.2.5"),
@@ -714,6 +1007,10 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(PCI, "1.4.2", confidence="B", gate=(GATE_PUBLIC_FACING,)),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.6", confidence="B", gate=(GATE_PUBLIC_FACING,),
+             note="CC6.6 is about threats from outside the system boundary; assert where the "
+                  "listener is reachable from one."),
+        _ref(ISO27001, "A.8.20"),
     ),
 
     # ── MCP: spec conformance ─────────────────────────────────────────────
@@ -744,6 +1041,12 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
         _ref(HIPAA, "164.312(d)", confidence="B", gate=(GATE_EPHI,)),
+        _ref(SOC2, "CC6.1", confidence="B", gate=(GATE_PUBLIC_FACING,),
+             note="Assert for HTTP-transport servers reachable beyond the host; a local STDIO "
+                  "server without authorization conforms to the spec."),
+        _ref(SOC2, "CC6.6", confidence="B", gate=(GATE_PUBLIC_FACING,)),
+        _ref(ISO27001, "A.5.15", confidence="B", gate=(GATE_PUBLIC_FACING,)),
+        _ref(ISO27001, "A.8.5", confidence="B", gate=(GATE_PUBLIC_FACING,)),
     ),
     "MCP.AUTH.SCOPE_OVERBROAD": (
         _ref(PCI, "7.2.5", confidence="B",
@@ -752,6 +1055,10 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
                   "to exceed the server's need."),
         _ref(DORA, "Art.9(4)", relation="supports", confidence="B"),
         _ref(NIS2, "21(2)(i)", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.3", confidence="B",
+             note="Assert once the token's grants are known to exceed the server's need."),
+        _ref(ISO27001, "A.5.18", confidence="B",
+             note="Assert once the token's grants are known to exceed the server's need."),
     ),
     "MCP.TRANSPORT.PLAINTEXT_HTTP": (
         _ref(PCI, "2.2.5"),
@@ -767,10 +1074,322 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
     "MCP.TRANSPORT.DEPRECATED_HTTP_SSE": (
         _ref(PCI, "2.2.1", confidence="B",
              note="Configuration-standard drift from the current MCP revision's transport."),
+        _ref(ISO27001, "A.8.9", relation="supports", confidence="B"),
     ),
     "MCP.TRANSPORT.ORIGIN_UNVALIDATED": (
         _ref(PCI, "2.2.6"),
         _ref(PCI, "2.2.1"),
+        _ref(SOC2, "CC6.6", confidence="B",
+             note="DNS rebinding is an outside-boundary threat; assert where the server binds "
+                  "beyond loopback."),
+        _ref(ISO27001, "A.8.9", relation="supports", confidence="B"),
+    ),
+
+    # ═════════════════════════════════════════════════════════════════════
+    # SOC 2 / ISO 27001 only. The families below were never researched against PCI / DORA /
+    # NIS2 / HIPAA, so they carry no row for those four — adding one means adding it to the
+    # research doc first. SOC 2 CC6/CC7 and ISO Annex A are written at a level of abstraction
+    # that reaches machine identities and cloud resource policies natively, which is why the
+    # NHI, credential-lifecycle, cloud and Kubernetes packs land here first.
+    # ═════════════════════════════════════════════════════════════════════
+
+    # ── NHI: cross-cutting identity hygiene ───────────────────────────────
+    # NHI.GRANT.WILDCARD is the generalised KAFKA.ACL.* / RABBITMQ.PERMISSION.* finding, so it
+    # inherits their mapping verbatim — a wildcard grant is the negation of CC6.3's least
+    # privilege and A.5.18's "in accordance with the access control policy".
+    "NHI.GRANT.WILDCARD": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.18"),
+        _ref(ISO27001, "A.8.3"),
+        _ref(ISO27001, "A.8.2", confidence="B",
+             note="Assert where the wildcard grants admin-equivalent rights."),
+    ),
+    # A.5.16 is the one control in either framework that says "shared identities only where
+    # necessary" in so many words.
+    "NHI.IDENTITY.SHARED_DEFAULT": (
+        _ref(ISO27001, "A.5.16"),
+        _ref(SOC2, "CC6.1", confidence="B",
+             note="A default or shared principal defeats attribution; assert where the identity "
+                  "is enabled and not a deliberate, documented service identity."),
+        _ref(SOC2, "CC6.2", relation="supports", confidence="B",
+             note="A vendor-shipped identity was never registered or authorized by the entity."),
+    ),
+    "NHI.CREDENTIAL.WEAK_HASH": (
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.17"),   # protection of authentication information in storage
+        _ref(ISO27001, "A.8.24", relation="supports", confidence="B",
+             note="A.8.24 governs algorithm choice; MD5/SHA-1 for a stored credential is an "
+                  "ineffective use of cryptography, but the control is written about rules."),
+    ),
+    # Always not_assessable by construction, so this only ever moves a control to `unknown` —
+    # which is exactly right: a storage mode we cannot read is a coverage gap on A.5.17.
+    "NHI.CREDENTIAL.STORAGE_UNVERIFIED": (
+        _ref(ISO27001, "A.5.17", relation="supports", confidence="B",
+             note="Coverage gap: the connector cannot read whether credential hashing is on."),
+        _ref(SOC2, "CC6.1", relation="supports", confidence="B"),
+    ),
+
+    # ── Credential lifecycle ──────────────────────────────────────────────
+    # Exact keys, not a "CREDENTIAL.LIFECYCLE." prefix: ORPHANED_IDENTITY is about an identity's
+    # grants (A.5.18 / CC6.2), the rest about the credential itself (A.5.17), so no single set
+    # fits the whole family. A.5.17 is the honest ISO home for rotation/expiry: its intent covers
+    # the management process for authentication information, and a static, never-expiring secret
+    # is the absence of one. SOC 2 has no rotation criterion; CC6.1 carries it as `supports`.
+    "CREDENTIAL.LIFECYCLE.ROTATION_STALE": (
+        _ref(ISO27001, "A.5.17"),
+        _ref(SOC2, "CC6.1", relation="supports", confidence="B",
+             note="SOC 2 has no rotation criterion; a long-lived unrotated secret weakens the "
+                  "logical access security CC6.1 describes."),
+    ),
+    # Dormancy is indicative, not proof the access is no longer needed — hence `supports` and B
+    # on both. (Today this rule is not_assessable everywhere, so it only ever yields `unknown`.)
+    "CREDENTIAL.LIFECYCLE.NEVER_USED": (
+        _ref(SOC2, "CC6.2", relation="supports", confidence="B",
+             note="CC6.2 requires removal of access no longer authorized; a never-used credential "
+                  "is a removal candidate, not proof the authorization lapsed."),
+        _ref(ISO27001, "A.5.18", relation="supports", confidence="B",
+             note="A.5.18 requires access rights be reviewed and removed; dormancy is the "
+                  "review's input, not its conclusion."),
+        _ref(ISO27001, "A.5.17", relation="supports", confidence="B"),
+    ),
+    "CREDENTIAL.LIFECYCLE.STATIC_NO_ROTATION": (
+        _ref(ISO27001, "A.5.17"),
+        _ref(SOC2, "CC6.1", relation="supports", confidence="B",
+             note="SOC 2 has no rotation criterion; see ROTATION_STALE."),
+    ),
+    "CREDENTIAL.LIFECYCLE.NO_EXPIRY": (
+        _ref(ISO27001, "A.5.17"),
+        _ref(SOC2, "CC6.1", relation="supports", confidence="B",
+             note="SOC 2 has no expiry criterion; see ROTATION_STALE."),
+    ),
+    "CREDENTIAL.LIFECYCLE.SHARED": (
+        _ref(ISO27001, "A.5.16"),
+        _ref(ISO27001, "A.5.17"),
+        _ref(SOC2, "CC6.1", confidence="B",
+             note="Assert where the shared key is not a deliberate, documented design (e.g. a "
+                  "SAS policy intentionally shared by one application tier)."),
+    ),
+    "CREDENTIAL.LIFECYCLE.DEFAULT_ACTIVE": (
+        _ref(ISO27001, "A.5.17"),   # 'change default authentication information' is its intent
+        _ref(SOC2, "CC6.1"),
+    ),
+    # Disabled-but-still-granted is literally access that was not removed: CC6.2's removal clause
+    # and A.5.18's "removed" are the two cleanest fits for any lifecycle rule.
+    "CREDENTIAL.LIFECYCLE.ORPHANED_IDENTITY": (
+        _ref(SOC2, "CC6.2"),
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.18"),
+        _ref(ISO27001, "A.5.16"),
+    ),
+
+    # ── Known vulnerabilities (generic) ───────────────────────────────────
+    # CC7.1's "susceptibilities to newly discovered vulnerabilities" is a version/CVE finding by
+    # definition. ISO A.8.8 would be the match and is not in the catalogue yet (see the
+    # catalogue note), so no ISO row here.
+    "CVE.KNOWN_VULNERABILITY": (
+        _ref(SOC2, "CC7.1"),
+    ),
+    "REDIS.VERSION.RCE_CVE": (
+        _ref(SOC2, "CC7.1"),
+    ),
+
+    # ── Redis ─────────────────────────────────────────────────────────────
+    "REDIS.AUTH.NO_PASSWORD": (
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.5"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+    "REDIS.USER.NOPASS": (
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.8.5"),
+        _ref(ISO27001, "A.5.17"),
+    ),
+    "REDIS.TLS.DISABLED": (
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
+    ),
+    "REDIS.NETWORK.BIND_ALL": (
+        _ref(ISO27001, "A.8.20"),
+        _ref(SOC2, "CC6.6", confidence="B", gate=(GATE_PUBLIC_FACING,),
+             note="Binding every interface is exposure only where an interface faces outside "
+                  "the system boundary."),
+    ),
+    "REDIS.NETWORK.PROTECTED_MODE_OFF": (
+        _ref(ISO27001, "A.8.20"),
+        _ref(ISO27001, "A.8.9", relation="supports", confidence="B"),
+        _ref(SOC2, "CC6.6", confidence="B", gate=(GATE_PUBLIC_FACING,)),
+    ),
+
+    # ── AWS ───────────────────────────────────────────────────────────────
+    # A resource policy with Principal "*" is the rule proving its own CC6.6 condition: "any AWS
+    # principal" is by definition a source outside the entity's system boundary. No gate.
+    "AWS.SQS.QUEUE_POLICY_PUBLIC": (
+        _ref(SOC2, "CC6.6"),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+    "AWS.SNS.TOPIC_POLICY_PUBLIC": (
+        _ref(SOC2, "CC6.6"),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+    "AWS.EVENTBRIDGE.BUS_POLICY_PUBLIC": (
+        _ref(SOC2, "CC6.6"),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+    "AWS.SQS.POLICY_WILDCARD_ACTION": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.18"),
+    ),
+    "AWS.SNS.POLICY_WILDCARD_ACTION": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.18"),
+    ),
+    "AWS.EVENTBRIDGE.BUS_POLICY_WILDCARD_ACTION": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.18"),
+    ),
+    "AWS.MSK.UNAUTHENTICATED_ACCESS": (
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.5"),
+    ),
+    "AWS.MSK.PUBLIC_ACCESS_ENABLED": (
+        _ref(SOC2, "CC6.6"),   # the rule reads the public-access flag itself: no gate needed
+        _ref(ISO27001, "A.8.20"),
+    ),
+    "AWS.MSK.CLIENT_PLAINTEXT_IN_TRANSIT": (
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
+    ),
+    "AWS.MSK.INTERBROKER_PLAINTEXT": (
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
+    ),
+    # Enhanced monitoring is operational telemetry, not security monitoring: `supports` + B is
+    # as far as CC7.2 can honestly be stretched for it.
+    "AWS.MSK.ENHANCED_MONITORING_DEFAULT": (
+        _ref(SOC2, "CC7.2", relation="supports", confidence="B",
+             note="Per-broker/per-topic metrics are a precondition for the anomaly detection "
+                  "CC7.2 describes, not that detection itself."),
+        _ref(ISO27001, "A.8.9", relation="supports", confidence="B"),
+    ),
+    "AWS.APIGW.ROUTE_NO_AUTHORIZER": (
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.5"),
+        _ref(SOC2, "CC6.6", confidence="B", gate=(GATE_PUBLIC_FACING,),
+             note="A regional/edge endpoint is usually internet-reachable, but a private API "
+                  "is not; the gate decides."),
+    ),
+
+    # ── Logging / monitoring disabled ─────────────────────────────────────
+    # The honest CC7.2 fit: with the component's own logging off, anomaly monitoring on it is
+    # not merely weak but impossible. `supports` because CC7.2 is about the entity's monitoring
+    # programme, which one silent component does not by itself disprove.
+    "AWS.APIGW.STAGE_LOGGING_DISABLED": (
+        _ref(SOC2, "CC7.2", relation="supports"),
+    ),
+    "GCP.PROJECT.AUDIT_LOGGING_DISABLED": (
+        _ref(SOC2, "CC7.2", relation="supports"),
+    ),
+    "ELASTICSEARCH.AUDIT.DISABLED": (
+        _ref(SOC2, "CC7.2", relation="supports"),
+    ),
+    "VAULT.AUDIT.NO_DEVICE": (
+        _ref(SOC2, "CC7.2", relation="supports"),
+    ),
+
+    # ── GCP: public IAM ───────────────────────────────────────────────────
+    "GCP.PUBSUB.TOPIC_IAM_PUBLIC": (
+        _ref(SOC2, "CC6.6"),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+    "GCP.PUBSUB.SUBSCRIPTION_IAM_PUBLIC": (
+        _ref(SOC2, "CC6.6"),
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+
+    # ── Kubernetes ────────────────────────────────────────────────────────
+    # cluster-admin on a ServiceAccount is the clearest A.8.2 instance in the product: a
+    # privileged access right allocated to a workload token.
+    "K8S.RBAC.SA_CLUSTER_ADMIN": (
+        _ref(ISO27001, "A.8.2"),
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.18"),
+    ),
+    "K8S.RBAC.WILDCARD_BOUND": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.18"),
+        _ref(ISO27001, "A.8.3"),
+        _ref(ISO27001, "A.8.2", confidence="B",
+             note="Assert where the wildcard role is cluster-scoped or covers secrets/RBAC."),
+    ),
+    # system:unauthenticated is, by name, a source outside the system boundary — CC6.6 ungated.
+    "K8S.RBAC.ANONYMOUS_BOUND": (
+        _ref(SOC2, "CC6.1"),
+        _ref(SOC2, "CC6.6"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.3"),
+        _ref(ISO27001, "A.8.5"),
+    ),
+    "K8S.SA.DEFAULT_BOUND": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.18"),
+        _ref(ISO27001, "A.5.16", confidence="B",
+             note="The default SA is one identity shared by every pod in the namespace; assert "
+                  "where more than one workload runs there."),
+    ),
+    # A non-expiring bearer token is the Kubernetes instance of STATIC_NO_ROTATION.
+    "K8S.SA.LEGACY_TOKEN_SECRET": (
+        _ref(ISO27001, "A.5.17"),
+        _ref(SOC2, "CC6.1", relation="supports", confidence="B",
+             note="SOC 2 has no rotation criterion; see CREDENTIAL.LIFECYCLE.ROTATION_STALE."),
+    ),
+    "K8S.MESH.MTLS_NOT_STRICT": (
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
+        _ref(ISO27001, "A.8.5", relation="supports", confidence="B",
+             note="mTLS is also workload authentication; PERMISSIVE lets unauthenticated "
+                  "plaintext peers through."),
+    ),
+    "K8S.MESH.AUTHZ_ALLOW_ALL": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.5.15"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+    "K8S.INGRESS.NO_TLS": (
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+        _ref(ISO27001, "A.8.20", relation="supports", confidence="B"),
+    ),
+    # NetworkPolicy IS network control: A.8.20 is its home, sentence for sentence.
+    "K8S.NETPOL.ALLOW_ALL": (
+        _ref(ISO27001, "A.8.20"),
+        _ref(SOC2, "CC6.6", relation="supports", confidence="B"),
+    ),
+    "K8S.NETPOL.NO_DEFAULT_DENY": (
+        _ref(ISO27001, "A.8.20"),
+        _ref(SOC2, "CC6.6", relation="supports", confidence="B"),
+    ),
+
+    # ── Kafka: super.users (previously unmapped) ──────────────────────────
+    "KAFKA.AUTHZ.SUPER_USERS_BREADTH": (
+        _ref(ISO27001, "A.8.2"),   # un-revocable, ACL-bypassing admin is privileged access
+        _ref(SOC2, "CC6.3"),
     ),
 }
 
@@ -834,6 +1453,14 @@ NOT_MAPPED: dict[str, str] = {
         "A coverage signal, not a control failure — the scan could not read the target. "
         "Mapping it would fail controls on the strength of our own blind spot. evaluate() uses "
         "it in the opposite direction: it withdraws the family's PASS signal (see _covered)."
+    ),
+    "ATTACKPATH.": (
+        "A chain is a correlation of single-signal findings that each already carry their own "
+        "framework rows (the wildcard grant, the plaintext listener, the public policy). Mapping "
+        "the chain as well — SOC 2 CC6.6 and ISO A.8.20 are the tempting ones — would fail the "
+        "same control twice on one root cause and present triage priority as a second "
+        "violation. detect/attack_path.py documents the pack as mapping to no control, and "
+        "test_detect_attack_path.py pins it."
     ),
 }
 

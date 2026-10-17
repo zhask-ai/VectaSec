@@ -54,7 +54,7 @@ export interface FrameworkMeta {
 
 /* Order is the brief's, which is also roughly the order of defensibility: PCI and DORA are
  * where the strong claims are, NIS2 is the weakest and sits last. */
-export const FRAMEWORK_ORDER = ['PCI_DSS_4_0_1', 'DORA', 'HIPAA', 'NIS2'] as const;
+export const FRAMEWORK_ORDER = ['PCI_DSS_4_0_1', 'DORA', 'HIPAA', 'SOC2_TSC_2017', 'ISO_27001_2022', 'NIS2'] as const;
 
 export const FRAMEWORKS: Record<string, FrameworkMeta> = {
   PCI_DSS_4_0_1: {
@@ -81,6 +81,22 @@ export const FRAMEWORKS: Record<string, FrameworkMeta> = {
     scope: 'Applies to ePHI. §164.312(a)(1) and (d) reach software programs and entities, not only people.',
     caveat:
       'The encryption specifications in §164.312 are Addressable, not Required: a covered entity may document why one is not reasonable and appropriate and implement an equivalent alternative instead. A failing control here is therefore not automatically a violation. Evaluated against the rule in force — the January 2025 NPRM is still a proposed rule and is not applied.',
+  },
+  SOC2_TSC_2017: {
+    label: 'SOC 2',
+    version: 'TSC 2017 (2022 points of focus)',
+    fidelity: 'evidence',
+    scope: 'Applies to the system described in your SOC 2 system description; CC6 (logical access) and CC7 (system operations) criteria only.',
+    caveat:
+      'Criterion text is paraphrased, not quoted — the Trust Services Criteria are an AICPA licensed document. SOC 2 is an attestation framework: a failing row is evidence an auditor would weigh against your control, not a result against the report. Check every paraphrase against the licensed TSC before relying on it.',
+  },
+  ISO_27001_2022: {
+    label: 'ISO/IEC 27001',
+    version: '2022, Annex A',
+    fidelity: 'evidence',
+    scope: 'Applies to assets inside the ISMS scope, for the Annex A controls your Statement of Applicability selects.',
+    caveat:
+      'Control text is paraphrased, not quoted — ISO/IEC 27001 is copyrighted and licensed. Annex A controls apply only where your Statement of Applicability includes them, so a failing row is evidence against a selected control, not a verdict on the certificate. A.8.8 (technical vulnerability management) is not yet carried; CVE findings map to SOC 2 CC7.1 only.',
   },
   NIS2: {
     label: 'NIS2',

@@ -610,3 +610,61 @@ Third-party mirrors and reproductions (**treat as unofficial**):
 - [Springlex — RTS on incident reporting (Commission Delegated Regulation (EU) 2025/301), Article 5](https://www.springlex.eu/en/packages/dora/rts-ir-regulation/article-5/)
 - [NIS2 Directive Article 21](https://www.nis-2-directive.com/NIS_2_Directive_Article_21.html)
 - [European Sting mirror — Commission refers Ireland, Spain, France and the Netherlands to the Court of Justice](https://europeansting.com/2026/07/13/commission-refers-ireland-spain-france-and-the-netherlands-to-the-court-of-justice-for-failing-to-transpose-the-rules-on-cybersecurity-2/) *(mirror of EC [ip_26_1499](https://ec.europa.eu/commission/presscorner/detail/en/ip_26_1499), which is JS-rendered and returned no body)*
+
+---
+
+## 10. Addendum (2026-10) — SOC 2 TSC and ISO/IEC 27001:2022 Annex A
+
+Two frameworks were added to `compliance/map.py` after the research pass above, so they are
+**not** covered by the per-rule tables in §6. This section records what was added and the two
+caveats that must survive into the UI.
+
+**Provenance — both texts are paraphrased, never quoted.** The 2017 Trust Services Criteria
+(with the 2022 revised points of focus) are an AICPA licensed document; ISO/IEC 27001:2022 is
+ISO copyright and sold under licence. Neither was reproduced. Every `requirement` for
+`SOC2_TSC_2017` and `ISO_27001_2022` restates the control's title and intent in our own words
+and says "(Paraphrase of … — not the … wording.)" inline. Before any customer-facing use the
+paraphrases must be checked against the licensed text, and the console must label them as
+paraphrases. Same weight as the PCI vendor-reproduction warning in §1.2 / §8.
+
+**Fidelity.** Both are *attestation / certification* frameworks, not regulations: SOC 2 criteria
+are met by the service organisation's own controls as described in its system description, and
+ISO Annex A controls apply only where the entity's Statement of Applicability selects them. A
+failing row is therefore evidence an auditor would weigh against a CC6/CC7 or Annex A control,
+never a verdict on the report or the certificate. In `frameworks.ts` terms this is `evidence`,
+not `direct`.
+
+**Controls carried, and the spine of the mapping** (confidence per row is in the code):
+
+| Framework | Control | Mapped from (families) |
+|---|---|---|
+| SOC 2 | CC6.1 logical access security | no-authz / no-authn / anonymous / weak-hash / default-credential rules across Kafka, Kong, RabbitMQ, Redis, AWS, GCP, K8s, MCP; NHI and credential-lifecycle rules (lifecycle as `supports`/B — SOC 2 has no rotation criterion) |
+| SOC 2 | CC6.2 register / authorize / remove access | `CREDENTIAL.LIFECYCLE.ORPHANED_IDENTITY` (A), `CREDENTIAL.LIFECYCLE.NEVER_USED` (supports/B), `KONG.CONSUMER.NO_CREDENTIALS`, `RABBITMQ.USER.DEFAULT_GUEST_PRESENT`, `NHI.IDENTITY.SHARED_DEFAULT` |
+| SOC 2 | CC6.3 roles / least privilege | `NHI.GRANT.WILDCARD`, `KAFKA.ACL.*`, `RABBITMQ.PERMISSION.*`, `K8S.RBAC.*`, `K8S.SA.DEFAULT_BOUND`, `AWS.*.POLICY_WILDCARD_ACTION`, `KONG.RBAC.DISABLED`, `MCP.AUTH.SCOPE_OVERBROAD` (B) |
+| SOC 2 | CC6.6 threats from outside the boundary | public resource policies (AWS/GCP, ungated — `Principal:*` proves the condition), `AWS.MSK.PUBLIC_ACCESS_ENABLED`, `K8S.RBAC.ANONYMOUS_BOUND`; bind-all / exposed-port / no-auth-route rules gated on `public_facing` |
+| SOC 2 | CC6.7 protection in transmission | every plaintext-listener / no-TLS rule (A); peer-verification-disabled rules (B) |
+| SOC 2 | CC7.1 config change and new vulnerabilities | `CVE.KNOWN_VULNERABILITY`, `*.VERSION.*`, `RABBITMQ.CVE.*`, `REDIS.VERSION.RCE_CVE` (A); `KAFKA.TOPIC.AUTO_CREATE_ENABLED`, `KONG.PLUGIN.SECURITY_PLUGIN_DISABLED` (supports/B) |
+| SOC 2 | CC7.2 anomaly monitoring | logging/audit-disabled rules (`AWS.APIGW.STAGE_LOGGING_DISABLED`, `GCP.PROJECT.AUDIT_LOGGING_DISABLED`, `ELASTICSEARCH.AUDIT.DISABLED`, `VAULT.AUDIT.NO_DEVICE`) as `supports`; `AWS.MSK.ENHANCED_MONITORING_DEFAULT` (supports/B) |
+| ISO | A.5.15 access control | no-authz / no-authn / public-policy rules |
+| ISO | A.5.16 identity management | `NHI.IDENTITY.SHARED_DEFAULT`, `CREDENTIAL.LIFECYCLE.SHARED`, `CREDENTIAL.LIFECYCLE.ORPHANED_IDENTITY`, `RABBITMQ.USER.DEFAULT_GUEST_PRESENT` (A); anonymous principal / default SA (B) |
+| ISO | A.5.17 authentication information | weak-hash, default-credential, rotation/expiry/static-secret rules, credentials in clear on the wire, `K8S.SA.LEGACY_TOKEN_SECRET` |
+| ISO | A.5.18 access rights | wildcard grants, orphaned identity, `NEVER_USED` (supports/B), admin sprawl |
+| ISO | A.8.2 privileged access rights | `K8S.RBAC.SA_CLUSTER_ADMIN`, `KAFKA.AUTHZ.SUPER_USERS_BREADTH`, `RABBITMQ.USER.ADMIN_TAG_SPRAWL`, `KONG.ADMIN.UNAUTHENTICATED` (A); wildcard grants (B, admin-equivalent) |
+| ISO | A.8.3 information access restriction | no-authz, wildcard grants, public policies |
+| ISO | A.8.5 secure authentication | anonymous / no-password / unsecured-JWT / x509-without-verification / no-authorizer rules |
+| ISO | A.8.9 configuration management | hardening-default drift (`KAFKA.TOPIC.AUTO_CREATE_ENABLED`, `KONG.PLUGIN.SECURITY_PLUGIN_DISABLED` (A), default vhost, CORS wildcard, deprecated transports) mostly `supports`/B |
+| ISO | A.8.20 networks security | `K8S.NETPOL.*`, bind-all / public-access / exposed-port rules (A); plaintext listeners (supports/B) |
+| ISO | A.8.24 use of cryptography | every plaintext / no-TLS / peer-verification rule (A); weak password hashing (supports/B) |
+
+**Deliberately not done.**
+- `ATTACKPATH.*` is now in `NOT_MAPPED`: a chain is a correlation of findings that already carry
+  their own rows, and mapping it to CC6.6 / A.8.20 would fail one control twice on one root cause.
+- ISO **A.8.8** (technical vulnerability management) is the honest home for the CVE/version rules
+  and is not in the catalogue: add it here first, then to the code. Until then those rules carry
+  SOC 2 CC7.1 only.
+- No PCI / DORA / NIS2 / HIPAA rows were added for the newly mapped families (NHI, credential
+  lifecycle, AWS, GCP, K8s, Redis, CVE): they were never researched against those four texts.
+
+Sources (documents obtained from, not quoted):
+- [AICPA — 2017 Trust Services Criteria with revised points of focus (2022)](https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022)
+- [ISO — ISO/IEC 27001:2022](https://www.iso.org/standard/27001)
