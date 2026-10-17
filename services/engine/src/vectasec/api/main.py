@@ -974,6 +974,129 @@ def triage(finding_id: uuid.UUID, force: bool = Query(False, description="bypass
     }
 
 
+# ── Fix + Verify ──────────────────────────────────────────────────────────
+# The remediation upgrade (docs/vectasec-smb-strategy-2026-10.md §3): an exact fix per system
+# (remediation.py) and a Verify button that rescans and closes the finding only when the
+# detector stops firing (scan._settle_verifications). Both halves are read-only toward the
+# customer's systems — VectaSec never runs the fix, it proves it.
+
+def _actor_uuid(actor: str) -> Optional[uuid.UUID]:
+    """findings.verify_requested_by is a uuid; a service-token actor may be any string."""
+    try:
+        return uuid.UUID(str(actor))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+@app.get("/findings/{finding_id}/fix")
+def finding_fix(finding_id: uuid.UUID, p: Principal = Depends(principal)) -> dict:
+    """The copy-paste fix for a finding, templated with the resource it fired on, beside the
+    rule's free-text remediation and the state of any pending/completed verification.
+    `fix` is null when the library has nothing for the rule — the prose is still returned, so
+    the console always has something to show and never fabricates a command."""
+    from ..remediation import fix_for
+
+    with _db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select f.rule_id, f.remediation, f.verify_requested_at, f.verified_at,
+                      f.verified_scan_id, r.labels, r.raw, r.name, r.ext_id, r.namespace
+               from findings f left join resources r on r.id = f.resource_id
+               where f.tenant_id = %s and f.id = %s""",
+            (p.tenant_id, str(finding_id)),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(404, "no such finding")
+    rule_id, remediation, requested_at, verified_at, verified_scan_id = row[:5]
+    labels, raw, name, ext_id, namespace = row[5:]
+    fix = fix_for(rule_id, labels or {}, raw or {}, name=name, ext_id=ext_id, namespace=namespace)
+    return {
+        "finding_id": str(finding_id),
+        "rule_id": rule_id,
+        "remediation": remediation or "",
+        "fix": fix.to_dict() if fix else None,
+        "verify": {"requested_at": requested_at, "verified_at": verified_at,
+                   "verified_scan_id": str(verified_scan_id) if verified_scan_id else None},
+    }
+
+
+@app.post("/findings/{finding_id}/verify", status_code=202)
+def verify_finding(finding_id: uuid.UUID, p: Principal = Depends(editing)) -> dict:
+    """Mark the finding as awaiting verification and queue a scan of its connection, exactly as
+    POST /connections/{id}/scan would. The scan's persist step then resolves the finding if its
+    fingerprint is gone, or clears the request if it is still there (scan._settle_verifications).
+
+    409 when the connection already has a scan queued/running: the caller gets that scan's id
+    rather than a second job on the queue. A 409 changes nothing — the HTTPException is raised
+    before the UPDATE and the connection context manager rolls the transaction back — so the
+    caller simply retries once that scan finishes."""
+    with _db() as conn:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            cur.execute(
+                """select f.status, r.connection_id
+                   from findings f left join resources r on r.id = f.resource_id
+                   where f.tenant_id = %s and f.id = %s for update of f""",
+                (p.tenant_id, str(finding_id)),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "no such finding")
+            status, connection_id = row[0], row[1]
+            if not connection_id:
+                raise HTTPException(404, "the finding's resource is gone; there is nothing to rescan")
+
+            cur.execute(
+                "select type, name, config, mode from connections where id=%s and tenant_id=%s",
+                (str(connection_id), p.tenant_id),
+            )
+            crow = cur.fetchone()
+            if not crow:
+                raise HTTPException(404, "no such connection")
+            type_, name, config, mode = crow[0], crow[1], crow[2] or {}, crow[3]
+            if type_ not in CONNECTORS:
+                raise HTTPException(400, f"no connector loaded for type {type_!r}")
+
+            cur.execute(
+                """select id from scans where tenant_id=%s and connection_id=%s
+                   and status in ('queued','running')
+                   order by started_at desc nulls last limit 1""",
+                (p.tenant_id, str(connection_id)),
+            )
+            inflight = cur.fetchone()
+            if inflight:
+                raise HTTPException(409, {
+                    "message": "a scan of this connection is already queued or running; "
+                               "it will settle the verification when it finishes",
+                    "scan_id": str(inflight[0]),
+                    "connection_id": str(connection_id),
+                })
+
+            cur.execute(
+                """update findings set verify_requested_at = now(), verify_requested_by = %s
+                   where id = %s and tenant_id = %s""",
+                (_actor_uuid(p.actor), str(finding_id), p.tenant_id),
+            )
+
+            if mode == "collector":
+                cur.execute(
+                    """insert into scans (tenant_id, connection_id, status)
+                       values (%s,%s,'queued') returning id""",
+                    (p.tenant_id, str(connection_id)),
+                )
+                scan_id, msg_id = str(cur.fetchone()[0]), None
+            else:
+                scan_id, msg_id = _enqueue_scan(cur, p.tenant_id, str(connection_id),
+                                                type_, config, name, p.actor)
+            _audit(cur, p, "finding.verify_requested", str(finding_id),
+                   {"scan_id": scan_id, "connection_id": str(connection_id), "type": type_,
+                    "name": name, "mode": mode, "msg_id": msg_id, "status": status})
+        conn.commit()
+
+    return {"finding_id": str(finding_id), "connection_id": str(connection_id),
+            "scan_id": scan_id}
+
+
 # ── Suppressions ──────────────────────────────────────────────────────────
 # What the scan loop actually understands (scan._is_suppressed): {} is tenant-wide, otherwise
 # ext_id or kind. Anything else is rejected — an unknown key would match nothing and quietly
@@ -1832,10 +1955,11 @@ class RoutingRuleRequest(BaseModel):
             if key in v and not (isinstance(v[key], list)
                                  and all(isinstance(x, str) for x in v[key])):
                 raise ValueError(f"{key} must be a list of strings")
-        bad = set(v.get("notify_on") or []) - {"new_findings", "scan_failed"}
+        from ..notify import EVENT_KINDS
+        bad = set(v.get("notify_on") or []) - set(EVENT_KINDS)
         if bad:
             raise ValueError(f"notify_on entries {sorted(bad)} unknown; "
-                             "use new_findings and/or scan_failed")
+                             f"use any of {', '.join(EVENT_KINDS)}")
         return v
 
 
@@ -2393,6 +2517,17 @@ def collector_results(payload: dict, c: dict = Depends(collector_principal)) -> 
         stats = persist_pushed(conn, c["tenant_id"], connection_id, job_id, payload)
     return {"ok": True, "status": "done", "stats": {k: stats[k] for k in
             ("resources", "edges", "findings", "observations") if k in stats}}
+
+
+# ── Routers kept out of this file on purpose ──────────────────────────────
+# api/extra.py (access register, weekly digest) and api/exposure.py (the free external exposure
+# scan) take this module's dependency callables as arguments rather than importing them, so the
+# modules stay independently testable and this file stays the single place auth is defined.
+from .exposure import build_router as _build_exposure_router  # noqa: E402
+from .extra import build_router as _build_extra_router  # noqa: E402
+
+app.include_router(_build_extra_router(principal, editing, _db, audit=_audit))
+app.include_router(_build_exposure_router(principal, editing, _db, _audit))
 
 
 def main() -> None:

@@ -193,6 +193,73 @@ def _persist_edges(cur, tenant_id: str, connection_id: str, collected: Collected
     return n
 
 
+VERIFY_OPEN_STATUSES = ("open", "triaged", "in_progress", "accepted")
+
+
+def _settle_verifications(cur, tenant_id: str, connection_id: str, scan_id: str,
+                          emitted: set) -> dict:
+    """The Verify loop's second half (the first is POST /findings/{id}/verify).
+
+    For every finding on this connection that a human asked to have verified
+    (verify_requested_at set) and that is still in an unremediated status:
+
+      • fingerprint NOT emitted by this successful scan  -> status='resolved', verified_at=now(),
+        verified_scan_id=this scan, request cleared, audit 'finding.verified'.
+      • fingerprint emitted again                         -> request cleared, status untouched,
+        audit 'finding.verify_failed'. The upsert already refreshed last_seen/detail.
+
+    Deliberately narrow. A finding nobody asked to verify is NOT resolved when it vanishes —
+    that is the existing product decision (resources go stale, findings keep their status;
+    see _persist_resources), because "stopped being emitted" also describes a renamed listener,
+    a lost permission or a timed-out probe. The pointer to the proving scan is what makes this
+    different from a status flip: the evidence that the fingerprint is absent lives in that
+    scan's ledger. Runs INSIDE the scan's write transaction, after the upserts and before the
+    scans row goes 'done', so a failed scan (which never reaches here) resolves nothing and a
+    verified status can never commit without the scan that proved it.
+
+    Both persist paths (_persist_scan and persist_pushed) call this with the fingerprints they
+    upserted, so the collector topology behaves identically to the cloud one.
+    """
+    cur.execute(
+        """select f.id, f.fingerprint, f.rule_id, f.status, f.verify_requested_by
+           from findings f join resources r on r.id = f.resource_id
+           where f.tenant_id = %s and r.connection_id = %s
+             and f.verify_requested_at is not null
+             and f.status = any(%s)""",
+        (tenant_id, connection_id, list(VERIFY_OPEN_STATUSES)),
+    )
+    pending = cur.fetchall() or []
+    verified = failed = 0
+    for finding_id, fp, rule_id, status, requested_by in pending:
+        detail = {"scan_id": str(scan_id), "rule_id": rule_id, "fingerprint": fp,
+                  "requested_by": str(requested_by) if requested_by else None,
+                  "previous_status": status}
+        if fp in emitted:
+            cur.execute(
+                "update findings set verify_requested_at = null where id = %s and tenant_id = %s",
+                (finding_id, tenant_id),
+            )
+            action = "finding.verify_failed"
+            failed += 1
+        else:
+            cur.execute(
+                """update findings
+                      set status = 'resolved', verified_at = now(), verified_scan_id = %s,
+                          verify_requested_at = null
+                    where id = %s and tenant_id = %s""",
+                (scan_id, finding_id, tenant_id),
+            )
+            action = "finding.verified"
+            verified += 1
+        # No Principal here — the engine is the actor, exactly as 'scan.completed' records it.
+        cur.execute(
+            """insert into audit_log (tenant_id, actor, action, target, detail)
+               values (%s,'engine',%s,%s,%s)""",
+            (tenant_id, action, str(finding_id), json.dumps(detail)),
+        )
+    return {"verified": verified, "verify_failed": failed}
+
+
 def _active_suppressions(cur, tenant_id: str) -> list[dict]:
     cur.execute(
         """select rule_id, scope from suppressions
@@ -645,6 +712,8 @@ def persist_pushed(conn, tenant_id: str, connection_id: str, scan_id: str, paylo
             "collector": payload.get("collector_version"),
             "collector_stats": payload.get("stats"),
         }
+        # Verify loop — same step, same transaction as the local path (_persist_scan).
+        stats.update(_settle_verifications(cur, tenant_id, connection_id, scan_id, set(groups)))
         from .compliance import map as compliance
         # Savepoint for the same reason as the twin in _persist_scan: a bare except cannot
         # rescue a transaction Postgres has already aborted, and the next statement would
@@ -681,6 +750,7 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
 
         n_findings = n_obs = n_suppressed = 0
         errors: list[str] = []
+        emitted: set[str] = set()   # fingerprints this scan upserted — the Verify loop's input
 
         for d in DETECTORS:
             for r in collected.resources:
@@ -743,6 +813,7 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
                      assessment, rep.assessment_reason or None),
                 )
                 finding_id = cur.fetchone()[0]
+                emitted.add(fp)
                 # Counts one findings ROW per (rule, resource), which is what the console shows.
                 # It used to count Hits, so a rule that fired on 3 listeners of one broker
                 # reported 3 findings against the 1 row it actually wrote.
@@ -771,6 +842,9 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
             "detectors_run": len(DETECTORS),
             "duration_ms": int((time.time() - t0) * 1000),
         }
+        # Verify loop: resolve what a human asked us to check and this scan no longer emits;
+        # clear the request on what it still does. Never touches a finding nobody asked about.
+        stats.update(_settle_verifications(cur, tenant_id, connection_id, scan_id, emitted))
         if errors:
             stats["detector_errors"] = errors
         enrich_errors = getattr(collected, "enrich_errors", None)
