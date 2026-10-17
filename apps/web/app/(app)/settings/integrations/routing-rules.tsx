@@ -79,6 +79,13 @@ export function AddRoutingRule({ integrations }: { integrations: { id: string; n
         </button>
       </div>
 
+      {/* The weekly digest rides the same routing rule: new credentials, newly exposed, newly
+          unused, fixed — the five numbers on the Overview, once a week, to this destination. */}
+      <label style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', fontSize: 'var(--text-xs)', color: 'var(--text-primary)' }}>
+        <input type="checkbox" name="weeklyDigest" value="1" defaultChecked />
+        Also send the weekly digest to this destination
+      </label>
+
       {state && (
         <p role="status" style={{ margin: 0, fontSize: 'var(--text-2xs)', lineHeight: 'var(--leading-2xs)', color: state.ok ? 'var(--text-secondary)' : 'var(--sev-critical-fg)' }}>
           {state.ok ? '' : 'Not applied — '}

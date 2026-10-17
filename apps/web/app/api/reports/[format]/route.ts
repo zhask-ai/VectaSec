@@ -26,6 +26,10 @@ const FORMATS: Record<string, { path: string; filename: string; type: string }> 
   // VEX is a separate download, not a section of the SBOM: the inventory changes when the
   // estate does, the assessments change whenever a human rules on a finding, and consumers
   // ingest them on different cadences.
+  // The auditor's access register — every identity the connected systems accept, with owner,
+  // last used, grants and the SOC 2 / ISO 27001 / PCI controls each row is evidence for.
+  'register-csv': { path: '/reports/access-register?format=csv', filename: 'vectasec-access-register.csv', type: 'text/csv' },
+  'register-md': { path: '/reports/access-register?format=md', filename: 'vectasec-access-register.md', type: 'text/markdown' },
   vex: {
     path: '/reports/vex',
     filename: 'vectasec-vex.cdx.json',

@@ -492,6 +492,17 @@ export const CONNECTORS: ConnectorSpec[] = [
     ],
   },
   {
+    type: "zapier",
+    label: "Zapier",
+    blurb: "Zaps and the app connections they hold — public catch-hook triggers, automations that write to production systems, shared or ownerless connections.",
+    rules: 6,
+    fields: [
+      { key: "base_url", label: "API base URL", placeholder: "https://api.zapier.com", help: "Root of the Zapier Workflow API. Leave as https://api.zapier.com unless Zapier gives you a regional or dedicated host. GETs only." },
+      { key: "access_token", label: "Access token", required: true, secret: true, help: "An OAuth2 bearer token for the Zapier Workflow API, issued to a Zapier OAuth app with scopes zap:all (or zap:account:all for a Team/Enterprise account), connection:read and profile. The connector reads Zaps, connections and the token's profile; it never creates, edits, runs or deletes a Zap, and connection secrets are not exposed by the API." },
+      { key: "account_id", label: "Account ID", placeholder: "123456", help: "Optional Team/Enterprise account id, recorded on the account resource. When set, Zaps shared within the account are included (needs zap:account:all)." },
+    ],
+  },
+  {
     type: "workato",
     label: "Workato",
     blurb: "iPaaS — admin API clients without IP allowlist, endpoints without access profiles, shared connections.",

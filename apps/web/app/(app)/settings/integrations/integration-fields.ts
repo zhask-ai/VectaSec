@@ -19,7 +19,7 @@ export type IntegrationField = {
 };
 
 export type IntegrationSpec = {
-  type: 'slack' | 'teams' | 'webhook' | 'email' | 'jira' | 'siem';
+  type: 'slack' | 'teams' | 'webhook' | 'email' | 'jira' | 'siem' | 'vanta' | 'drata';
   label: string;
   /** One honest sentence for the picker. */
   blurb: string;
@@ -142,6 +142,33 @@ export const INTEGRATION_TYPES: IntegrationSpec[] = [
         placeholder: 'optional',
         help: 'Sent as an Authorization bearer if the collector requires one.',
       },
+    ],
+  },
+  {
+    type: 'vanta',
+    label: 'Vanta',
+    blurb: "Push scan results and the access register into a Vanta evidence document, so broker and gateway posture lands in the SOC 2 workspace your auditor already uses.",
+    glyph: 'V',
+    fields: [
+      { key: "api_token", label: "API token", required: true, secret: true, help: "Manage Vanta API bearer token with vanta-api.documents:upload (one-hour tokens: mint a long-lived one via your OAuth client, or rotate here)." },
+      { key: "document_id", label: "Evidence document ID", required: true, help: "From GET /v1/documents \u2014 the document each push attaches a file to." },
+      { key: "resource_id", label: "Custom resource ID", help: "Optional. A private-integration custom resource to sync identities into (PUT /v1/resources/custom_resource). Needs connectors.self:write-resource." },
+      { key: "region", label: "Region", help: "us (api.vanta.com, also EU/AU accounts) or gov (api.vanta-gov.com)." },
+      { key: "register_url", label: "Access-register link", help: "Optional HTTPS URL of your VectaSec access-register export, cited in the evidence." },
+    ],
+  },
+  {
+    type: 'drata',
+    label: 'Drata',
+    blurb: "Attach scan results and the access register as external evidence on a Drata control.",
+    glyph: 'D',
+    fields: [
+      { key: "api_key", label: "Public API key", required: true, secret: true, help: "Drata Public API key with read/write on controls and evidence." },
+      { key: "control_id", label: "Control ID", required: true, help: "The Drata control the external evidence maps to." },
+      { key: "workspace_id", label: "Workspace ID", help: "Optional; multi-workspace accounts." },
+      { key: "renewal_schedule_type", label: "Renewal schedule", help: "Optional; Drata's renewal cadence enum for the evidence (left out when empty)." },
+      { key: "base_url", label: "API base URL", help: "Defaults to https://public-api.drata.com." },
+      { key: "register_url", label: "Access-register link", help: "Optional HTTPS URL of your VectaSec access-register export, cited in the evidence." },
     ],
   },
 ];

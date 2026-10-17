@@ -14,6 +14,7 @@ import { systemHref, systemOf } from '../query';
 import { StatusPill } from '../status';
 import { ActionsPanel, TriageButton } from './actions-panel';
 import { CopyButton } from './copy';
+import { GuidedFix } from './guided-fix';
 import { TypePanels } from './panels';
 
 /* The finding detail — the page that has to earn trust.
@@ -82,7 +83,10 @@ export default async function FindingPage({ params }: PageProps<'/findings/[id]'
           <ChainCard finding={finding} />
           <Evidence items={finding.evidence} finding={finding} />
           <Triage finding={finding} editable={editable} />
-          <Remediation finding={finding} />
+          {/* Guided fix + Verify replaces the bare remediation card: exact per-system steps from
+              the engine's fix library (falling back to the rule text) and the rescan-to-close
+              loop. */}
+          <GuidedFix finding={finding} editable={editable} />
         </div>
 
         <Card>
@@ -595,36 +599,3 @@ function Prose({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Remediation({ finding }: { finding: FindingDetail }) {
-  if (!finding.remediation) return null;
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Remediation</CardTitle>
-        <CopyButton text={finding.remediation} label="Copy remediation" />
-      </CardHeader>
-      <CardBody>
-        {/* <pre>, not <p>: remediation is written by the detector and routinely contains config
-            keys and commands. Reflowing it would break a value someone is about to paste. */}
-        <pre
-          style={{
-            margin: 0,
-            padding: 'var(--space-3)',
-            background: 'var(--bg)',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-sm)',
-            fontSize: 'var(--text-xs)',
-            lineHeight: 'var(--leading-sm)',
-            color: 'var(--text-primary)',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            overflowX: 'auto',
-          }}
-        >
-          {finding.remediation}
-        </pre>
-      </CardBody>
-    </Card>
-  );
-}

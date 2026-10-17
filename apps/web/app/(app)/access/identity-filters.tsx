@@ -29,7 +29,14 @@ const SEEN_OPTIONS = [
   { value: 'unknown', label: 'No last-used signal' },
 ];
 
-type FilterState = { system: string; type: string; wildcard: string; sensitivity: string; seen: string };
+const FLAG_OPTIONS = [
+  { value: '', label: 'Any' },
+  { value: 'exposed', label: 'Reaches an exposed surface' },
+  { value: 'ingit', label: 'Also in git' },
+  { value: 'automation', label: 'Held by an automation' },
+];
+
+type FilterState = { system: string; type: string; wildcard: string; sensitivity: string; seen: string; flag: string };
 
 export function IdentityFilters({
   systems,
@@ -39,6 +46,7 @@ export function IdentityFilters({
   wildcard,
   sensitivity,
   seen,
+  flag,
 }: {
   systems: string[];
   types: string[];
@@ -47,23 +55,25 @@ export function IdentityFilters({
   wildcard: string;
   sensitivity: string;
   seen: string;
+  flag: string;
 }) {
   const router = useRouter();
   const pathname = usePathname();
 
   function hrefFor(overrides: Partial<FilterState>): Route {
-    const merged: FilterState = { system, type, wildcard, sensitivity, seen, ...overrides };
+    const merged: FilterState = { system, type, wildcard, sensitivity, seen, flag, ...overrides };
     const next = new URLSearchParams();
     if (merged.system) next.set('system', merged.system);
     if (merged.type) next.set('type', merged.type);
     if (merged.wildcard) next.set('wildcard', merged.wildcard);
     if (merged.sensitivity) next.set('sensitivity', merged.sensitivity);
     if (merged.seen) next.set('seen', merged.seen);
+    if (merged.flag) next.set('flag', merged.flag);
     const qs = next.toString();
     return (qs ? `${pathname}?${qs}` : pathname) as Route;
   }
 
-  const active = Boolean(system || type || wildcard || sensitivity || seen);
+  const active = Boolean(system || type || wildcard || sensitivity || seen || flag);
 
   return (
     <div style={{ display: 'flex', gap: 'var(--space-3)', alignItems: 'flex-end', flexWrap: 'wrap' }}>
@@ -109,8 +119,16 @@ export function IdentityFilters({
         </select>
       </Field>
 
+      <Field label="Flag">
+        <select value={flag} onChange={(e) => router.push(hrefFor({ flag: e.target.value }))} style={selectStyle} aria-label="Filter by exposure, git presence or automation">
+          {FLAG_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </Field>
+
       {active && (
-        <button type="button" onClick={() => router.push(hrefFor({ system: '', type: '', wildcard: '', sensitivity: '', seen: '' }))} style={clearStyle}>
+        <button type="button" onClick={() => router.push(hrefFor({ system: '', type: '', wildcard: '', sensitivity: '', seen: '', flag: '' }))} style={clearStyle}>
           Clear filters
         </button>
       )}

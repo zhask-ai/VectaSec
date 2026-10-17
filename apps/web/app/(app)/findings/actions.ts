@@ -223,3 +223,25 @@ export async function triageAction(_prev: ActionState, form: FormData): Promise<
         : 'Triage generated.',
   };
 }
+
+/* ── Verify ───────────────────────────────────────────────────────────────
+ * The close of the remediation loop: queue a rescan of the finding's connection and let the
+ * engine resolve the finding if the rescan no longer emits it (scan.py records
+ * finding.verified / finding.verify_failed in the audit trail). Read-only stays intact — this
+ * changes nothing on the target; it re-reads it. */
+export async function verifyFindingAction(_prev: ActionState, form: FormData): Promise<ActionState> {
+  const findingId = str(form, 'findingId');
+  const a = await authorize(findingId);
+  if (!a) return { ok: false, message: DENIED };
+
+  const res = await enginePost<{ finding_id: string; connection_id: string; scan_id: string }>(
+    `/findings/${findingId}/verify`,
+    {},
+    { tenantId: a.ctx.tenantId, actor: a.actor },
+  );
+  if (!res.ok) return { ok: false, message: res.message };
+
+  revalidateFinding(findingId);
+  revalidatePath('/estate');
+  return { ok: true, message: 'Rescan queued. If the next scan no longer sees this issue, the finding is resolved automatically and the verification is recorded in the audit trail.' };
+}

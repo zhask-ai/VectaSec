@@ -145,6 +145,41 @@ export default async function OverviewPage() {
     supabase.from('scans').select('id, status, started_at, finished_at, connections(type, name)').order('started_at', { ascending: false }).limit(6),
   ]);
 
+  // --- What changed this week — the digest a buyer with no security team actually reads ---
+  // Exact head-counts over first_seen in the window; nothing here is tallied from a capped list.
+  const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const [newFindingsRes, newCritHighRes, newIdentitiesRes, newCredsRes, newExposedRes, resolvedRes, weekScansRes, weekFailedRes, membersRes, integrationsRes] = await Promise.all([
+    supabase.from('findings').select('id', { count: 'exact', head: true }).gte('first_seen', since).eq('assessment', 'assessed'),
+    supabase.from('findings').select('id', { count: 'exact', head: true }).gte('first_seen', since).eq('assessment', 'assessed').in('severity', ['critical', 'high']),
+    supabase.from('resources').select('id', { count: 'exact', head: true }).eq('kind', 'identity').gte('first_seen', since),
+    supabase.from('resources').select('id', { count: 'exact', head: true }).eq('kind', 'credential').gte('first_seen', since),
+    supabase.from('findings').select('id', { count: 'exact', head: true }).gte('first_seen', since).like('rule_id', 'ATTACKPATH.%'),
+    supabase.from('findings').select('id', { count: 'exact', head: true }).eq('status', 'resolved').gte('last_seen', since),
+    supabase.from('scans').select('id', { count: 'exact', head: true }).gte('started_at', since),
+    supabase.from('scans').select('id', { count: 'exact', head: true }).gte('started_at', since).eq('status', 'error'),
+    supabase.from('tenant_members').select('user_id', { count: 'exact', head: true }),
+    supabase.from('integrations').select('id', { count: 'exact', head: true }),
+  ]);
+  const week = {
+    findings: newFindingsRes.count ?? 0,
+    critHigh: newCritHighRes.count ?? 0,
+    identities: newIdentitiesRes.count ?? 0,
+    creds: newCredsRes.count ?? 0,
+    exposed: newExposedRes.count ?? 0,
+    resolved: resolvedRes.error ? null : (resolvedRes.count ?? 0),
+    scans: weekScansRes.count ?? 0,
+    failed: weekFailedRes.count ?? 0,
+  };
+  const checklist: { label: string; done: boolean; href: Route; hint: string }[] = [
+    { label: 'Connect a system', done: connections.length > 0, href: '/estate', hint: 'AWS role or a read-only broker user' },
+    { label: 'First scan completed', done: Boolean(scannedAt), href: '/estate', hint: 'runs on connect; rescans on the cadence you set' },
+    { label: 'Review the access register', done: (identitiesRes.count ?? 0) > 0, href: '/access', hint: 'every key and service account your systems accept' },
+    { label: 'Fix one finding and press Verify', done: (week.resolved ?? 0) > 0, href: '/findings', hint: 'the rescan closes it for you' },
+    { label: 'Invite a teammate', done: (membersRes.count ?? 0) > 1, href: '/settings/members', hint: 'an owner for the findings' },
+    { label: 'Add Slack, Vanta or Drata', done: !integrationsRes.error && (integrationsRes.count ?? 0) > 0, href: '/settings/integrations', hint: 'weekly digest and auditor evidence' },
+  ];
+  const checklistDone = checklist.filter((c) => c.done).length;
+
   // The severity facets ARE the posture score. A failed read left `counts` all-zero, which
   // scores 100 / grade A and renders the severity card as "No open findings · Every rule passed
   // on the last scan" — a reassuring green page produced by a broken query. The topbar chip in
@@ -459,6 +494,45 @@ export default async function OverviewPage() {
           </CardBody>
         </Card>
       )}
+
+      {/* 6b · What changed this week + the first-ten-minutes checklist */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 'var(--space-5)' }}>
+        <Card>
+          <CardHeader><CardTitle>What changed this week</CardTitle><CardMeta>last 7 days · exact counts</CardMeta></CardHeader>
+          <CardBody>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 'var(--space-4)' }}>
+              <StatTile label="New findings" value={week.findings} size="sm" tone={week.critHigh > 0 ? 'bad' : week.findings > 0 ? 'warn' : 'good'} sub={week.critHigh > 0 ? `${week.critHigh} critical / high` : 'none critical or high'} />
+              <StatTile label="Newly exposed paths" value={week.exposed} size="sm" tone={week.exposed > 0 ? 'bad' : 'good'} sub="attack paths first seen" />
+              <StatTile label="New credentials" value={week.creds} size="sm" tone={week.creds > 0 ? 'warn' : 'neutral'} sub={`${week.identities} new identit${week.identities === 1 ? 'y' : 'ies'}`} />
+              <StatTile label="Fixed" value={week.resolved ?? '—'} size="sm" tone={(week.resolved ?? 0) > 0 ? 'good' : 'neutral'} sub={week.resolved === null ? 'unavailable' : 'resolved findings'} />
+              <StatTile label="Scans" value={week.scans} size="sm" tone={week.failed > 0 ? 'warn' : 'neutral'} sub={week.failed > 0 ? `${week.failed} failed` : 'all landed'} />
+            </div>
+            <p style={{ margin: 'var(--space-3) 0 0', fontSize: 'var(--text-2xs)', lineHeight: 'var(--leading-2xs)', color: 'var(--text-muted)' }}>
+              The same five numbers go out in the weekly Slack digest once a Slack destination is routed to it.
+            </p>
+          </CardBody>
+        </Card>
+
+        <Card>
+          <CardHeader><CardTitle>First ten minutes</CardTitle><CardMeta>{checklistDone} of {checklist.length} done</CardMeta></CardHeader>
+          <CardBody>
+            <ol style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 'var(--space-2)' }}>
+              {checklist.map((c) => (
+                <li key={c.label} style={{ display: 'flex', alignItems: 'baseline', gap: 'var(--space-2)' }}>
+                  <span aria-hidden="true" style={{ width: 16, textAlign: 'center', fontWeight: 700, color: c.done ? 'var(--sev-low-fg)' : 'var(--text-muted)' }}>{c.done ? '✓' : '○'}</span>
+                  <span style={{ display: 'grid', gap: 1 }}>
+                    <Link href={c.href} style={{ fontSize: 'var(--text-sm)', fontWeight: c.done ? 400 : 600, color: 'var(--text-primary)', textDecoration: c.done ? 'line-through' : 'none' }}>
+                      {c.label}
+                    </Link>
+                    <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>{c.hint}</span>
+                  </span>
+                  <span className="vs-visually-hidden">{c.done ? 'done' : 'not done'}</span>
+                </li>
+              ))}
+            </ol>
+          </CardBody>
+        </Card>
+      </div>
 
       {/* 7 · Recent scans */}
       {recentScans.length > 0 && (

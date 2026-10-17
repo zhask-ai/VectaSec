@@ -64,6 +64,12 @@ export type IdentityDetail = {
   lastSeen: { state: 'seen' | 'never' | 'unknown'; at: string | null; source: string };
   /** Highest naming-inferred sensitivity across this identity's grants ('' when none). */
   sensitivity: string;
+  /** A grant reaches a resource the connector flagged as internet-reachable. */
+  exposed: boolean;
+  /** Manifests (from a connected repo) in which this principal's name appears — never a secret. */
+  inGit: string[];
+  /** Held by an automation / AI-agent platform (n8n, Zapier, Workato, MCP …). */
+  automation: boolean;
   worst: Severity | null;
   creds: CredMeta[];
   grants: GrantMeta[];
@@ -132,6 +138,11 @@ export function IdentityDetailButton({ detail }: { detail: IdentityDetail }) {
               Observed on connector <span style={{ fontFamily: 'var(--font-mono)' }}>{d.connector.type}/{d.connector.name}</span>
             </p>
           )}
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 'var(--space-2)' }}>
+            {d.exposed && <Chip tone="high">reaches an exposed surface</Chip>}
+            {d.inGit.length > 0 && <Chip tone="medium" title={d.inGit.join(', ')}>named in {d.inGit.length} manifest{d.inGit.length === 1 ? '' : 's'}</Chip>}
+            {d.automation && <Chip tone="info">held by an automation</Chip>}
+          </div>
           <p style={metaLine}>
             Owner: {d.owner ?? 'no owner tag'} · Last seen:{' '}
             {d.lastSeen.state === 'seen'

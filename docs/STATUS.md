@@ -31,6 +31,42 @@ partner, SOC 2).
 
 ---
 
+## 2026-10-17 (later) — Sprints 2–4 of the SMB strategy, first cut
+
+Built on the same branch after sprint 1, against the gaps competitors fill and we did not
+(remediation loop, auditor export, drift digest, free entry scan, automation inventory, GRC push).
+Verified locally: web typecheck/build/contrast green, engine suite green (count in the PR). None
+of it has been exercised against a live tenant, a real AWS account, a Vanta/Drata sandbox or a
+real Zapier account — golden fixtures and fake clients only.
+
+- **Guided fix + Verify** — `remediation.py` (51 rules with exact CLI / Terraform / Helm /
+  console snippets templated from the resource), `GET /findings/{id}/fix`,
+  `POST /findings/{id}/verify`; `scan.py::_settle_verifications` resolves a verify-requested
+  finding the next scan no longer emits and writes `finding.verified` / `finding.verify_failed`
+  to the audit trail (migration `20261017000001`). Console: the finding page's Guided fix card.
+- **Auditor access register** — `GET /reports/access-register?format=csv|md` (report.py), one row
+  per identity with owner, last used (dated / never / unknown), grants, sensitivity, verdicts and
+  the SOC 2 CC6.1–6.3 / ISO A.5.16–18 controls it evidences; PCI 8.6.x only once a CDE scope is
+  declared (none exists yet). Download buttons on Access.
+- **Weekly digest** — `digest.py`, `vectasec digest`, `POST /digests/run`, table `digests`
+  (migration `20261017000002`); Slack blocks / text; routed to destinations whose rule names
+  `weekly_digest` (the console's routing form opts in by default). Overview shows the same five
+  numbers as "What changed this week" plus a first-ten-minutes checklist.
+- **Vanta and Drata evidence push** — integration types in `notify.py` (`INTEGRATION_FIELDS` is now
+  the source the console mirror is generated from). API shapes from the vendors' public docs,
+  best-effort until run against a sandbox.
+- **Free external exposure scan** — `exposure.py` + `api/exposure.py`: DNS-TXT ownership gate,
+  bounded credential-less sweep, public-safe report with CVE / EOL, rate-limited; tables
+  `exposure_targets` / `exposure_scans` (migration `20261017000003`). Console: Estate ›
+  Unmonitored panel.
+- **Zapier connector** (`connect/zapier.py`, `detect/zapier.py`) and **automation / in-git
+  labels**: `labels.automation` on identities held by n8n / Zapier / Workato / Boomi / MuleSoft /
+  MCP / Airflow, `labels.target` on grants, `labels.principals` on IaC manifests. Access shows
+  "exposed", "in git" and "automation" flags with filters.
+- Not built: Vanta/Drata *pull* of control status, pricing/billing, AWS Marketplace, SSO.
+
+---
+
 ## 2026-10-17 — Sprint 1 of the SMB strategy landed
 
 Per [vectasec-smb-strategy-2026-10.md](vectasec-smb-strategy-2026-10.md) §5, sprint 1. Each item

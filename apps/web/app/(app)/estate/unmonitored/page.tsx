@@ -1,7 +1,7 @@
 import Link from 'next/link';
 
 import { createClient } from '@/lib/supabase/server';
-import { getOwnMembership } from '@/lib/role';
+import { canEdit, getOwnMembership } from '@/lib/role';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { EmptyState } from '@/components/ui/empty-state';
 import {
@@ -15,6 +15,7 @@ import {
 import { Page } from '@/components/ui/page';
 import { PageHeader } from '@/components/ui/page-header';
 import { EstateTabs } from '../tabs';
+import { ExposurePanel, type ExposureScanRow, type ExposureTargetRow } from './exposure-panel';
 import { StatTile } from '@/components/ui/stat';
 import { StatusPill } from '@/components/ui/status-pill';
 import { Table, TBody, TD, TH, THead, TR } from '@/components/ui/table';
@@ -67,8 +68,33 @@ export default async function DiscoveryPage() {
   // SELECTION. Without it the page also disagrees with its own exports, which scope to the
   // active tenant.
   const tenantId = membership?.tenantId;
+  const editable = canEdit(membership?.role);
   const scoped = <T,>(q: T): T =>
     (tenantId ? (q as { eq: (c: string, v: string) => T }).eq('tenant_id', tenantId) : q);
+
+  // The free external exposure scan's own tables. Read separately and tolerated: a deployment
+  // that has not applied the migration yet must still render the discovery page.
+  const [exposureTargetsRes, exposureScansRes] = await Promise.all([
+    scoped(supabase.from('exposure_targets').select('id, kind, value, token, verified_at, verify_method, created_at').order('created_at')),
+    scoped(supabase.from('exposure_scans').select('id, target_id, status, started_at, finished_at, error, report').order('started_at', { ascending: false }).limit(50)),
+  ]);
+  const exposureAvailable = !exposureTargetsRes.error && !exposureScansRes.error;
+  const exposurePanel = (
+    <Card>
+      <CardHeader>
+        <CardTitle>External exposure scan</CardTitle>
+        <CardMeta>what the internet sees · no credentials · ownership verified by DNS</CardMeta>
+      </CardHeader>
+      <CardBody>
+        <ExposurePanel
+          targets={(exposureTargetsRes.data ?? []) as unknown as ExposureTargetRow[]}
+          scans={(exposureScansRes.data ?? []) as unknown as ExposureScanRow[]}
+          editable={editable}
+          available={exposureAvailable}
+        />
+      </CardBody>
+    </Card>
+  );
 
   const [servicesRes, sweepsRes, shadowRes] = await Promise.all([
     scoped(
@@ -139,6 +165,7 @@ export default async function DiscoveryPage() {
     return (
       <Page>
         <Head />
+        {exposurePanel}
         <Card>
           <CardBody>
             <EmptyState
@@ -162,6 +189,7 @@ export default async function DiscoveryPage() {
       <Head
         meta={`${services.length} service${services.length === 1 ? '' : 's'} across ${hosts.size} host${hosts.size === 1 ? '' : 's'}`}
       />
+      {exposurePanel}
 
       <div style={{ display: 'grid', gap: 'var(--space-3)', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))' }}>
         <Card hover>

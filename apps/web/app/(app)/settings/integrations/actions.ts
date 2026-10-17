@@ -135,8 +135,11 @@ export async function addRoutingRuleAction(_prev: ActionState, form: FormData): 
   // The engine's match vocabulary is a nested object: {min_severity?, connector_types?: [...],
   // rule_prefixes?: [...], notify_on?: [...]}; {} routes everything, notify_on defaults to
   // both new_findings and scan_failed. This form speaks severity + one connector type.
-  const match: { min_severity: string; connector_types?: string[] } = { min_severity: minSeverity };
+  const match: { min_severity: string; connector_types?: string[]; notify_on?: string[] } = { min_severity: minSeverity };
   if (connectorType) match.connector_types = [connectorType];
+  // notify_on defaults to new_findings + scan_failed engine-side; opting into the weekly digest
+  // means stating all three, because an explicit list replaces the default rather than adding.
+  if (str(form, 'weeklyDigest') === '1') match.notify_on = ['new_findings', 'scan_failed', 'weekly_digest'];
 
   const res = await enginePost<{ routing_rule_id: string; integration: { id: string; type: string; name: string } }>(
     '/routing-rules',

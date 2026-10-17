@@ -33,7 +33,7 @@ export const SHELF: ShelfCard[] = [
   { id: 'rabbitmq', label: 'RabbitMQ', types: ['rabbitmq'], blurb: 'Users, vhost permissions, guest/guest, plaintext AMQP, management API over HTTP, end-of-life branches.' },
   { id: 'redis', label: 'Redis', types: ['redis'], blurb: 'No-password access, ACL users, TLS, dangerous commands and internet-reachable instances.' },
   { id: 'kong', label: 'Kong & API Gateway', types: ['kong'], blurb: 'Routes with no auth plugin, consumer credentials, an unauthenticated admin API, missing rate limits. AWS API Gateway comes in through the AWS card.', note: 'AWS API Gateway via the AWS card' },
-  { id: 'n8n', label: 'n8n automations', types: ['n8n'], blurb: 'Which workflows hold which credentials, public webhooks, and the unauthenticated-RCE releases.' },
+  { id: 'automation', label: 'n8n & Zapier automations', types: ['n8n', 'zapier'], blurb: 'Which workflows and Zaps hold which credentials, which webhooks are public, and which automations can write to production systems.', note: 'n8n · Zapier (Workato, Boomi, MuleSoft under Enterprise)' },
   { id: 'mcp', label: 'MCP servers & AI agents', types: ['mcp'], blurb: 'Which agent gateways hold which credentials: OAuth discovery, PKCE, unauthenticated endpoints, the exposed tool surface.' },
   { id: 'api', label: 'OpenAPI & GraphQL', types: ['openapi', 'graphql'], blurb: 'The API contract itself: operations with no security scheme, introspection left on, over-permissive schemas.' },
   { id: 'iac', label: 'Repos & manifests', types: ['iac'], blurb: 'Compose files, Helm charts and Terraform: the one source that can see a broker credential also committed to git.' },

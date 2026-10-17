@@ -77,6 +77,10 @@ type EvidenceRow = { principal: string | null; source: string; last_seen: string
 type SearchParams = Promise<Record<string, string | string[] | undefined>>;
 
 const SENS_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+// Mirrors graph_engine._PUBLIC_KEYS — the exposure vocabulary connectors put in labels.
+const EXPOSURE_KEYS = ['public', 'internet_reachable', 'internet_exposed', 'exposed', 'bind_all', 'public_access'];
+// Mirrors identity.AUTOMATION_SYSTEMS — identities held by an automation or agent platform.
+const AUTOMATION_SYSTEMS = new Set(['n8n', 'zapier', 'workato', 'boomi', 'mulesoft', 'mcp', 'airflow']);
 const IDLE_DAYS = 90; // mirrors detect/credential_lifecycle.py _IDLE_DAYS
 
 /** Days since an ISO timestamp, or null when unparseable. */
@@ -166,10 +170,11 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
   const fWildcard = one(sp.wildcard);
   const fSensitivity = one(sp.sensitivity);
   const fSeen = one(sp.seen);
+  const fFlag = one(sp.flag);
 
   const supabase = await createClient();
 
-  const [countRes, identitiesRes, credsRes, grantsRes, evidenceRes] = await Promise.all([
+  const [countRes, identitiesRes, credsRes, grantsRes, evidenceRes, gitRes] = await Promise.all([
     supabase.from('resources').select('*', { count: 'exact', head: true }).eq('kind', 'identity'),
     supabase
       .from('resources')
@@ -182,7 +187,18 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
     // The brokers' own account of who connected. Newest first and bounded; a principal's
     // newest sighting is what the register needs, and the full window lives on the Live tab.
     supabase.from('runtime_evidence').select('principal, source, last_seen').order('last_seen', { ascending: false }).limit(ROW_CAP),
+    // "Also in git": the IaC connector records principal NAMES it finds in manifests (never the
+    // paired secret) as labels.principals. Matching identity names against them is the join.
+    supabase.from('resources').select('id, name, labels').not('labels->>principals', 'is', null).limit(ROW_CAP),
   ]);
+
+  const gitPrincipals = new Map<string, string[]>(); // lower-cased principal → manifest names
+  for (const r of (gitRes.error ? [] : (gitRes.data ?? [])) as unknown as ResourceRow[]) {
+    for (const pName of lblList(r, 'principals')) {
+      const key = pName.toLowerCase();
+      (gitPrincipals.get(key) ?? gitPrincipals.set(key, []).get(key)!).push(r.name);
+    }
+  }
 
   // runtime_evidence is OPTIONAL input: a tenant with no runtime-capable connector has an empty
   // table, and a read error here must degrade to "unknown" cells, never hide the register.
@@ -267,6 +283,19 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
     (grantsByIdentity.get(owner) ?? grantsByIdentity.set(owner, []).get(owner)!).push(g);
   }
 
+  // Exposed: does any grant of this identity reach a surface the connector flagged as reachable
+  // from outside? Grant targets (labels.target, an ext_id) are resolved to resources in one
+  // bounded read; the same exposure label vocabulary graph_engine.py reads decides the verdict.
+  const targetExts = [...new Set(grants.map((g) => lbl(g, 'target')).filter(Boolean))].slice(0, ROW_CAP);
+  const targetsRes = targetExts.length
+    ? await supabase.from('resources').select('ext_id, labels').in('ext_id', targetExts).limit(ROW_CAP)
+    : { data: [], error: null };
+  const exposedTargets = new Set<string>();
+  for (const r of (targetsRes.error ? [] : (targetsRes.data ?? [])) as unknown as { ext_id: string; labels: Record<string, string> | null }[]) {
+    const l = r.labels ?? {};
+    if (EXPOSURE_KEYS.some((k) => String(l[k] ?? '').toLowerCase() === 'true')) exposedTargets.add(r.ext_id);
+  }
+
   // Build the serializable per-identity detail (also the row model for the inventory table).
   const details: IdentityDetail[] = identities.map((idr) => {
     const myCreds = credsByOwner.get(idr.ext_id) ?? [];
@@ -300,6 +329,10 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
         ? { state: 'never', at: null, source: 'provider telemetry' }
         : { state: 'unknown', at: null, source: '' };
 
+    const exposed = myGrants.some((g) => exposedTargets.has(lbl(g, 'target')));
+    const gitHits = gitPrincipals.get(leaf(idr.name).toLowerCase()) ?? gitPrincipals.get(idr.name.toLowerCase()) ?? [];
+    const automation = lbl(idr, 'automation') === 'true' || AUTOMATION_SYSTEMS.has(lbl(idr, 'system'));
+
     const sensitivity = myGrants
       .map((g) => lbl(g, 'sensitivity'))
       .filter((v) => v in SENS_RANK)
@@ -316,6 +349,9 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
       owner: lbl(idr, 'owner_label') || null,
       lastSeen,
       sensitivity,
+      exposed,
+      inGit: [...new Set(gitHits)].slice(0, 5),
+      automation,
       worst,
       findings,
       creds: myCreds.map((c) => {
@@ -348,6 +384,9 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
   const isDormant = (d: IdentityDetail) =>
     d.lastSeen.state === 'never' || (d.lastSeen.state === 'seen' && (daysSince(d.lastSeen.at!) ?? 0) >= IDLE_DAYS);
   const dormantCount = details.filter(isDormant).length;
+  const exposedCount = details.filter((d) => d.exposed).length;
+  const inGitCount = details.filter((d) => d.inGit.length > 0).length;
+  const automationCount = details.filter((d) => d.automation).length;
   const knownSeen = details.filter((d) => d.lastSeen.state !== 'unknown').length;
   const truncated = identities.length < exactTotal;
 
@@ -362,9 +401,12 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
       (!fSensitivity || d.sensitivity === fSensitivity) &&
       (fSeen !== 'dormant' || isDormant(d)) &&
       (fSeen !== 'unknown' || d.lastSeen.state === 'unknown') &&
-      (fSeen !== 'seen' || d.lastSeen.state === 'seen'),
+      (fSeen !== 'seen' || d.lastSeen.state === 'seen') &&
+      (fFlag !== 'exposed' || d.exposed) &&
+      (fFlag !== 'ingit' || d.inGit.length > 0) &&
+      (fFlag !== 'automation' || d.automation),
   );
-  const filtersActive = Boolean(fSystem || fType || fWildcard || fSensitivity || fSeen);
+  const filtersActive = Boolean(fSystem || fType || fWildcard || fSensitivity || fSeen || fFlag);
 
   // Lifecycle lens: split real findings (open) from not-assessable (a coverage gap, not a result).
   const lifecycle = (lifecycleRes.data ?? []) as unknown as FindingRow[];
@@ -379,6 +421,7 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
         title="Access"
         description="Every API key, service account, OAuth client and automation credential your connected systems accept — who owns it, when it was last used, what it can reach, and whether that reach is named like sensitive data."
         meta={`${exactTotal} identities · ${systemsSet.size} systems`}
+        actions={<RegisterExport />}
       />
       <AccessTabs />
 
@@ -403,6 +446,15 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
             icon={<IconIdentity size={13} />}
             sub={knownSeen ? `of ${knownSeen} with a last-used signal` : 'no last-used signal collected yet'}
           />
+        </KpiCard>
+        <KpiCard>
+          <StatTile label="Reach an exposed surface" value={exposedCount} tone={exposedCount ? 'bad' : 'good'} icon={<IconBroadcast size={13} />} sub="grants on an internet-reachable system" />
+        </KpiCard>
+        <KpiCard>
+          <StatTile label="Also in git" value={inGitCount} tone={inGitCount ? 'warn' : 'neutral'} icon={<IconKey size={13} />} sub={gitPrincipals.size ? 'principal named in a connected repo' : 'connect a repo (IaC) to check'} />
+        </KpiCard>
+        <KpiCard>
+          <StatTile label="Held by an automation" value={automationCount} tone="neutral" icon={<IconIdentity size={13} />} sub="n8n · Zapier · Workato · MCP agents" />
         </KpiCard>
       </div>
 
@@ -505,6 +557,7 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
             wildcard={fWildcard}
             sensitivity={fSensitivity}
             seen={fSeen}
+            flag={fFlag}
           />
         </CardBody>
         <CardBody pad={false}>
@@ -529,9 +582,10 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
                   <TH width="10%">Owner</TH>
                   <TH width="11%">Last seen</TH>
                   <TH width="9%">Sensitive data</TH>
-                  <TH width="6%" numeric>Creds</TH>
-                  <TH width="6%" numeric>Grants</TH>
-                  <TH width="8%">Wildcard</TH>
+                  <TH width="10%">Flags</TH>
+                  <TH width="5%" numeric>Creds</TH>
+                  <TH width="5%" numeric>Grants</TH>
+                  <TH width="6%">Wildcard</TH>
                   <TH width="6%">Risk</TH>
                   <TH width="6%"><span className="vs-visually-hidden">Detail</span></TH>
                 </TR>
@@ -582,6 +636,16 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
                       ) : (
                         <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>—</span>
                       )}
+                    </TD>
+                    <TD>
+                      <span style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {d.exposed && <Chip tone="high" title="A grant of this identity reaches a system flagged internet-reachable">exposed</Chip>}
+                        {d.inGit.length > 0 && <Chip tone="medium" title={`Principal name found in: ${d.inGit.join(', ')}`}>in git</Chip>}
+                        {d.automation && <Chip tone="info" title="Held by an automation or AI-agent platform">automation</Chip>}
+                        {!d.exposed && d.inGit.length === 0 && !d.automation && (
+                          <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>—</span>
+                        )}
+                      </span>
                     </TD>
                     <TD numeric>{d.creds.length}</TD>
                     <TD numeric>{d.grants.length}</TD>
@@ -648,6 +712,22 @@ function LastSeenCell({ seen }: { seen: IdentityDetail['lastSeen'] }) {
         {dormant ? ' · dormant' : ''}
       </span>
       <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>{seen.source}</span>
+    </span>
+  );
+}
+
+/** The auditor's register — the SOC 2 CC6.1–6.3 / ISO A.5.16–18 / PCI 8.6 evidence export,
+ * generated by the engine from the same rows this page shows. Plain links to the report proxy
+ * route, so they work without JS and carry the caller's own session. */
+function RegisterExport() {
+  return (
+    <span style={{ display: 'inline-flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+      <a href="/api/reports/register-csv" className="vs-actionbtn" title="Access register as CSV (one row per identity)">
+        Register · CSV
+      </a>
+      <a href="/api/reports/register-md" className="vs-actionbtn" title="Access register as a Markdown document with the control mapping">
+        Register · auditor PDF-ready
+      </a>
     </span>
   );
 }
