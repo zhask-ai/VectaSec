@@ -31,6 +31,36 @@ partner, SOC 2).
 
 ---
 
+## 2026-10-17 — Sprint 1 of the SMB strategy landed
+
+Per [vectasec-smb-strategy-2026-10.md](vectasec-smb-strategy-2026-10.md) §5, sprint 1. Each item
+points at the code; CI status is whatever the PR shows, not a claim made here.
+
+- **Console: 15 nav items → 6.** Overview · Findings · Access · Estate · Compliance · Settings
+  (`apps/web/components/shell/ShellChrome.tsx`). Attack paths are Findings' "Priority paths" tab;
+  Identities became **Access** with Owner / Last seen / Sensitive-data columns (last seen from
+  `runtime_evidence` plus connector `last_used_at` labels, "unknown" when neither exists) and
+  Runtime as its "Live connections" tab; Connections + Systems + Discovery + Assets are the
+  **Estate** tabs, with scan history as a per-connection drawer; Supply chain's SBOM/VEX/licensing
+  are Compliance's "Reports & exports". The Data page is gone (classification is a column and a
+  filter on Access). Every old route 307-redirects (`apps/web/next.config.ts`).
+- **Connector shelf tiered.** `apps/web/app/(app)/estate/shelf.ts`: twelve cards by default, the
+  other 27 connectors under "Enterprise, on request" in both the catalogue and the connect
+  dialog. Nothing removed from the engine registry.
+- **SOC 2 TSC + ISO/IEC 27001:2022 in `compliance/map.py`** — 17 controls, each with at least one
+  implemented rule behind it, text declared as paraphrase. ATTACKPATH.* deliberately unmapped
+  (NOT_MAPPED). `tests/test_compliance_soc2_iso.py`.
+- **AWS last-used + owner telemetry** (`connect/aws.py`): IAM users/roles enumerated, access keys
+  and role sessions as credentials with `created_at` / `last_used_at`, Access Advisor + CloudTrail
+  (read-only), owner from tags. `CREDENTIAL.LIFECYCLE.NEVER_USED` and `ROTATION_STALE` now fire
+  **assessed** for AWS. Role template: `deploy/aws/vectasec-readonly-role.yaml`.
+  `tests/test_connect_aws_last_used.py`.
+- Verified locally: `pnpm typecheck && pnpm build && pnpm contrast` green; `uv run pytest` 2503
+  passed. **Not verified:** the console against a live tenant (no seed credentials in the tree),
+  the AWS pass against a real account.
+
+---
+
 ## What actually works, end to end
 
 **The console path** (observed working 2026-07-17 against the live Supabase project; the engine
