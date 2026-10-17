@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  VectaSec read-only scan role. Grants ONLY List*/Get*/Describe* actions over the
+  integration-layer services the VectaSec AWS connector collects (SQS, SNS, EventBridge,
+  MSK, API Gateway), plus the IAM / CloudTrail read actions behind last-used and owner
+  telemetry. Nothing in this policy can mutate the account. Trust is limited to the
+  VectaSec principal account and gated by an ExternalId.
+
+Parameters:
+  VectaSecAccountId:
+    Type: String
+    AllowedPattern: "^[0-9]{12}$"
+    Description: The 12-digit AWS account id VectaSec assumes this role from.
+  ExternalId:
+    Type: String
+    MinLength: 8
+    NoEcho: true
+    Description: >-
+      The ExternalId VectaSec shows you when you create the AWS connection. Paste the same
+      value in the connection's "External ID" field. Prevents the confused-deputy problem.
+  RoleName:
+    Type: String
+    Default: vectasec-readonly
+    Description: Name of the role to create (paste its ARN into the connection's "Role ARN").
+
+Resources:
+  VectaSecReadOnlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: VectaSec read-only posture scan (no write actions)
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: VectaSecAssumeWithExternalId
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${VectaSecAccountId}:root"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      Policies:
+        - PolicyName: vectasec-readonly-scan
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WhoAmI
+                Effect: Allow
+                Action:
+                  - sts:GetCallerIdentity
+                Resource: "*"
+              - Sid: SQS
+                Effect: Allow
+                Action:
+                  - sqs:ListQueues
+                  - sqs:GetQueueAttributes
+                  - sqs:ListQueueTags
+                Resource: "*"
+              - Sid: SNS
+                Effect: Allow
+                Action:
+                  - sns:ListTopics
+                  - sns:GetTopicAttributes
+                  - sns:ListSubscriptionsByTopic
+                  - sns:ListTagsForResource
+                Resource: "*"
+              - Sid: EventBridge
+                Effect: Allow
+                Action:
+                  - events:ListEventBuses
+                  - events:DescribeEventBus
+                  - events:ListRules
+                  - events:ListTargetsByRule
+                Resource: "*"
+              - Sid: MSK
+                Effect: Allow
+                Action:
+                  - kafka:ListClustersV2
+                  - kafka:ListClusters
+                  - kafka:DescribeClusterV2
+                  - kafka:DescribeCluster
+                Resource: "*"
+              - Sid: APIGateway
+                Effect: Allow
+                Action:
+                  - apigateway:GET
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:apigateway:*::/restapis"
+                  - !Sub "arn:${AWS::Partition}:apigateway:*::/restapis/*"
+                  - !Sub "arn:${AWS::Partition}:apigateway:*::/apis"
+                  - !Sub "arn:${AWS::Partition}:apigateway:*::/apis/*"
+              - Sid: IAMLastUsedAndOwner
+                Effect: Allow
+                Action:
+                  - iam:ListUsers
+                  - iam:GetUser
+                  - iam:ListRoles
+                  - iam:GetRole
+                  - iam:ListAccessKeys
+                  - iam:GetAccessKeyLastUsed
+                  - iam:ListUserTags
+                  - iam:ListRoleTags
+                  - iam:GenerateServiceLastAccessedDetails
+                  - iam:GetServiceLastAccessedDetails
+                Resource: "*"
+              - Sid: CloudTrailLastEvent
+                Effect: Allow
+                Action:
+                  - cloudtrail:LookupEvents
+                Resource: "*"
+
+Outputs:
+  RoleArn:
+    Description: Paste this into the VectaSec AWS connection's "Role ARN" field.
+    Value: !GetAtt VectaSecReadOnlyRole.Arn

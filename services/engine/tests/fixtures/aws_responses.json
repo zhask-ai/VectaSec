@@ -39,11 +39,15 @@
             {
               "Sid": "AllowBillingTopic",
               "Effect": "Allow",
-              "Principal": {"Service": "sns.amazonaws.com"},
+              "Principal": {
+                "Service": "sns.amazonaws.com"
+              },
               "Action": "sqs:SendMessage",
               "Resource": "arn:aws:sqs:us-east-1:111111111111:payments",
               "Condition": {
-                "ArnEquals": {"aws:SourceArn": "arn:aws:sns:us-east-1:111111111111:billing"}
+                "ArnEquals": {
+                  "aws:SourceArn": "arn:aws:sns:us-east-1:111111111111:billing"
+                }
               }
             }
           ]
@@ -58,8 +62,12 @@
   "sns": {
     "list_topics": {
       "Topics": [
-        {"TopicArn": "arn:aws:sns:us-east-1:111111111111:alerts"},
-        {"TopicArn": "arn:aws:sns:us-east-1:111111111111:billing"}
+        {
+          "TopicArn": "arn:aws:sns:us-east-1:111111111111:alerts"
+        },
+        {
+          "TopicArn": "arn:aws:sns:us-east-1:111111111111:billing"
+        }
       ]
     },
     "attributes": {
@@ -72,7 +80,9 @@
             {
               "Sid": "OpenTopic",
               "Effect": "Allow",
-              "Principal": {"AWS": "*"},
+              "Principal": {
+                "AWS": "*"
+              },
               "Action": "sns:*",
               "Resource": "arn:aws:sns:us-east-1:111111111111:alerts"
             }
@@ -89,10 +99,19 @@
             {
               "Sid": "OwnerOnly",
               "Effect": "Allow",
-              "Principal": {"AWS": "111111111111"},
-              "Action": ["sns:Publish", "sns:Subscribe"],
+              "Principal": {
+                "AWS": "111111111111"
+              },
+              "Action": [
+                "sns:Publish",
+                "sns:Subscribe"
+              ],
               "Resource": "arn:aws:sns:us-east-1:111111111111:billing",
-              "Condition": {"StringEquals": {"AWS:SourceOwner": "111111111111"}}
+              "Condition": {
+                "StringEquals": {
+                  "AWS:SourceOwner": "111111111111"
+                }
+              }
             }
           ]
         }
@@ -128,8 +147,14 @@
   },
   "events": {
     "buses": [
-      {"Name": "default", "Arn": "arn:aws:events:us-east-1:111111111111:event-bus/default"},
-      {"Name": "partner", "Arn": "arn:aws:events:us-east-1:111111111111:event-bus/partner"}
+      {
+        "Name": "default",
+        "Arn": "arn:aws:events:us-east-1:111111111111:event-bus/default"
+      },
+      {
+        "Name": "partner",
+        "Arn": "arn:aws:events:us-east-1:111111111111:event-bus/partner"
+      }
     ],
     "bus_policies": {
       "default": {
@@ -150,7 +175,9 @@
           {
             "Sid": "PartnerFullControl",
             "Effect": "Allow",
-            "Principal": {"AWS": "arn:aws:iam::222222222222:root"},
+            "Principal": {
+              "AWS": "arn:aws:iam::222222222222:root"
+            },
             "Action": "events:*",
             "Resource": "arn:aws:events:us-east-1:111111111111:event-bus/partner"
           }
@@ -164,7 +191,11 @@
           "Arn": "arn:aws:events:us-east-1:111111111111:rule/forward-orders",
           "State": "ENABLED",
           "EventBusName": "default",
-          "EventPattern": {"source": ["app.orders"]}
+          "EventPattern": {
+            "source": [
+              "app.orders"
+            ]
+          }
         }
       ]
     },
@@ -191,21 +222,43 @@
         "ClusterType": "PROVISIONED",
         "State": "ACTIVE",
         "Provisioned": {
-          "CurrentBrokerSoftwareInfo": {"KafkaVersion": "3.6.0"},
+          "CurrentBrokerSoftwareInfo": {
+            "KafkaVersion": "3.6.0"
+          },
           "NumberOfBrokerNodes": 3,
           "EnhancedMonitoring": "DEFAULT",
           "BrokerNodeGroupInfo": {
             "InstanceType": "kafka.m5.large",
-            "ConnectivityInfo": {"PublicAccess": {"Type": "SERVICE_PROVIDED_EIPS"}}
+            "ConnectivityInfo": {
+              "PublicAccess": {
+                "Type": "SERVICE_PROVIDED_EIPS"
+              }
+            }
           },
           "EncryptionInfo": {
-            "EncryptionAtRest": {"DataVolumeKMSKeyId": "arn:aws:kms:us-east-1:111111111111:key/k-msk"},
-            "EncryptionInTransit": {"ClientBroker": "TLS_PLAINTEXT", "InCluster": false}
+            "EncryptionAtRest": {
+              "DataVolumeKMSKeyId": "arn:aws:kms:us-east-1:111111111111:key/k-msk"
+            },
+            "EncryptionInTransit": {
+              "ClientBroker": "TLS_PLAINTEXT",
+              "InCluster": false
+            }
           },
           "ClientAuthentication": {
-            "Unauthenticated": {"Enabled": true},
-            "Sasl": {"Scram": {"Enabled": false}, "Iam": {"Enabled": false}},
-            "Tls": {"Enabled": false}
+            "Unauthenticated": {
+              "Enabled": true
+            },
+            "Sasl": {
+              "Scram": {
+                "Enabled": false
+              },
+              "Iam": {
+                "Enabled": false
+              }
+            },
+            "Tls": {
+              "Enabled": false
+            }
           }
         }
       },
@@ -215,21 +268,43 @@
         "ClusterType": "PROVISIONED",
         "State": "ACTIVE",
         "Provisioned": {
-          "CurrentBrokerSoftwareInfo": {"KafkaVersion": "3.7.0"},
+          "CurrentBrokerSoftwareInfo": {
+            "KafkaVersion": "3.7.0"
+          },
           "NumberOfBrokerNodes": 3,
           "EnhancedMonitoring": "PER_TOPIC_PER_BROKER",
           "BrokerNodeGroupInfo": {
             "InstanceType": "kafka.m5.large",
-            "ConnectivityInfo": {"PublicAccess": {"Type": "DISABLED"}}
+            "ConnectivityInfo": {
+              "PublicAccess": {
+                "Type": "DISABLED"
+              }
+            }
           },
           "EncryptionInfo": {
-            "EncryptionAtRest": {"DataVolumeKMSKeyId": "arn:aws:kms:us-east-1:111111111111:key/k-msk"},
-            "EncryptionInTransit": {"ClientBroker": "TLS", "InCluster": true}
+            "EncryptionAtRest": {
+              "DataVolumeKMSKeyId": "arn:aws:kms:us-east-1:111111111111:key/k-msk"
+            },
+            "EncryptionInTransit": {
+              "ClientBroker": "TLS",
+              "InCluster": true
+            }
           },
           "ClientAuthentication": {
-            "Unauthenticated": {"Enabled": false},
-            "Sasl": {"Scram": {"Enabled": false}, "Iam": {"Enabled": true}},
-            "Tls": {"Enabled": false}
+            "Unauthenticated": {
+              "Enabled": false
+            },
+            "Sasl": {
+              "Scram": {
+                "Enabled": false
+              },
+              "Iam": {
+                "Enabled": true
+              }
+            },
+            "Tls": {
+              "Enabled": false
+            }
           }
         }
       },
@@ -239,7 +314,11 @@
         "ClusterType": "SERVERLESS",
         "State": "ACTIVE",
         "Serverless": {
-          "Sasl": {"Iam": {"Enabled": true}}
+          "Sasl": {
+            "Iam": {
+              "Enabled": true
+            }
+          }
         }
       }
     ]
@@ -249,29 +328,50 @@
       "id": "abc123",
       "name": "legacy-api",
       "apiKeySource": "HEADER",
-      "endpointConfiguration": {"types": ["REGIONAL"]}
+      "endpointConfiguration": {
+        "types": [
+          "REGIONAL"
+        ]
+      }
     },
     "resources": [
       {
         "id": "r-public",
         "path": "/public",
         "resourceMethods": {
-          "GET": {"httpMethod": "GET", "authorizationType": "NONE", "apiKeyRequired": false},
-          "OPTIONS": {"httpMethod": "OPTIONS", "authorizationType": "NONE", "apiKeyRequired": false}
+          "GET": {
+            "httpMethod": "GET",
+            "authorizationType": "NONE",
+            "apiKeyRequired": false
+          },
+          "OPTIONS": {
+            "httpMethod": "OPTIONS",
+            "authorizationType": "NONE",
+            "apiKeyRequired": false
+          }
         }
       },
       {
         "id": "r-orders",
         "path": "/orders",
         "resourceMethods": {
-          "POST": {"httpMethod": "POST", "authorizationType": "CUSTOM", "authorizerId": "auth1", "apiKeyRequired": false}
+          "POST": {
+            "httpMethod": "POST",
+            "authorizationType": "CUSTOM",
+            "authorizerId": "auth1",
+            "apiKeyRequired": false
+          }
         }
       },
       {
         "id": "r-metrics",
         "path": "/metrics",
         "resourceMethods": {
-          "GET": {"httpMethod": "GET", "authorizationType": "NONE", "apiKeyRequired": true}
+          "GET": {
+            "httpMethod": "GET",
+            "authorizationType": "NONE",
+            "apiKeyRequired": true
+          }
         }
       },
       {
@@ -283,7 +383,11 @@
       }
     ],
     "authorizers": [
-      {"id": "auth1", "name": "lambda-token-auth", "type": "TOKEN"}
+      {
+        "id": "auth1",
+        "name": "lambda-token-auth",
+        "type": "TOKEN"
+      }
     ],
     "stages": [
       {
@@ -297,7 +401,12 @@
           "destinationArn": "arn:aws:logs:us-east-1:111111111111:log-group:apigw-access",
           "format": "$context.requestId"
         },
-        "methodSettings": {"*/*": {"loggingLevel": "INFO", "metricsEnabled": true}},
+        "methodSettings": {
+          "*/*": {
+            "loggingLevel": "INFO",
+            "metricsEnabled": true
+          }
+        },
         "webAclArn": "arn:aws:wafv2:us-east-1:111111111111:regional/webacl/api-acl/w-1",
         "tracingEnabled": true
       }
@@ -311,18 +420,256 @@
       "ApiEndpoint": "https://h1http.execute-api.us-east-1.amazonaws.com"
     },
     "routes": [
-      {"RouteId": "rt1", "RouteKey": "$default", "AuthorizationType": "NONE"},
-      {"RouteId": "rt2", "RouteKey": "GET /pets", "AuthorizationType": "JWT", "AuthorizerId": "jwt1"}
+      {
+        "RouteId": "rt1",
+        "RouteKey": "$default",
+        "AuthorizationType": "NONE"
+      },
+      {
+        "RouteId": "rt2",
+        "RouteKey": "GET /pets",
+        "AuthorizationType": "JWT",
+        "AuthorizerId": "jwt1"
+      }
     ],
     "authorizers": [
-      {"AuthorizerId": "jwt1", "Name": "cognito-jwt", "AuthorizerType": "JWT"}
+      {
+        "AuthorizerId": "jwt1",
+        "Name": "cognito-jwt",
+        "AuthorizerType": "JWT"
+      }
     ],
     "stages": [
       {
         "StageName": "$default",
         "AutoDeploy": true,
-        "DefaultRouteSettings": {"DetailedMetricsEnabled": false}
+        "DefaultRouteSettings": {
+          "DetailedMetricsEnabled": false
+        }
       }
     ]
+  },
+  "iam": {
+    "_comment": "IAM is global. Timestamps are ISO strings here (boto3 returns tz-aware datetimes; the parse layer accepts both). 'ci-deployer' has two keys: one used, one NEVER used (no LastUsedDate) — the NEVER_USED fire case; 'legacy-batch' has one key created long ago (ROTATION_STALE) and no owner tag. 'eb-cross-account' role has RoleLastUsed; 'unused-partner-role' never. The service-linked role is skipped by the collector.",
+    "list_users": {
+      "Users": [
+        {
+          "UserName": "ci-deployer",
+          "UserId": "AIDAEXAMPLE000000001",
+          "Arn": "arn:aws:iam::111111111111:user/ci-deployer",
+          "Path": "/",
+          "CreateDate": "2025-09-01T10:00:00Z"
+        },
+        {
+          "UserName": "legacy-batch",
+          "UserId": "AIDAEXAMPLE000000002",
+          "Arn": "arn:aws:iam::111111111111:user/legacy-batch",
+          "Path": "/",
+          "CreateDate": "2022-01-15T08:30:00Z"
+        }
+      ],
+      "IsTruncated": false
+    },
+    "list_access_keys": {
+      "ci-deployer": {
+        "AccessKeyMetadata": [
+          {
+            "UserName": "ci-deployer",
+            "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
+            "Status": "Active",
+            "CreateDate": "2025-09-01T10:05:00Z"
+          },
+          {
+            "UserName": "ci-deployer",
+            "AccessKeyId": "AKIAI44QH8DHBNEVRUSED",
+            "Status": "Active",
+            "CreateDate": "2025-09-20T12:00:00Z"
+          }
+        ],
+        "IsTruncated": false
+      },
+      "legacy-batch": {
+        "AccessKeyMetadata": [
+          {
+            "UserName": "legacy-batch",
+            "AccessKeyId": "AKIAJLEGACYBATCH0OLD",
+            "Status": "Active",
+            "CreateDate": "2022-01-15T08:35:00Z"
+          }
+        ],
+        "IsTruncated": false
+      }
+    },
+    "get_access_key_last_used": {
+      "AKIAIOSFODNN7EXAMPLE": {
+        "UserName": "ci-deployer",
+        "AccessKeyLastUsed": {
+          "LastUsedDate": "2026-10-07T09:12:00Z",
+          "ServiceName": "sqs",
+          "Region": "us-east-1"
+        }
+      },
+      "AKIAI44QH8DHBNEVRUSED": {
+        "UserName": "ci-deployer",
+        "AccessKeyLastUsed": {
+          "ServiceName": "N/A",
+          "Region": "N/A"
+        }
+      },
+      "AKIAJLEGACYBATCH0OLD": {
+        "UserName": "legacy-batch",
+        "AccessKeyLastUsed": {
+          "LastUsedDate": "2024-03-02T01:00:00Z",
+          "ServiceName": "sns",
+          "Region": "us-east-1"
+        }
+      }
+    },
+    "list_roles": {
+      "Roles": [
+        {
+          "RoleName": "eb-cross-account",
+          "RoleId": "AROAEXAMPLE000000001",
+          "Arn": "arn:aws:iam::111111111111:role/eb-cross-account",
+          "Path": "/",
+          "CreateDate": "2024-06-01T00:00:00Z"
+        },
+        {
+          "RoleName": "unused-partner-role",
+          "RoleId": "AROAEXAMPLE000000002",
+          "Arn": "arn:aws:iam::111111111111:role/unused-partner-role",
+          "Path": "/",
+          "CreateDate": "2025-02-10T00:00:00Z"
+        },
+        {
+          "RoleName": "AWSServiceRoleForSupport",
+          "RoleId": "AROAEXAMPLE000000003",
+          "Arn": "arn:aws:iam::111111111111:role/aws-service-role/support.amazonaws.com/AWSServiceRoleForSupport",
+          "Path": "/aws-service-role/support.amazonaws.com/",
+          "CreateDate": "2021-01-01T00:00:00Z"
+        }
+      ],
+      "IsTruncated": false
+    },
+    "get_role": {
+      "eb-cross-account": {
+        "Role": {
+          "RoleName": "eb-cross-account",
+          "RoleId": "AROAEXAMPLE000000001",
+          "Arn": "arn:aws:iam::111111111111:role/eb-cross-account",
+          "Path": "/",
+          "CreateDate": "2024-06-01T00:00:00Z",
+          "RoleLastUsed": {
+            "LastUsedDate": "2026-10-01T18:00:00Z",
+            "Region": "us-east-1"
+          }
+        }
+      },
+      "unused-partner-role": {
+        "Role": {
+          "RoleName": "unused-partner-role",
+          "RoleId": "AROAEXAMPLE000000002",
+          "Arn": "arn:aws:iam::111111111111:role/unused-partner-role",
+          "Path": "/",
+          "CreateDate": "2025-02-10T00:00:00Z",
+          "RoleLastUsed": {}
+        }
+      }
+    },
+    "list_user_tags": {
+      "ci-deployer": {
+        "Tags": [
+          {
+            "Key": "Owner",
+            "Value": "platform-team"
+          },
+          {
+            "Key": "env",
+            "Value": "prod"
+          }
+        ],
+        "IsTruncated": false
+      },
+      "legacy-batch": {
+        "Tags": [
+          {
+            "Key": "env",
+            "Value": "prod"
+          }
+        ],
+        "IsTruncated": false
+      }
+    },
+    "list_role_tags": {
+      "eb-cross-account": {
+        "Tags": [
+          {
+            "Key": "team",
+            "Value": "integrations"
+          }
+        ],
+        "IsTruncated": false
+      },
+      "unused-partner-role": {
+        "Tags": [],
+        "IsTruncated": false
+      }
+    },
+    "generate_service_last_accessed_details": {
+      "JobId": "job-0000-1111"
+    },
+    "get_service_last_accessed_details": {
+      "JobStatus": "COMPLETED",
+      "JobCreationDate": "2026-10-17T00:00:00Z",
+      "JobCompletionDate": "2026-10-17T00:00:05Z",
+      "ServicesLastAccessed": [
+        {
+          "ServiceName": "Amazon SQS",
+          "ServiceNamespace": "sqs",
+          "LastAuthenticated": "2026-10-07T09:12:00Z",
+          "LastAuthenticatedRegion": "us-east-1",
+          "TotalAuthenticatedEntities": 1
+        },
+        {
+          "ServiceName": "Amazon SNS",
+          "ServiceNamespace": "sns",
+          "TotalAuthenticatedEntities": 0
+        },
+        {
+          "ServiceName": "AWS Identity and Access Management",
+          "ServiceNamespace": "iam",
+          "LastAuthenticated": "2026-10-10T07:00:00Z",
+          "TotalAuthenticatedEntities": 1
+        }
+      ],
+      "IsTruncated": false
+    },
+    "get_service_last_accessed_details_in_progress": {
+      "JobStatus": "IN_PROGRESS",
+      "ServicesLastAccessed": []
+    }
+  },
+  "cloudtrail": {
+    "lookup_events": {
+      "Events": [
+        {
+          "EventId": "e-1",
+          "EventName": "SendMessage",
+          "EventTime": "2026-10-09T14:00:00Z",
+          "Username": "ci-deployer",
+          "EventSource": "sqs.amazonaws.com"
+        },
+        {
+          "EventId": "e-2",
+          "EventName": "GetQueueAttributes",
+          "EventTime": "2026-10-11T08:30:00Z",
+          "Username": "ci-deployer",
+          "EventSource": "sqs.amazonaws.com"
+        }
+      ]
+    },
+    "lookup_events_empty": {
+      "Events": []
+    }
   }
 }

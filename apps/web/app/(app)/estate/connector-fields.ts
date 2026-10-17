@@ -61,7 +61,7 @@ export const CONNECTORS: ConnectorSpec[] = [
     blurb: "Agentless via a read-only role — SQS/SNS/EventBridge/MSK/API Gateway policy, encryption, exposure.",
     rules: 21,
     fields: [
-      { key: "regions", label: "Regions", required: true, placeholder: "us-east-1,eu-west-1", help: "Comma-separated AWS regions to scan. Every call is read-only (List*/Get*/Describe*); the SecurityAudit or ReadOnlyAccess managed policy is sufficient." },
+      { key: "regions", label: "Regions", required: true, placeholder: "us-east-1,eu-west-1", help: "Comma-separated AWS regions to scan. Every call is read-only (List*/Get*/Describe*); the SecurityAudit or ReadOnlyAccess managed policy is sufficient. Last-used telemetry additionally uses iam:ListUsers/ListRoles/GetRole/ListAccessKeys/GetAccessKeyLastUsed, iam:Generate+GetServiceLastAccessedDetails (Access Advisor, global) and cloudtrail:LookupEvents (per region); owner labels are read from tags (owner/team/service/contact/email/vectasec:owner/created-by) via iam:ListUserTags/ListRoleTags, sqs:ListQueueTags and sns:ListTagsForResource. A denied action is recorded as a coverage gap, never as a clean result. See deploy/aws/ for the role template." },
       { key: "role_arn", label: "Role ARN", placeholder: "arn:aws:iam::123456789012:role/vectasec-readonly", help: "Cross-account read-only role to assume (the agentless path). Leave empty to use a profile or key pair instead." },
       { key: "external_id", label: "External ID", help: "ExternalId condition on the role's trust policy, if it sets one." },
       { key: "profile", label: "Named profile", placeholder: "prod-readonly", help: "AWS shared-config profile to use instead of a role or key pair." },

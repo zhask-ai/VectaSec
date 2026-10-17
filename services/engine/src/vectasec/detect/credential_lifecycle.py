@@ -43,11 +43,11 @@ absent, the rule fires the THIRD outcome (Hit.assessable=False → "Not assessed
 
   AWAITS CONNECTOR ENRICHMENT (rule exists and is honest; today it can only NOT-ASSESS, or its
   assessed path is exercised by synthetic fixtures until a connector records the field):
-    • CREDENTIAL.LIFECYCLE.NEVER_USED       — NO connector exposes a last-authentication time for a
-                                              credential today, so every real credential is
-                                              not_assessable. The fire path (recorded last-used that
-                                              is null/stale → orphaned-NHI candidate) is ready for
-                                              the first connector that records last_used_at.
+    • CREDENTIAL.LIFECYCLE.NEVER_USED       — provable for AWS (connect/aws.py records last_used_at
+                                              on access keys and role sessions from Access Advisor,
+                                              GetAccessKeyLastUsed, RoleLastUsed and CloudTrail);
+                                              every other connector still exposes no last-auth time,
+                                              so their credentials remain not_assessable.
     • CREDENTIAL.LIFECYCLE.ROTATION_STALE   — not_assessable for every credential whose connector
                                               records no creation/rotation timestamp (all but the
                                               two named above).
@@ -85,6 +85,10 @@ _STATIC_BEARER = {"api_key", "api_token", "sas_key", "subscription_key", "sa_tok
 # expose. For these, an absent expiry field is a COVERAGE GAP (not_assessable), not a clean pass.
 _ROTATABLE = {"oauth_secret", "client_secret", "secret_id", "connection_secret", "password",
               "oauth2", "jwt"}
+
+# Credential TYPES that are not a stored secret at all — short-lived, minted per use — so the
+# rotation question does not apply (AWS IAM role sessions from connect/aws.py).
+_NOT_ROTATABLE = {"role_session"}
 
 # Key TYPES that are, by construction, a single secret handed to many callers.
 _SHARED_KEY_TYPES = {"sas_key", "subscription_key"}
@@ -130,6 +134,12 @@ def rotation_stale(r, ctx) -> list:
         return []
     system = raw.get("system", "?")
     ctype = raw.get("credential_type", "credential")
+    # Rotation is a property of a long-lived SECRET. An IAM role session is minted per
+    # AssumeRole and expires in hours; the role's CreateDate is the identity's age, not a
+    # secret's. Asserting "unrotated" over it would file a false medium on every role older
+    # than a year, so this rule stays silent for it (NEVER_USED still covers the dormant case).
+    if ctype in _NOT_ROTATABLE:
+        return []
     key, value = _first_present(raw, _CREATED_KEYS)
 
     if key is None:

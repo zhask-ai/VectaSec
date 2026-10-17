@@ -30,13 +30,29 @@ live account) stays out of the test suite and a shape drift between connector an
 fails a test instead of silently mis-firing in production.
 
 Kinds are DISTINCT (aws_sqs_queue, aws_sns_topic, aws_event_bus, aws_event_rule,
-aws_msk_cluster, aws_api, aws_api_stage, …) so no other rulepack ever runs against an AWS
-resource by accident — the same reason connect/redis.py refuses to reuse `broker`.
+aws_msk_cluster, aws_api, aws_api_stage, aws_iam_user, aws_iam_role, …) so no other rulepack
+ever runs against an AWS resource by accident — the same reason connect/redis.py refuses to
+reuse `broker`.
+
+LAST-USED + OWNER (the Access-page telemetry). One global IAM pass (`_collect_iam`) lists IAM
+users and roles (capped, truncation recorded), their access keys with GetAccessKeyLastUsed,
+RoleLastUsed from GetRole, Access Advisor (GenerateServiceLastAccessedDetails →
+GetServiceLastAccessedDetails, polled with a bounded wait) and tags; a per-region CloudTrail
+LookupEvents pass adds the newest management event per principal. An owner label is derived
+from a fixed, case-insensitive tag-key preference list (owner, team, service, contact, email,
+vectasec:owner, created-by, CreatedBy) on IAM principals and on SQS/SNS/MSK/API Gateway
+resources. Access-key IDs are stored MASKED (first 4 + … + last 4); no secret material of any
+kind is read, let alone stored. Every one of these signals is three-valued: readable-and-set,
+readable-and-empty (never used — the finding), or NOT readable (denied → recorded as a child
+gap and the raw key is simply absent, which the lifecycle rules read as "not assessed").
 """
+import hashlib
 import json
+import time
+from datetime import datetime, timedelta, timezone
 
 from ..contracts import Collected, Edge, Resource
-from ..identity import _mk_grant, _mk_identity, identity_extractor
+from ..identity import _mk_credential, _mk_grant, _mk_identity, identity_extractor
 from ..registry import ConnectorField, connector
 
 
@@ -106,10 +122,11 @@ def _parse_json(s):
 
 
 # ── parse layer: boto3 response dicts → Resources (pure, no boto3) ────────────
-def parse_queue(region: str, queue_url: str, attrs) -> Resource:
+def parse_queue(region: str, queue_url: str, attrs, tags=None) -> Resource:
     """One SQS queue from get_queue_attributes(AttributeNames=['All']). attrs=None means the
     per-queue attribute call itself failed (recorded, so detectors answer not-assessable
-    instead of reading absence as a clean pass)."""
+    instead of reading absence as a clean pass). `tags` is the ListQueueTags dict (None =
+    not readable); an owner-ish tag lands in raw.owner."""
     name = queue_url.rstrip("/").rsplit("/", 1)[-1]
     a = attrs or {}
     arn = a.get("QueueArn") or f"sqs-{region}-{name}"
@@ -119,7 +136,7 @@ def parse_queue(region: str, queue_url: str, attrs) -> Resource:
         ext_id=arn,
         namespace=region,
         labels={"region": region, "service": "sqs"},
-        raw={
+        raw=_with_owner({
             "queue_url": queue_url,
             "queue_arn": a.get("QueueArn"),
             "region": region,
@@ -133,14 +150,16 @@ def parse_queue(region: str, queue_url: str, attrs) -> Resource:
             "redrive_policy": _parse_json(a.get("RedrivePolicy")),
             "visibility_timeout": a.get("VisibilityTimeout"),
             "fifo": name.endswith(".fifo"),
-        },
+        }, tags),
     )
 
 
-def parse_topic(region: str, topic_arn: str, attrs, subscriptions_readable: bool = True) -> Resource:
+def parse_topic(region: str, topic_arn: str, attrs, subscriptions_readable: bool = True,
+                tags=None) -> Resource:
     """One SNS topic. `subscriptions_readable` False means ListSubscriptionsByTopic failed for
     THIS topic: the subscription resources are missing, so a topic with no delivery endpoints
-    and a topic whose endpoints were denied would otherwise look identical."""
+    and a topic whose endpoints were denied would otherwise look identical. `tags` is the
+    ListTagsForResource list (None = not readable)."""
     a = attrs or {}
     return Resource(
         kind="aws_sns_topic",
@@ -148,7 +167,7 @@ def parse_topic(region: str, topic_arn: str, attrs, subscriptions_readable: bool
         ext_id=topic_arn,
         namespace=region,
         labels={"region": region, "service": "sns"},
-        raw={
+        raw=_with_owner({
             "topic_arn": topic_arn,
             "region": region,
             "account": arn_account(topic_arn),
@@ -157,7 +176,7 @@ def parse_topic(region: str, topic_arn: str, attrs, subscriptions_readable: bool
             "policy": _parse_json(a.get("Policy")),
             "kms_master_key_id": a.get("KmsMasterKeyId"),
             "subscriptions_confirmed": a.get("SubscriptionsConfirmed"),
-        },
+        }, tags),
     )
 
 
@@ -282,7 +301,7 @@ def parse_msk_cluster(region: str, cluster: dict) -> Resource:
         namespace=region,
         labels={"region": region, "service": "msk",
                 "cluster_type": str(cluster.get("ClusterType") or "PROVISIONED")},
-        raw={
+        raw=_with_owner({
             "cluster_arn": cluster.get("ClusterArn"),
             "cluster_name": cluster.get("ClusterName"),
             "cluster_type": (cluster.get("ClusterType") or "PROVISIONED").upper(),
@@ -300,7 +319,7 @@ def parse_msk_cluster(region: str, cluster: dict) -> Resource:
             "client_auth_tls": bool((auth.get("Tls") or {}).get("Enabled")),
             "public_access_type": public.get("Type") or "DISABLED",
             "enhanced_monitoring": prov.get("EnhancedMonitoring"),
-        },
+        }, cluster.get("Tags") if "Tags" in cluster else None),
     )
 
 
@@ -359,7 +378,7 @@ def parse_api_v1(region: str, api: dict, stages, authorizers, resource_items) ->
         namespace=region,
         labels={"region": region, "service": "apigateway", "api_version": "v1",
                 "protocol": "REST"},
-        raw={
+        raw=_with_owner({
             "api_id": api_id,
             "api_version": "v1",
             "protocol": "REST",
@@ -372,7 +391,7 @@ def parse_api_v1(region: str, api: dict, stages, authorizers, resource_items) ->
             "authorizers_readable": authorizers is not None,
             "authorizers": [{"id": a.get("id"), "name": a.get("name"), "type": a.get("type")}
                             for a in (authorizers or [])],
-        },
+        }, api.get("tags") if "tags" in api else None),
     )
     resources, edges = [api_res], []
     for s in stages or []:
@@ -417,7 +436,7 @@ def parse_api_v2(region: str, api: dict, stages, routes, authorizers) -> tuple:
         namespace=region,
         labels={"region": region, "service": "apigateway", "api_version": "v2",
                 "protocol": protocol},
-        raw={
+        raw=_with_owner({
             "api_id": api_id,
             "api_version": "v2",
             "protocol": protocol,
@@ -429,7 +448,7 @@ def parse_api_v2(region: str, api: dict, stages, routes, authorizers) -> tuple:
             "authorizers_readable": authorizers is not None,
             "authorizers": [{"id": a.get("AuthorizerId"), "name": a.get("Name"),
                              "type": a.get("AuthorizerType")} for a in (authorizers or [])],
-        },
+        }, api.get("Tags") if "Tags" in api else None),
     )
     resources, edges = [api_res], []
     for s in stages or []:
@@ -445,6 +464,238 @@ def parse_api_v2(region: str, api: dict, stages, routes, authorizers) -> tuple:
         resources.append(stage)
         edges.append(Edge(src_ext_id=ext, dst_ext_id=stage.ext_id, kind="exposes"))
     return resources, edges
+
+
+# ── owner attribution + timestamps (pure helpers) ─────────────────────────────
+# Tag keys that name an owner, in preference order, matched case-insensitively. The first key
+# present wins; its value becomes the owner label and raw.owner.source records which key.
+_OWNER_TAG_KEYS = ("owner", "team", "service", "contact", "email", "vectasec:owner",
+                   "created-by", "createdby")
+
+
+def _tags_as_dict(tags) -> dict | None:
+    """Normalise the three tag shapes AWS returns — [{"Key","Value"}] (IAM, SNS),
+    {key: value} (SQS, MSK, API Gateway) — to one dict. None stays None (= not readable)."""
+    if tags is None:
+        return None
+    if isinstance(tags, dict):
+        return {str(k): ("" if v is None else str(v)) for k, v in tags.items()}
+    out = {}
+    for t in tags if isinstance(tags, list) else []:
+        if isinstance(t, dict) and t.get("Key") is not None:
+            out[str(t["Key"])] = "" if t.get("Value") is None else str(t.get("Value"))
+    return out
+
+
+def owner_from_tags(tags) -> dict | None:
+    """{"label": ..., "source": "tag:<Key>"} from the first owner-ish tag key present
+    (case-insensitive, see _OWNER_TAG_KEYS), else None. An empty tag value counts as absent."""
+    d = _tags_as_dict(tags)
+    if not d:
+        return None
+    lowered = {}
+    for k, v in d.items():
+        lowered.setdefault(k.lower(), (k, v))
+    for want in _OWNER_TAG_KEYS:
+        hit = lowered.get(want)
+        if hit and hit[1].strip():
+            return {"label": hit[1].strip(), "source": f"tag:{hit[0]}"}
+    return None
+
+
+def _with_owner(raw: dict, tags) -> dict:
+    """Attach tags_readable (+ owner when a tag names one) to a resource's raw dict. The owner
+    key is deliberately ABSENT when no tag names one, so "no owner" and "owner not readable"
+    are told apart by tags_readable alone."""
+    raw["tags_readable"] = tags is not None
+    owner = owner_from_tags(tags)
+    if owner:
+        raw["owner"] = owner
+    return raw
+
+
+def _iso(value):
+    """datetime (boto3 returns tz-aware datetimes) or ISO string → canonical ISO-8601 UTC
+    string; None/'' → None. Strings are passed through (the fixtures hold them already)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return str(value)
+
+
+def _parse_iso(value):
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _newest(values):
+    """The newest parseable ISO timestamp among `values` (None when none is set)."""
+    best, best_dt = None, None
+    for v in values:
+        dt = _parse_iso(v)
+        if dt is not None and (best_dt is None or dt > best_dt):
+            best, best_dt = _iso(v), dt
+    return best
+
+
+def mask_key_id(key_id) -> str:
+    """'AKIAIOSFODNN7EXAMPLE' → 'AKIA…MPLE'. The access-key id is an identifier, not a secret,
+    but only the masked form is ever stored."""
+    k = str(key_id or "")
+    return f"{k[:4]}…{k[-4:]}" if len(k) > 8 else k
+
+
+# ── parse layer: IAM principals, access keys, Access Advisor, CloudTrail ──────
+# Service namespaces (as Access Advisor reports them) the integration-layer scan cares about.
+_TRACKED_SERVICES = ("sqs", "sns", "events", "kafka", "execute-api", "apigateway")
+
+
+def parse_access_key(meta: dict, last_used) -> dict:
+    """One ListAccessKeys AccessKeyMetadata entry + its GetAccessKeyLastUsed response.
+    `last_used=None` means that call was DENIED for this key: the `last_used_at` key is then
+    left out entirely (the lifecycle rules read key-absence as "not assessed"). A readable
+    response WITHOUT a LastUsedDate means the key exists but has never authenticated — that
+    is recorded as last_used_at=None, the fact CREDENTIAL.LIFECYCLE.NEVER_USED fires on."""
+    key_id = str(meta.get("AccessKeyId") or "")
+    out = {
+        "key_id_masked": mask_key_id(key_id),
+        # stable, non-reversible discriminator so two keys on one user get distinct ext_ids
+        "key_ref": hashlib.sha256(key_id.encode()).hexdigest()[:10] if key_id else "",
+        "status": meta.get("Status"),
+        "created_at": _iso(meta.get("CreateDate")),
+        "last_used_readable": last_used is not None,
+    }
+    if last_used is not None:
+        lu = (last_used or {}).get("AccessKeyLastUsed") or {}
+        out["last_used_at"] = _iso(lu.get("LastUsedDate"))
+        out["last_used_service"] = lu.get("ServiceName") if lu.get("LastUsedDate") else None
+        out["last_used_region"] = lu.get("Region") if lu.get("LastUsedDate") else None
+    return out
+
+
+def parse_last_accessed(resp) -> dict | None:
+    """GetServiceLastAccessedDetails (COMPLETED, all pages merged into ServicesLastAccessed) →
+    {"last_authenticated": newest across ALL services or None,
+     "services": [{"service", "last_authenticated"}] for the tracked namespaces only}.
+    None in → None out (the job was denied/failed/timed out: not readable)."""
+    if resp is None:
+        return None
+    services = (resp or {}).get("ServicesLastAccessed") or []
+    tracked = [{"service": s.get("ServiceNamespace"),
+                "last_authenticated": _iso(s.get("LastAuthenticated"))}
+               for s in services if s.get("ServiceNamespace") in _TRACKED_SERVICES]
+    return {
+        "job_status": (resp or {}).get("JobStatus"),
+        "last_authenticated": _newest(s.get("LastAuthenticated") for s in services),
+        "services": tracked,
+    }
+
+
+def parse_cloudtrail_events(resp) -> dict | None:
+    """cloudtrail:LookupEvents response → {"last_event_at": newest EventTime or None,
+    "events": n}. None in (denied) → None out."""
+    if resp is None:
+        return None
+    events = (resp or {}).get("Events") or []
+    return {"last_event_at": _newest(e.get("EventTime") for e in events),
+            "events": len(events)}
+
+
+def last_used_summary(raw: dict) -> dict:
+    """{"last_used_at": newest signal or None, "last_used_source": which} over the readable
+    signals on an aws_iam_user/aws_iam_role raw dict — or {} when NO signal was readable, so
+    the keys stay absent and nothing downstream mistakes "denied" for "never used"."""
+    candidates = []   # (source, iso|None)
+    if raw.get("access_advisor_readable"):
+        candidates.append(("iam_access_advisor", raw.get("access_advisor_last_authenticated")))
+    for k in raw.get("access_keys") or []:
+        if k.get("last_used_readable"):
+            candidates.append(("access_key", k.get("last_used_at")))
+    if raw.get("role_last_used_readable"):
+        candidates.append(("role_last_used", raw.get("role_last_used_at")))
+    if raw.get("cloudtrail_readable"):
+        candidates.append(("cloudtrail", raw.get("last_event_at")))
+    if not candidates:
+        return {}
+    best_src, best, best_dt = "none", None, None
+    for src, v in candidates:
+        dt = _parse_iso(v)
+        if dt is not None and (best_dt is None or dt > best_dt):
+            best_src, best, best_dt = src, _iso(v), dt
+    return {"last_used_at": best, "last_used_source": best_src}
+
+
+def _principal_raw(kind_word: str, rec: dict, *, tags, last_accessed, cloudtrail) -> dict:
+    raw = {
+        "arn": rec.get("Arn"),
+        "account": arn_account(rec.get("Arn")),
+        f"{kind_word}_id": rec.get("UserId") if kind_word == "user" else rec.get("RoleId"),
+        "path": rec.get("Path"),
+        "created_at": _iso(rec.get("CreateDate")),
+        "access_advisor_readable": last_accessed is not None,
+        "cloudtrail_readable": None if cloudtrail == "unread" else cloudtrail is not None,
+    }
+    if last_accessed is not None:
+        raw["access_advisor_last_authenticated"] = last_accessed.get("last_authenticated")
+        raw["last_used_services"] = last_accessed.get("services") or []
+    if cloudtrail not in (None, "unread"):
+        raw["last_event_at"] = cloudtrail.get("last_event_at")
+    return _with_owner(raw, tags)
+
+
+def parse_iam_user(user: dict, *, access_keys, tags, last_accessed, cloudtrail="unread") -> Resource:
+    """One IAM user → aws_iam_user. `access_keys` is a list of parse_access_key dicts, or
+    None when ListAccessKeys was denied; `tags` None when ListUserTags was denied;
+    `last_accessed` a parse_last_accessed dict or None; `cloudtrail` a parse_cloudtrail_events
+    dict, None (denied) or the default "unread" (the CloudTrail pass has not run yet)."""
+    name = str(user.get("UserName"))
+    raw = _principal_raw("user", user, tags=tags, last_accessed=last_accessed,
+                         cloudtrail=cloudtrail)
+    raw.update({
+        "user_name": name,
+        "password_last_used": _iso(user.get("PasswordLastUsed")),
+        "access_keys_readable": access_keys is not None,
+        "access_keys": list(access_keys or []),
+    })
+    raw.update(last_used_summary(raw))
+    labels = {"service": "iam", "identity_type": "iam_user", "account": raw["account"]}
+    if raw.get("owner"):
+        labels["owner_label"] = raw["owner"]["label"]
+    return Resource(kind="aws_iam_user", name=name,
+                    ext_id=user.get("Arn") or f"iam-user-{name}", labels=labels, raw=raw)
+
+
+def parse_iam_role(role: dict, *, tags, last_accessed, cloudtrail="unread",
+                   last_used_readable=True) -> Resource:
+    """One IAM role (the GetRole record, which carries RoleLastUsed; ListRoles omits it) →
+    aws_iam_role. `last_used_readable=False` means GetRole was denied and only the ListRoles
+    record is in hand, so RoleLastUsed is unknown rather than 'never'."""
+    name = str(role.get("RoleName"))
+    raw = _principal_raw("role", role, tags=tags, last_accessed=last_accessed,
+                         cloudtrail=cloudtrail)
+    rlu = role.get("RoleLastUsed") or {}
+    raw.update({
+        "role_name": name,
+        "service_linked": str(role.get("Path") or "").startswith("/aws-service-role/"),
+        "role_last_used_readable": bool(last_used_readable),
+    })
+    if last_used_readable:
+        raw["role_last_used_at"] = _iso(rlu.get("LastUsedDate"))
+        raw["role_last_used_region"] = rlu.get("Region") if rlu.get("LastUsedDate") else None
+    raw.update(last_used_summary(raw))
+    labels = {"service": "iam", "identity_type": "iam_role", "account": raw["account"]}
+    if raw.get("owner"):
+        labels["owner_label"] = raw["owner"]["label"]
+    return Resource(kind="aws_iam_role", name=name,
+                    ext_id=role.get("Arn") or f"iam-role-{name}", labels=labels, raw=raw)
 
 
 # ── collection: boto3 in, per-service isolation ──────────────────────────────
@@ -488,7 +739,11 @@ def _collect_sqs(session, region: str) -> tuple:
                 attrs = sqs.get_queue_attributes(QueueUrl=url, AttributeNames=["All"])["Attributes"]
             except Exception:
                 attrs = None   # attributes denied for THIS queue — recorded, not raised
-            resources.append(parse_queue(region, url, attrs))
+            try:
+                tags = sqs.list_queue_tags(QueueUrl=url).get("Tags") or {}
+            except Exception:
+                tags = None    # owner attribution only: tags_readable=False rides on the queue
+            resources.append(parse_queue(region, url, attrs, tags=tags))
     # No gap records: attributes_readable=False rides on the queue itself and the SQS rules
     # file it per resource.
     return resources, [], []
@@ -516,7 +771,12 @@ def _collect_sns(session, region: str) -> tuple:
             except Exception as e:
                 subs_readable = False
                 gaps.append(_gap(arn, "subscriptions", e))
-            topic = parse_topic(region, arn, attrs, subscriptions_readable=subs_readable)
+            try:
+                tags = sns.list_tags_for_resource(ResourceArn=arn).get("Tags") or []
+            except Exception:
+                tags = None    # owner attribution only; rides on the topic as tags_readable
+            topic = parse_topic(region, arn, attrs, subscriptions_readable=subs_readable,
+                                tags=tags)
             resources.append(topic)
             for s in subs:
                 sub = parse_subscription(region, s)
@@ -661,6 +921,207 @@ def _collect_apigw_v2(session, region: str) -> tuple:
     return resources, edges, gaps
 
 
+# ── IAM (global) + CloudTrail (per region): last-used and owner telemetry ─────
+_IAM_MAX_PRINCIPALS = 500        # users + roles enumerated per scan; beyond → truncated=True
+_ADVISOR_TRIES = 10              # GetServiceLastAccessedDetails polls per principal
+_ADVISOR_SLEEP = 0.5             # seconds between polls (injected: tests pass a no-op)
+_CLOUDTRAIL_DAYS = 90            # LookupEvents window
+_CLOUDTRAIL_MAX_RESULTS = 5      # per principal; only the newest EventTime is kept
+_CLOUDTRAIL_MAX_LOOKUPS = 50     # per region (LookupEvents is throttled at ~2 TPS)
+
+
+def _iam_pages(fn, key: str, **kw) -> list:
+    """Marker-paginated IAM list call, capped at _IAM_MAX_PRINCIPALS → (items, truncated)."""
+    out, marker = [], None
+    while True:
+        kwargs = dict(kw)
+        if marker:
+            kwargs["Marker"] = marker
+        page = fn(**kwargs)
+        out.extend(page.get(key) or [])
+        if len(out) >= _IAM_MAX_PRINCIPALS:
+            return out[:_IAM_MAX_PRINCIPALS], True
+        if not page.get("IsTruncated"):
+            return out, False
+        marker = page.get("Marker")
+
+
+def _access_advisor(iam, arn: str, sleeper):
+    """Access Advisor for one principal: generate the job, poll up to _ADVISOR_TRIES times.
+    Returns the merged COMPLETED response, or None when the job never completed (timed out /
+    FAILED) — the caller records that as a child gap. Denials propagate as exceptions."""
+    job_id = iam.generate_service_last_accessed_details(Arn=arn)["JobId"]
+    for attempt in range(_ADVISOR_TRIES):
+        resp = iam.get_service_last_accessed_details(JobId=job_id)
+        status = resp.get("JobStatus")
+        if status == "COMPLETED":
+            services = list(resp.get("ServicesLastAccessed") or [])
+            marker, hops = resp.get("Marker"), 0
+            while resp.get("IsTruncated") and marker and hops < 10:
+                resp = iam.get_service_last_accessed_details(JobId=job_id, Marker=marker)
+                services.extend(resp.get("ServicesLastAccessed") or [])
+                marker, hops = resp.get("Marker"), hops + 1
+            return {"JobStatus": "COMPLETED", "ServicesLastAccessed": services}
+        if status == "FAILED":
+            raise RuntimeError(f"access advisor job failed: "
+                               f"{(resp.get('Error') or {}).get('Message') or 'unknown'}")
+        if attempt + 1 < _ADVISOR_TRIES:
+            sleeper(_ADVISOR_SLEEP)
+    return None
+
+
+def _own_policy_principals(resources: list, own_account: str) -> tuple:
+    """(user ARNs, role ARNs) of OUR account named as principals in collected resource
+    policies — the principals that must be enumerated even when the listing is truncated."""
+    users, roles = set(), set()
+    for r in resources:
+        if r.kind not in _POLICY_KINDS:
+            continue
+        for stmt in policy_statements((r.raw or {}).get("policy")):
+            for p in principal_entries(stmt):
+                if not (p.startswith("arn:") and own_account and arn_account(p) == own_account):
+                    continue
+                if ":user/" in p:
+                    users.add(p)
+                elif ":role/" in p:
+                    roles.add(p)
+    return users, roles
+
+
+def _collect_iam(session, region: str, own_account: str = "", policy_resources=(),
+                 sleeper=time.sleep) -> tuple:
+    """One GLOBAL pass over IAM users and roles → (resources, edges, gaps, meta).
+
+    Per principal: ListAccessKeys + GetAccessKeyLastUsed per key (users), GetRole for
+    RoleLastUsed (roles), ListUserTags/ListRoleTags, and Access Advisor. Each child read is
+    isolated: a denial lands as a child gap and the corresponding raw key is left absent
+    (never defaulted to "never used"). Service-linked roles are skipped (AWS-managed; the
+    customer cannot decommission them). `meta` carries truncation + skip counts for the
+    outcome record."""
+    iam = session.client("iam", region_name=region)
+    resources, gaps = [], []
+    meta = {"truncated": False, "service_linked_skipped": 0}
+
+    users, trunc_u = _iam_pages(iam.list_users, "Users")
+    roles, trunc_r = _iam_pages(iam.list_roles, "Roles")
+    meta["truncated"] = trunc_u or trunc_r
+
+    # Principals a resource policy names must be covered even past the cap.
+    want_users, want_roles = _own_policy_principals(list(policy_resources), own_account)
+    listed_u = {u.get("Arn") for u in users}
+    listed_r = {r.get("Arn") for r in roles}
+    for arn in sorted(want_users - listed_u):
+        try:
+            users.append(iam.get_user(UserName=arn.rsplit("/", 1)[-1])["User"])
+        except Exception as e:
+            gaps.append(_gap(f"user {arn.rsplit('/', 1)[-1]}", "get_user", e))
+    for arn in sorted(want_roles - listed_r):
+        try:
+            roles.append(iam.get_role(RoleName=arn.rsplit("/", 1)[-1])["Role"])
+        except Exception as e:
+            gaps.append(_gap(f"role {arn.rsplit('/', 1)[-1]}", "get_role", e))
+
+    def advisor(label, arn):
+        try:
+            resp = _access_advisor(iam, arn, sleeper)
+        except Exception as e:
+            gaps.append(_gap(label, "access_advisor", e))
+            return None
+        if resp is None:
+            gaps.append(_gap(label, "access_advisor", RuntimeError("job did not complete")))
+            return None
+        return parse_last_accessed(resp)
+
+    for u in users:
+        name = u.get("UserName")
+        label = f"user {name}"
+        try:
+            metas, _ = _iam_pages(iam.list_access_keys, "AccessKeyMetadata", UserName=name)
+            keys = []
+            for m in metas:
+                try:
+                    lu = iam.get_access_key_last_used(AccessKeyId=m.get("AccessKeyId"))
+                except Exception as e:
+                    lu = None
+                    gaps.append(_gap(label, "access_key_last_used", e))
+                keys.append(parse_access_key(m, lu))
+        except Exception as e:
+            keys = None
+            gaps.append(_gap(label, "access_keys", e))
+        try:
+            tags = iam.list_user_tags(UserName=name).get("Tags") or []
+        except Exception as e:
+            tags = None
+            gaps.append(_gap(label, "tags", e))
+        resources.append(parse_iam_user(u, access_keys=keys, tags=tags,
+                                        last_accessed=advisor(label, u.get("Arn"))))
+
+    for r in roles:
+        name = r.get("RoleName")
+        if str(r.get("Path") or "").startswith("/aws-service-role/"):
+            meta["service_linked_skipped"] += 1
+            continue
+        label = f"role {name}"
+        rec, last_used_readable = r, True
+        if "RoleLastUsed" not in r:          # ListRoles omits it; GetRole carries it
+            try:
+                rec = iam.get_role(RoleName=name)["Role"]
+            except Exception as e:
+                last_used_readable = False
+                gaps.append(_gap(label, "get_role", e))
+        try:
+            tags = iam.list_role_tags(RoleName=name).get("Tags") or []
+        except Exception as e:
+            tags = None
+            gaps.append(_gap(label, "tags", e))
+        resources.append(parse_iam_role(rec, tags=tags, last_accessed=advisor(label, r.get("Arn")),
+                                        last_used_readable=last_used_readable))
+    return resources, [], gaps, meta
+
+
+def _cloudtrail_username(r: Resource) -> str:
+    """The LookupEvents Username attribute: the IAM user name, or the role name (CloudTrail
+    records assumed-role sessions under the session name, so this is best-effort for roles —
+    RoleLastUsed is the authoritative role signal)."""
+    raw = r.raw or {}
+    return str(raw.get("user_name") or raw.get("role_name") or r.name)
+
+
+def _collect_cloudtrail(session, region: str, principals: list, now=None) -> tuple:
+    """Per-region CloudTrail LookupEvents for the collected IAM principals → (gaps, meta).
+    Mutates each principal resource in place: raw.last_event_at (newest across regions),
+    raw.cloudtrail_readable, and the recomputed last_used_at/last_used_source. Bounded to
+    _CLOUDTRAIL_MAX_LOOKUPS per region, principals with NO other last-used signal first. The
+    first AccessDenied is raised (it will deny every lookup) so the caller records the whole
+    region as access_denied; other per-principal failures are child gaps."""
+    ct = session.client("cloudtrail", region_name=region)
+    now = now or datetime.now(timezone.utc)
+    start = now - timedelta(days=_CLOUDTRAIL_DAYS)
+    ordered = sorted(principals, key=lambda r: ((r.raw or {}).get("last_used_at") is not None,
+                                                r.name))
+    gaps, meta = [], {"lookups": 0, "truncated": len(ordered) > _CLOUDTRAIL_MAX_LOOKUPS}
+    for r in ordered[:_CLOUDTRAIL_MAX_LOOKUPS]:
+        raw = r.raw
+        try:
+            resp = ct.lookup_events(
+                LookupAttributes=[{"AttributeKey": "Username",
+                                   "AttributeValue": _cloudtrail_username(r)}],
+                StartTime=start, EndTime=now, MaxResults=_CLOUDTRAIL_MAX_RESULTS)
+        except Exception as e:
+            if _error_text(e) in _DENIED_CODES:
+                raise
+            gaps.append(_gap(_cloudtrail_username(r), "lookup_events", e))
+            if raw.get("cloudtrail_readable") is None:
+                raw["cloudtrail_readable"] = False
+            continue
+        meta["lookups"] += 1
+        parsed = parse_cloudtrail_events(resp)
+        raw["cloudtrail_readable"] = True
+        raw["last_event_at"] = _newest([raw.get("last_event_at"), parsed["last_event_at"]])
+        raw.update(last_used_summary(raw))
+    return gaps, meta
+
+
 _SERVICES = (
     ("sqs", _collect_sqs),
     ("sns", _collect_sns),
@@ -716,7 +1177,14 @@ def _build_session(config: dict):
     ConnectorField("regions", "Regions", required=True, placeholder="us-east-1,eu-west-1",
                    help="Comma-separated AWS regions to scan. Every call is read-only "
                         "(List*/Get*/Describe*); the SecurityAudit or ReadOnlyAccess managed "
-                        "policy is sufficient."),
+                        "policy is sufficient. Last-used telemetry additionally uses "
+                        "iam:ListUsers/ListRoles/GetRole/ListAccessKeys/GetAccessKeyLastUsed, "
+                        "iam:Generate+GetServiceLastAccessedDetails (Access Advisor, global) "
+                        "and cloudtrail:LookupEvents (per region); owner labels are read from "
+                        "tags (owner/team/service/contact/email/vectasec:owner/created-by) via "
+                        "iam:ListUserTags/ListRoleTags, sqs:ListQueueTags and "
+                        "sns:ListTagsForResource. A denied action is recorded as a coverage "
+                        "gap, never as a clean result. See deploy/aws/ for the role template."),
     ConnectorField("role_arn", "Role ARN",
                    placeholder="arn:aws:iam::123456789012:role/vectasec-readonly",
                    help="Cross-account read-only role to assume (the agentless path). Leave "
@@ -762,6 +1230,36 @@ def collect(config: dict) -> Collected:
             except Exception as e:
                 outcomes[key] = _outcome_for(e)
 
+    # IAM is global: one pass, from the first region's endpoint. Resource-policy principals
+    # collected above are passed in so our own users/roles named there are always covered.
+    principals: list[Resource] = []
+    try:
+        rs, es, gaps, meta = _collect_iam(session, regions[0], account_id, resources)
+        principals = rs
+        resources.extend(rs)
+        edges.extend(es)
+        outcomes["iam:global"] = {"outcome": "ok", "error": None, "resources": len(rs), **meta}
+        if gaps:
+            outcomes["iam:global"]["child_gaps"] = gaps
+    except Exception as e:
+        outcomes["iam:global"] = _outcome_for(e)
+
+    # CloudTrail is regional; a denied LookupEvents is its own coverage gap — the IAM data
+    # above has already landed and is not voided by it.
+    for region in regions:
+        key = f"cloudtrail:{region}"
+        if not principals:
+            outcomes[key] = {"outcome": "ok", "error": None, "resources": 0, "lookups": 0,
+                             "skipped": "no IAM principals collected"}
+            continue
+        try:
+            gaps, meta = _collect_cloudtrail(session, region, principals)
+            outcomes[key] = {"outcome": "ok", "error": None, "resources": 0, **meta}
+            if gaps:
+                outcomes[key]["child_gaps"] = gaps
+        except Exception as e:
+            outcomes[key] = _outcome_for(e)
+
     account = Resource(
         kind="aws_account",
         name=account_id or "aws-account",
@@ -799,19 +1297,116 @@ def _classify_principal(principal: str, own_account: str) -> tuple:
     return p, "iam_principal", False
 
 
+_IAM_KINDS = ("aws_iam_user", "aws_iam_role")
+
+
+def _telemetry_labels(raw: dict) -> dict:
+    """labels.last_used_at / last_used_source / owner_label — the console reads labels only,
+    never raw, on identity/credential rows. last_used_at is the ISO string, "never" when the
+    signal was readable and empty, and ABSENT when it was not readable."""
+    labels = {}
+    if "last_used_at" in raw:
+        labels["last_used_at"] = raw.get("last_used_at") or "never"
+        if raw.get("last_used_source"):
+            labels["last_used_source"] = raw["last_used_source"]
+    if raw.get("owner_label"):
+        labels["owner_label"] = raw["owner_label"]
+    return labels
+
+
+def _slug_safe(s) -> str:
+    return "".join(ch if ch.isalnum() else "-" for ch in str(s or "")).strip("-") or "key"
+
+
+def _iam_identity(r: Resource, account_ext: str) -> tuple:
+    """aws_iam_user / aws_iam_role → (identity, [credentials], [edges]). One `access_key`
+    credential per key (ext_id made unique per key — _mk_credential's default would collide
+    for two keys on one user), one `role_session` credential per role."""
+    raw = r.raw or {}
+    is_user = r.kind == "aws_iam_user"
+    owner = raw.get("owner") or {}
+    extra = {
+        "arn": raw.get("arn"), "account": raw.get("account"),
+        "created_at": raw.get("created_at"),
+        "resource_ext_id": r.ext_id,
+        "last_used_services": raw.get("last_used_services"),
+    }
+    if owner:
+        extra["owner"] = owner
+        extra["owner_label"] = owner.get("label")
+    for k in ("last_used_at", "last_used_source", "last_event_at"):
+        if k in raw:
+            extra[k] = raw[k]
+    idr = _mk_identity("aws", "iam_user" if is_user else "iam_role", str(raw.get("arn") or r.name),
+                       external=False, source_ext=account_ext, extra=extra)
+    idr.labels.update(_telemetry_labels(idr.raw))
+
+    creds, edges = [], []
+    if is_user:
+        for k in raw.get("access_keys") or []:
+            cextra = {"created_at": k.get("created_at"), "status": k.get("status"),
+                      "identity_arn": raw.get("arn")}
+            if "last_used_at" in k:            # readable; None = key exists, never used
+                cextra["last_used_at"] = k.get("last_used_at")
+                cextra["last_used_source"] = "access_key"
+                cextra["last_used_service"] = k.get("last_used_service")
+                cextra["last_used_region"] = k.get("last_used_region")
+            if owner:
+                cextra["owner_label"] = owner.get("label")
+            c = _mk_credential("aws", idr.ext_id, "access_key", name=k.get("key_id_masked") or "key",
+                               hashing="n/a", present=True, plaintext=False, extra=cextra)
+            c.ext_id = f"{c.ext_id}:{k.get('key_ref') or _slug_safe(k.get('key_id_masked'))}"
+            c.labels.update(_telemetry_labels(c.raw))
+            creds.append(c)
+    else:
+        cextra = {"created_at": raw.get("created_at"), "identity_arn": raw.get("arn")}
+        if raw.get("role_last_used_readable"):
+            cextra["last_used_at"] = raw.get("role_last_used_at")
+            cextra["last_used_source"] = "role_last_used"
+            cextra["last_used_region"] = raw.get("role_last_used_region")
+        if owner:
+            cextra["owner_label"] = owner.get("label")
+        c = _mk_credential("aws", idr.ext_id, "role_session",
+                           name=f"{raw.get('role_name') or r.name}:role-session",
+                           hashing="n/a", present=True, plaintext=False, extra=cextra)
+        c.labels.update(_telemetry_labels(c.raw))
+        creds.append(c)
+    for c in creds:
+        edges.append(Edge(src_ext_id=c.ext_id, dst_ext_id=idr.ext_id, kind="credential_of"))
+    return idr, creds, edges
+
+
 @identity_extractor("aws")
 def _from_aws(resources: list) -> tuple:
-    """Principals appearing in SQS/SNS/EventBridge resource policies → the normalized NHI
-    model: one identity per principal (deduped across resources), one grant per
-    (principal, action, resource) with edges grant --granted_to--> identity and
-    grant --grants_access--> the collected resource. AWS resource policies expose no
-    credential material, so no credential resources are emitted — absence, not silence."""
+    """Two sources → the normalized NHI model.
+
+    1. IAM users/roles the global IAM pass collected → one identity each (so the Access page
+       lists every principal that holds a key, policy-named or not), one `access_key`
+       credential per key / one `role_session` credential per role carrying created_at and —
+       when readable — last_used_at (None = never used). Owner label and last-used ride on
+       labels as well as raw.
+    2. Principals appearing in SQS/SNS/EventBridge resource policies → one identity per
+       principal (deduped, and merged with #1 when the ARN is one of ours), one grant per
+       (principal, action, resource) with edges grant --granted_to--> identity and
+       grant --grants_access--> the collected resource."""
     out: list[Resource] = []
     edges: list[Edge] = []
-    own_account = next((str((r.raw or {}).get("account_id") or "")
-                        for r in resources if r.kind == "aws_account"), "")
+    account = next((r for r in resources if r.kind == "aws_account"), None)
+    own_account = str((account.raw or {}).get("account_id") or "") if account else ""
+    account_ext = account.ext_id if account else ""
     seen: dict[str, Resource] = {}
     seen_grants: set[str] = set()   # two statements can restate one (principal, action, target)
+
+    for r in resources:
+        if r.kind not in _IAM_KINDS:
+            continue
+        idr, creds, es = _iam_identity(r, account_ext)
+        if idr.raw["principal"] in seen:
+            continue
+        seen[idr.raw["principal"]] = idr
+        out.append(idr)
+        out.extend(creds)
+        edges.extend(es)
 
     for r in resources:
         if r.kind not in _POLICY_KINDS:
