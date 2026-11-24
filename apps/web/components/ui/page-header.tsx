@@ -56,7 +56,7 @@ export function PageHeader({
             </span>
           )}
         </div>
-        {actions && <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>{actions}</div>}
+        {actions && <div className="vs-pagehead-actions">{actions}</div>}
       </div>
       {description && (
         <p

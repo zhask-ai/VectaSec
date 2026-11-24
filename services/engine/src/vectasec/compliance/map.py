@@ -725,6 +725,9 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
         _ref(ISO27001, "A.8.5"),
         _ref(ISO27001, "A.8.2"),
     ),
+    "KONG.ADMIN.NO_AUDIT_LOG": (
+        _ref(SOC2, "CC7.2", relation="supports"),
+    ),
     "KONG.RBAC.DISABLED": (
         _ref(PCI, "7.2.1"),
         _ref(PCI, "2.2.1"),
@@ -1097,6 +1100,78 @@ RULE_TO_CONTROLS: dict[str, tuple[ControlRef, ...]] = {
     # NHI.GRANT.WILDCARD is the generalised KAFKA.ACL.* / RABBITMQ.PERMISSION.* finding, so it
     # inherits their mapping verbatim — a wildcard grant is the negation of CC6.3's least
     # privilege and A.5.18's "in accordance with the access control policy".
+    # MCP client configs committed to repositories (detect/mcp_client.py).
+    "MCP.CLIENTCONFIG.LITERAL_SECRET": (
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.17"),
+    ),
+    "MCP.CLIENTCONFIG.BROAD_FILESYSTEM": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+    "MCP.CLIENTCONFIG.DATABASE_DIRECT": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+    "MCP.CLIENTCONFIG.PLAINTEXT_REMOTE": (
+        _ref(SOC2, "CC6.7"),
+        _ref(ISO27001, "A.8.24"),
+    ),
+    # Effective-access rules (detect/effective_access.py): who can actually reach the data.
+    "KAFKA.EFFECTIVE.TOPIC_OPEN_NO_ACL": (
+        _ref(SOC2, "CC6.1"),
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+    "KAFKA.EFFECTIVE.TOPIC_WORLD_READABLE": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.8.3"),
+        _ref(ISO27001, "A.5.18"),
+    ),
+    "REDIS.ACL.KEYPATTERN_BYPASS": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.8.3"),
+    ),
+    "REDIS.ACL.SELF_ESCALATION": (
+        _ref(SOC2, "CC6.3"),
+        _ref(ISO27001, "A.8.2"),
+        _ref(ISO27001, "A.5.18"),
+    ),
+    "K8S.MESH.JWT_NOT_ENFORCED": (
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.8.5"),
+    ),
+    "K8S.MESH.AUTH_ONLY_AT_GATEWAY": (
+        _ref(SOC2, "CC6.6"),
+        _ref(ISO27001, "A.8.20"),
+    ),
+    "MFT.TRANSFER.CREDENTIAL_NOT_ROTATED": (
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.5.17"),
+    ),
+    "MFT.TRANSFER.ACCOUNT_UNUSED": (
+        _ref(SOC2, "CC6.2"),
+        _ref(ISO27001, "A.5.18"),
+    ),
+    # LiteLLM (connect/litellm.py)
+    "LITELLM.AUTH.NO_MASTER_KEY": (_ref(SOC2, "CC6.1"), _ref(ISO27001, "A.8.5")),
+    "LITELLM.AUTH.DEFAULT_MASTER_KEY": (_ref(SOC2, "CC6.1"), _ref(ISO27001, "A.5.17")),
+    "LITELLM.VERSION.KNOWN_CVE": (_ref(SOC2, "CC7.1"),),
+    "LITELLM.KEY.NO_OWNER": (_ref(SOC2, "CC6.2"), _ref(ISO27001, "A.5.18")),
+    "LITELLM.KEY.UNUSED": (_ref(SOC2, "CC6.2"), _ref(ISO27001, "A.5.18")),
+    # Make (connect/make.py)
+    "MAKE.CONNECTION.PERSONAL_ACCOUNT": (
+        _ref(SOC2, "CC6.2"),
+        _ref(ISO27001, "A.5.18"),
+    ),
+    "MAKE.CONNECTION.UNUSED": (
+        _ref(SOC2, "CC6.2"),
+        _ref(ISO27001, "A.5.18"),
+    ),
+    "MAKE.ORG.TFA_NOT_ENFORCED": (
+        _ref(SOC2, "CC6.1"),
+        _ref(ISO27001, "A.8.5"),
+    ),
     "NHI.GRANT.WILDCARD": (
         _ref(SOC2, "CC6.3"),
         _ref(ISO27001, "A.5.18"),

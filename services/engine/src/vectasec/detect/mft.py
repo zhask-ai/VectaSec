@@ -527,6 +527,65 @@ def transfer_stored_credential(r, ctx) -> list:
     )]
 
 
+def _age_days(v, now=None):
+    from datetime import datetime, timezone
+    if not v:
+        return None
+    try:
+        d = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return ((now or datetime.now(timezone.utc)) - d).days
+
+
+@detector(kinds=["mft_transfer_account"], rule_id="MFT.TRANSFER.CREDENTIAL_NOT_ROTATED", severity="medium",
+          title="MFT partner key or password has not been changed in over a year")
+def transfer_credential_not_rotated(r, ctx) -> list:
+    """Operators' words: partner SSH keys are swapped by email once and then never rotated.
+    Fires only when the export gives the date the credential was set."""
+    raw = r.raw or {}
+    if raw.get("enabled") is False or raw.get("anonymous"):
+        return []
+    limit = int((ctx.config or {}).get("mft_credential_max_age_days") or 365)
+    age = _age_days(raw.get("credential_created_at"))
+    if age is None or age <= limit:
+        return []
+    kind = raw.get("credential_type") or raw.get("auth_type") or "credential"
+    return [Hit(
+        observation=(f"MFT transfer account {raw.get('username')!r}"
+                     + (f" (partner {raw.get('partner_id')})" if raw.get("partner_id") else "")
+                     + f" uses a {kind} set {age} days ago, longer than the {limit}-day limit"),
+        remediation=("Agree a new key with the partner and swap it in: add the new public key, confirm a "
+                     "transfer works, then remove the old one. Exchange keys through a channel you "
+                     "control, not plain email, and put a yearly renewal date on the account."),
+        detail=f"credential_age_days={age} limit_days={limit}",
+        source_ref={"account": raw.get("username"), "field": "credential_created_at"},
+    )]
+
+
+@detector(kinds=["mft_transfer_account"], rule_id="MFT.TRANSFER.ACCOUNT_UNUSED", severity="low",
+          title="MFT partner account has not logged in for six months")
+def transfer_account_unused(r, ctx) -> list:
+    raw = r.raw or {}
+    if raw.get("enabled") is False:
+        return []
+    limit = int((ctx.config or {}).get("mft_unused_days") or 180)
+    age = _age_days(raw.get("last_login_at"))
+    if age is None or age <= limit:
+        return []
+    return [Hit(
+        observation=(f"MFT transfer account {raw.get('username')!r} is enabled but last logged in "
+                     f"{age} days ago"),
+        remediation=("Ask the business owner whether this partner still sends files. If not, disable "
+                     "the account and remove its key; an unused account with a live key is a quiet "
+                     "way in."),
+        detail=f"days_since_login={age} limit_days={limit}",
+        source_ref={"account": raw.get("username"), "field": "last_login_at"},
+    )]
+
+
 # ── the coverage-gap anchor ───────────────────────────────────────────────────
 @detector(kinds=["mft_server"], rule_id="MFT.SERVER.NOT_ASSESSABLE", severity="info",
           title="An MFT target could not be assessed")

@@ -7,7 +7,10 @@ import { RouteTabs } from '@/components/ui/route-tabs';
  * we have been watching, which is the evidence behind the register's "last seen" column. */
 
 const TABS: { href: Route; label: string; exact?: boolean }[] = [
-  { href: '/access', label: 'Register', exact: true },
+  { href: '/access', label: 'Who can touch what', exact: true },
+  { href: '/access/right-size', label: 'Least privilege' },
+  { href: '/access/leaver', label: 'Leavers' },
+  { href: '/access/flows', label: 'Data & AI agents' },
   { href: '/access/live', label: 'Live connections' },
 ];
 

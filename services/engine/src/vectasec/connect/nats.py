@@ -375,6 +375,41 @@ def collect(config: dict) -> Collected:
 
 
 # ── NHI: NATS accounts/users → identity / credential / grant ──────────────────
+def _subjects(v) -> list:
+    if v is None:
+        return []
+    return [str(x) for x in (v if isinstance(v, list) else [v]) if str(x).strip()]
+
+
+def nats_effective_grants(perms: dict) -> list:
+    """(direction, subject, wildcard, reason) for one user, by NATS's own rules (docs.nats.io,
+    Authorization): a direction with no allow list is UNRESTRICTED — that covers a missing
+    direction, `publish: []` ("parses as no list at all, so the user can publish anywhere"),
+    `{allow: []}` and a deny-only block (everything except the denied subjects). Deny wins over
+    allow, so an allow subject that is also denied is not a grant."""
+    if not perms:
+        return [("all", ">", True, "no permissions block: full subject access")]
+    out = []
+    for direction in ("publish", "subscribe"):
+        spec = (perms or {}).get(direction)
+        allow = _subjects(spec.get("allow")) if isinstance(spec, dict) else _subjects(spec)
+        deny = _subjects(spec.get("deny")) if isinstance(spec, dict) else []
+        if not allow:
+            if direction not in (perms or {}):
+                reason = f"no {direction} rule: unrestricted"
+            elif deny:
+                reason = f"deny-only {direction} rule: every subject except {', '.join(deny[:5])}"
+            else:
+                reason = f"empty {direction} list: NATS treats it as unrestricted"
+            out.append((direction, ">", True, reason))
+            continue
+        for subj in allow:
+            if subj in deny:
+                continue
+            out.append((direction, subj, subj in (">", "*") or subj.endswith(">"), None))
+    return out
+
+
 @identity_extractor("nats")
 def _from_nats(resources: list) -> tuple:
     """The server's non-human identities in the normalized model:
@@ -420,26 +455,9 @@ def _from_nats(resources: list) -> tuple:
                                   kind="credential_of"))
 
             perms = u.get("permissions") or {}
-            emitted_grant = False
-            for direction in ("publish", "subscribe"):
-                spec = perms.get(direction)
-                if isinstance(spec, dict):
-                    subjects = spec.get("allow")
-                else:
-                    subjects = spec
-                subjects = subjects if isinstance(subjects, list) else ([subjects] if subjects else [])
-                for subj in subjects:
-                    wildcard = str(subj) in (">", "*") or str(subj).endswith(">")
-                    g = _mk_grant("nats", idr.ext_id, direction, str(subj), wildcard=wildcard,
-                                  extra={"account": acct_name})
-                    out.append(g)
-                    edges.append(Edge(src_ext_id=g.ext_id, dst_ext_id=idr.ext_id, kind="granted_to"))
-                    emitted_grant = True
-            if not perms and not emitted_grant:
-                # No permissions block == unrestricted publish/subscribe on all subjects.
-                g = _mk_grant("nats", idr.ext_id, "all", ">", wildcard=True,
-                              extra={"account": acct_name,
-                                     "reason": "no permissions block: full subject access"})
+            for direction, subj, wildcard, reason in nats_effective_grants(perms):
+                g = _mk_grant("nats", idr.ext_id, direction, subj, wildcard=wildcard,
+                              extra={"account": acct_name, **({"reason": reason} if reason else {})})
                 out.append(g)
                 edges.append(Edge(src_ext_id=g.ext_id, dst_ext_id=idr.ext_id, kind="granted_to"))
     return out, edges

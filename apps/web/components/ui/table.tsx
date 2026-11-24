@@ -142,8 +142,11 @@ export function TD({
   numeric = false,
   mono = false,
   muted = false,
+  colSpan,
 }: {
   children: ReactNode;
+  /** A cell spanning the row — a group header inside a body (the day rows in Estate · History). */
+  colSpan?: number;
   numeric?: boolean;
   /** Evidence, IDs, fingerprints, config. Evidence in a proportional font does not read as
    *  evidence. */
@@ -152,6 +155,7 @@ export function TD({
 }) {
   return (
     <td
+      colSpan={colSpan}
       data-numeric={numeric || undefined}
       style={{
         textAlign: numeric ? 'right' : 'left',

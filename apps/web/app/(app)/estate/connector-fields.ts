@@ -47,7 +47,7 @@ export const CONNECTORS: ConnectorSpec[] = [
     type: "airflow",
     label: "Apache Airflow",
     blurb: "Workflow orchestration REST API — anonymous access, expose_config, DAG/connection secrets.",
-    rules: 8,
+    rules: 9,
     fields: [
       { key: "base_url", label: "Airflow base URL", required: true, placeholder: "https://airflow.example.com", help: "Base URL of the Airflow webserver. The stable REST API at /api/v1/ is read with GET-only calls." },
       { key: "username", label: "Username", help: "For basic auth (with password)." },
@@ -208,7 +208,7 @@ export const CONNECTORS: ConnectorSpec[] = [
     type: "k8s",
     label: "Kubernetes & service mesh",
     blurb: "Istio/Linkerd/Gateway-API/ingress/RBAC + admission/egress — mTLS, allow-all authz, cluster-admin.",
-    rules: 23,
+    rules: 25,
     fields: [
       { key: "kubeconfig", label: "Kubeconfig path", placeholder: "~/.kube/config", help: "Path to a kubeconfig the engine/worker can read. Leave empty with in_cluster=true to use the pod's mounted service-account, or set api_server+token instead. Only LIST/GET is ever issued." },
       { key: "context", label: "Kubeconfig context", placeholder: "kind-vectasec-dev", help: "Optional context name inside the kubeconfig." },
@@ -258,10 +258,20 @@ export const CONNECTORS: ConnectorSpec[] = [
     type: "kong",
     label: "Kong Gateway",
     blurb: "Admin API — routes, services, plugins, consumer credentials, exposure.",
-    rules: 17,
+    rules: 18,
     fields: [
       { key: "url", label: "Admin API URL", required: true, placeholder: "http://localhost:8001", help: "Kong Admin API base URL. GETs only." },
       { key: "admin_token", label: "Admin token", secret: true, help: "Kong-Admin-Token for RBAC-enabled gateways — use a read-only role." },
+    ],
+  },
+  {
+    type: "litellm",
+    label: "LiteLLM AI gateway",
+    blurb: "The gateway that holds your OpenAI, Anthropic and Bedrock keys — no master key, the docs key sk-1234, versions with known CVEs, virtual keys with no budget, expiry, owner or model limit.",
+    rules: 10,
+    fields: [
+      { key: "base_url", label: "Proxy URL", required: true, placeholder: "https://llm.example.com", help: "The LiteLLM proxy address, the same one your apps call." },
+      { key: "api_key", label: "Admin key", required: true, secret: true, help: "A key with the proxy_admin_viewer role (read-only admin), so every virtual key, user and team is visible. The master key also works but gives more than VectaSec needs. Only GET requests are sent." },
     ],
   },
   {
@@ -287,13 +297,14 @@ export const CONNECTORS: ConnectorSpec[] = [
   {
     type: "mft",
     label: "Managed File Transfer",
-    blurb: "MOVEit / GoAnywhere / Cleo / Sterling / Axway — exposed consoles, version CVEs, AS2/SFTP hygiene.",
-    rules: 16,
+    blurb: "MOVEit / GoAnywhere / Cleo / Sterling / Axway — exposed consoles, version CVEs, AS2/SFTP hygiene, partner keys never rotated.",
+    rules: 18,
     fields: [
       { key: "base_urls", label: "Base URLs", required: true, placeholder: "https://mft.example.com,https://as2.example.com", help: "Comma-separated admin/API base URLs of the MFT appliances (MOVEit, GoAnywhere, Cleo, Sterling File Gateway, Axway SecureTransport). Every call is a read-only GET — no transfers, no config writes." },
       { key: "product", label: "Product hint", placeholder: "moveit", help: "Optional: moveit|goanywhere|cleo|sterling|axway. Leave empty to fingerprint from the server banner and login page." },
       { key: "admin_token", label: "Admin API token", secret: true, help: "Only if reading AS2/SFTP + partner-account config via the appliance admin API. Used to open the session, never persisted into any resource." },
       { key: "verify_tls", label: "Verify TLS", placeholder: "true", help: "'false' to accept a self-signed appliance certificate (the cert is still assessed and reported); defaults to verifying." },
+      { key: "admin_export", label: "Partner accounts (JSON)", placeholder: '{"transfer_accounts":[{"username":"acme","partner_id":"ACME","auth_type":"ssh_key","credential_created_at":"2024-03-01","last_login_at":"2026-10-01"}]}', help: "Optional. Paste your appliance's partner-account list as JSON. With credential_created_at and last_login_at, VectaSec flags partner keys older than a year and accounts unused for six months. Only dates and names are needed, never the key itself." },
     ],
   },
   {
@@ -500,6 +511,18 @@ export const CONNECTORS: ConnectorSpec[] = [
       { key: "base_url", label: "API base URL", placeholder: "https://api.zapier.com", help: "Root of the Zapier Workflow API. Leave as https://api.zapier.com unless Zapier gives you a regional or dedicated host. GETs only." },
       { key: "access_token", label: "Access token", required: true, secret: true, help: "An OAuth2 bearer token for the Zapier Workflow API, issued to a Zapier OAuth app with scopes zap:all (or zap:account:all for a Team/Enterprise account), connection:read and profile. The connector reads Zaps, connections and the token's profile; it never creates, edits, runs or deletes a Zap, and connection secrets are not exposed by the API." },
       { key: "account_id", label: "Account ID", placeholder: "123456", help: "Optional Team/Enterprise account id, recorded on the account resource. When set, Zaps shared within the account are included (needs zap:account:all)." },
+    ],
+  },
+  {
+    type: "make",
+    label: "Make",
+    blurb: "Scenarios and the app connections they run on — connections signed in with personal email accounts, connections nothing uses, active public webhooks, organisations without enforced 2FA.",
+    rules: 5,
+    fields: [
+      { key: "zone", label: "Zone", placeholder: "eu1", help: "Your Make zone: eu1, eu2, us1 or us2 — the first part of your Make address (for example eu1.make.com)." },
+      { key: "api_token", label: "API token", required: true, secret: true, help: "A Make API token (Profile → API access) with read scopes only: organizations:read, teams:read, scenarios:read, connections:read, hooks:read. The connector only reads; it never runs, edits or deletes a scenario." },
+      { key: "organization_id", label: "Organization ID", placeholder: "123456", help: "Optional. Limit the scan to one organization; otherwise every organization the token can see is read." },
+      { key: "base_url", label: "API base URL", placeholder: "https://eu1.make.com/api/v2", help: "Optional override of the API address." },
     ],
   },
   {

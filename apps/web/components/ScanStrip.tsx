@@ -26,6 +26,7 @@ type ActiveScan = {
 };
 
 const POLL_MS = 4000;
+const STALE_AFTER_MS = 6 * 60 * 60 * 1000;
 
 export function ScanStrip() {
   const router = useRouter();
@@ -38,10 +39,14 @@ export function ScanStrip() {
 
     const poll = async () => {
       if (document.hidden) return;
+      // Only scans from the last few hours. A job queued for a collector that never came back
+      // stays 'queued' for ever; without this window the bar says "scanning" for months.
+      const freshSince = new Date(Date.now() - STALE_AFTER_MS).toISOString();
       const { data, error } = await supabase
         .from('scans')
         .select('id, status, connections(name, type)')
         .in('status', ['queued', 'running'])
+        .gte('started_at', freshSince)
         .order('started_at', { ascending: false })
         .limit(5);
       if (cancelled || error) return;
@@ -66,7 +71,7 @@ export function ScanStrip() {
 
   const label =
     active.length === 1
-      ? `scanning ${active[0].connections ? `${active[0].connections.type}/${active[0].connections.name}` : '…'}`
+      ? `${active[0].status === 'queued' ? 'queued' : 'scanning'} ${active[0].connections ? `${active[0].connections.type}/${active[0].connections.name}` : '…'}`
       : `${active.length} scans in flight`;
 
   return (
@@ -78,7 +83,12 @@ export function ScanStrip() {
         gap: 'var(--space-2)',
         fontSize: 'var(--text-2xs)',
         color: 'var(--text-secondary)',
+        whiteSpace: 'nowrap',
+        maxWidth: 220,
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
       }}
+      title={label}
     >
       <span
         aria-hidden="true"

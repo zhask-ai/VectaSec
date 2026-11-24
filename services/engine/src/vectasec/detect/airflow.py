@@ -198,6 +198,34 @@ def connection_stored_secret(r, ctx) -> list:
     )]
 
 
+@detector(kinds=["airflow_instance"], rule_id="AIRFLOW.CONNECTION.READABLE_BY_ALL_DAG_AUTHORS",
+          severity="info", title="Every DAG on this Airflow can read every stored connection")
+def connections_shared_by_all_dags(r, ctx) -> list:
+    """Airflow has no per-DAG permission on Connections: task code can load any connection by
+    its id (BaseHook.get_connection), whatever the UI roles say. So anyone who can merge a DAG
+    can read every credential stored here. This is how Airflow works, not a misconfiguration,
+    hence info. It matters when teams with different trust share one instance."""
+    raw = r.raw or {}
+    inst = r.ext_id
+    conns = [c for c in ctx.of_kind("airflow_connection") if (c.raw or {}).get("instance_ext_id") == inst]
+    secret = [c for c in conns if (c.raw or {}).get("has_password") or (c.raw or {}).get("secret_extra_keys")]
+    if not secret or not (raw.get("dag_count") or 0):
+        return []
+    types = sorted({str((c.raw or {}).get("conn_type")) for c in secret})
+    return [Hit(
+        observation=(f"Airflow at {raw.get('host') or raw.get('base_url')} runs {raw.get('dag_count')} DAG(s) "
+                     f"and stores {len(secret)} connection(s) with a credential ({', '.join(types[:6])}). "
+                     "Airflow has no per-DAG permission on connections, so the code of any DAG can read "
+                     "all of them, whatever the UI roles allow"),
+        remediation=("If teams with different trust levels share this instance, give each its own "
+                     "Airflow instance (or deployment) with only the connections it needs, and keep "
+                     "credentials in a secrets backend scoped per instance. Review who can merge DAG code: "
+                     "that is who can read these credentials."),
+        detail=f"dag_count={raw.get('dag_count')} secret_connections={len(secret)}",
+        source_ref={"api": ".../connections", "instance": raw.get("base_url")},
+    )]
+
+
 # CVE-2020-17526: incorrect session validation from a shared default [webserver] secret_key.
 # NVD boundary: "prior to 1.10.14". Public sources disagree on whether the fix first shipped in
 # 1.10.14 vs 1.10.15/2.0.2, so we ASSERT only for < 1.10.14 and report the disputed band as a gap.

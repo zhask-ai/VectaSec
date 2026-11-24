@@ -111,6 +111,21 @@ def collect(config: dict) -> Collected:
 
     resources[0].raw["acl_readable"] = acl_readable
 
+    # ACL LIST keeps each user's rules in the order the server applies them, as one line per
+    # user ("user default on nopass ~* &* +@all"). It is the authoritative form: redis-py's
+    # ACL GETUSER parser splits categories (+@all) out of `commands`, which left `commands`
+    # empty for every category-based user — the effective-access evaluator needs the order.
+    acl_lines: dict = {}
+    try:
+        for line in client.acl_list() or []:
+            text = line.decode() if isinstance(line, bytes) else str(line)
+            parts = text.split()
+            if len(parts) >= 2 and parts[0] == "user":
+                # Password hashes (#…) are not secrets but are not needed; drop them.
+                acl_lines[parts[1]] = " ".join(t for t in parts if not t.startswith(("#", ">", "<")))
+    except Exception:
+        acl_lines = {}
+
     for uname in usernames:
         try:
             u = client.acl_getuser(uname) or {}
@@ -122,6 +137,13 @@ def collect(config: dict) -> Collected:
         enabled = ("on" in flags) or (u.get("enabled") in (True, "on"))
         keys = u.get("keys")
         commands = u.get("commands")
+        categories = u.get("categories")
+        if isinstance(commands, list):
+            # redis-py >= 5 splits +@category rules into `categories`; put them back so the
+            # stored rule list is complete (order between the two lists is not recoverable here,
+            # which is why acl_line below is the authoritative form).
+            commands = " ".join([*(categories or []), *commands])
+        line = acl_lines.get(str(uname))
         resources.append(Resource(
             kind="redis_user",
             name=str(uname),
@@ -135,6 +157,7 @@ def collect(config: dict) -> Collected:
                 "keys": keys if isinstance(keys, str) else " ".join(keys) if isinstance(keys, list) else str(keys),
                 "channels": u.get("channels"),
                 "commands": commands if isinstance(commands, str) else str(commands),
+                "acl_line": line,
                 "server_ext": server_ext,
             },
         ))

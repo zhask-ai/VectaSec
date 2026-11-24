@@ -23,7 +23,10 @@ _FIXTURE = json.loads(
     (pathlib.Path(__file__).parent / "fixtures" / "kafka_broker_config.json").read_text()
 )
 
-RULES = {d.rule_id: d for d in DETECTORS if d.rule_id.startswith("KAFKA.")}
+# The Kafka rulepack (detect/kafka.py). KAFKA.EFFECTIVE.* live in detect/effective_access.py and
+# are pinned in tests/test_effective.py: they evaluate ACLs across topics, not one topic's config.
+RULES = {d.rule_id: d for d in DETECTORS
+         if d.rule_id.startswith("KAFKA.") and not d.rule_id.startswith("KAFKA.EFFECTIVE.")}
 
 # Every rule_id the pack is expected to ship. Kept explicit so silently dropping a detector
 # fails a test rather than quietly shrinking coverage.
@@ -191,7 +194,8 @@ def test_all_expected_rules_are_registered():
 
 
 def test_rule_ids_are_unique():
-    ids = [d.rule_id for d in DETECTORS if d.rule_id.startswith("KAFKA.")]
+    ids = [d.rule_id for d in DETECTORS
+           if d.rule_id.startswith("KAFKA.") and not d.rule_id.startswith("KAFKA.EFFECTIVE.")]
     assert len(ids) == len(set(ids)) == 25
 
 

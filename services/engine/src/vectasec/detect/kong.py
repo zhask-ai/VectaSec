@@ -1318,3 +1318,29 @@ def cve_2021_27306(resource, ctx):
         source_ref={"api": "GET /, GET /plugins (paginated)", "cve": "CVE-2021-27306",
                     "nvd": "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2021-27306"},
     )]
+
+
+# ══ KONG.ADMIN.NO_AUDIT_LOG ═══════════════════════════════════════════════
+@detector(kinds=["broker"], rule_id="KONG.ADMIN.NO_AUDIT_LOG", severity="info",
+          title="Kong open-source edition keeps no record of Admin API changes")
+def admin_no_audit_log(resource, ctx):
+    raw = resource.raw or {}
+    cfg = raw.get("configuration") or {}
+    if raw.get("edition") == "enterprise" or "enforce_rbac" in cfg:
+        return []                              # Enterprise has audit logging and RBAC
+    if raw.get("edition") is None and not cfg:
+        return []                              # edition unknown: say nothing
+    if cfg.get("role") == "data_plane":
+        return []                              # changes are made on the control plane
+    return [Hit(
+        observation=(f"Kong {raw.get('edition')!r} version {raw.get('version')!r}: the open-source "
+                     "edition has no Admin API audit log and no admin roles. Kong's own staff confirm "
+                     "both are Enterprise-only, so Kong itself cannot say who changed a route, "
+                     "plugin or consumer, or when."),
+        remediation=("Keep the Admin API on loopback and make changes only through decK files in git, "
+                     "so every change has a reviewed commit. Put any remote Admin API access behind a "
+                     "proxy that logs the caller. VectaSec's Time machine also records what changed "
+                     "between scans."),
+        detail=f"database={cfg.get('database')!r} role={cfg.get('role')!r}",
+        source_ref={"api": "GET /", "field": "edition"},
+    )]

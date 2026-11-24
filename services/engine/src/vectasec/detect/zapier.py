@@ -220,3 +220,30 @@ def paused_with_live_connection(r, ctx) -> list:
         detail=f"live_connections={len(live)} total_connections={len(cids)}",
         source_ref={"api": "GET /v2/zaps", "config_key": "is_enabled"},
     )]
+
+
+# ══ ZAPIER.CONNECTION.UNUSED ═════════════════════════════════════════════════
+# Operators inherit automation accounts full of connections and cannot tell which ones anything
+# needs (research_notes/.../forum_voice_of_operators.md: "23 credentials … which to cancel").
+# A connection no Zap references is a live grant to another system with no purpose.
+@detector(kinds=["zapier_connection"], rule_id="ZAPIER.CONNECTION.UNUSED", severity="medium",
+          title="Zapier connection is not used by any Zap")
+def connection_unused(r, ctx) -> list:
+    raw = _raw(r)
+    if raw.get("is_expired") is True or raw.get("used_by_zaps"):
+        return []
+    accounts = [a.raw for a in ctx.of_kind("zapier_account")]
+    zaps_read = any(((a.get("collection") or {}).get("zaps") or {}).get("outcome") == "ok" for a in accounts)
+    if not zaps_read:
+        return []          # without the full Zap list, "unused" cannot be claimed
+    app = (raw.get("app") or {}).get("title") or (raw.get("app") or {}).get("key") or "an app"
+    owner = (raw.get("owner") or {}).get("email") or "an unknown owner"
+    return [Hit(
+        observation=(f"Zapier connection '{raw.get('title')}' (id {raw.get('id')}) to {app}, owned by "
+                     f"{owner}, is not referenced by any Zap the account can read, but its stored "
+                     f"grant is still live (is_expired=false)."),
+        remediation=("Delete the connection in Zapier (My Apps), then revoke the matching grant or "
+                     "API key in the connected app so the credential stops working there too. If a "
+                     "Zap in another workspace uses it, move that Zap to a team-owned connection first."),
+        source_ref={"api": "GET /v2/authentications + GET /v2/zaps", "connection": raw.get("id")},
+    )]

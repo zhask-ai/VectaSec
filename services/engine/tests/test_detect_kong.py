@@ -1341,3 +1341,20 @@ def test_cve_2021_27306_states_its_unverified_preconditions():
     h = one(cve_2021_27306(n, ctx(n, p)))
     assert "Unverified preconditions" in h.observation
     assert "This rule checks neither." in h.observation
+
+
+# ══ KONG.ADMIN.NO_AUDIT_LOG ═══════════════════════════════════════════════
+from vectasec.detect.kong import admin_no_audit_log  # noqa: E402
+
+
+def test_no_audit_log_fires_on_oss_node():
+    n = node()
+    h = one(admin_no_audit_log(n, ctx(n)))
+    assert "audit log" in h.observation and "decK" in h.remediation
+
+
+def test_no_audit_log_silent_on_enterprise_and_on_data_planes():
+    n = node({"enforce_rbac": "on", "database": "postgres"}, version="3.11.0.0", edition="enterprise")
+    assert admin_no_audit_log(n, ctx(n)) == []
+    dp = node({"role": "data_plane"})
+    assert admin_no_audit_log(dp, ctx(dp)) == []

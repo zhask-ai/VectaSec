@@ -42,6 +42,8 @@ EXPECTED_RULES = {
     "MFT.TLS.WEAK_OR_EXPIRED",
     "MFT.TRANSFER.ANONYMOUS_ACCOUNT",
     "MFT.TRANSFER.STORED_CREDENTIAL",
+    "MFT.TRANSFER.CREDENTIAL_NOT_ROTATED",
+    "MFT.TRANSFER.ACCOUNT_UNUSED",
     "MFT.SERVER.NOT_ASSESSABLE",
 }
 
@@ -433,3 +435,33 @@ def test_mft_extractor_noop_without_accounts():
     col = derive_identities("mft", Collected(resources=[
         Resource(kind="mft_server", name="s", ext_id="mft-server-x", raw={"product": "moveit"})]))
     assert _kinds(col.resources).get("identity") is None
+
+
+# ── partner key age and unused accounts (dates come from the operator export) ──
+from vectasec.connect.mft import parse_transfer_account  # noqa: E402
+
+
+def _acct(**over):
+    a = {"username": "acme-partner", "partner_id": "ACME", "auth_type": "ssh_key",
+         "credential_type": "ssh_key", "enabled": True}
+    a.update(over)
+    return parse_transfer_account("mft-srv", "mft.example.com", a)
+
+
+def test_credential_not_rotated_fires_past_a_year_and_honours_config():
+    old = _acct(credential_created_at="2023-01-01T00:00:00Z")
+    hit = fire("MFT.TRANSFER.CREDENTIAL_NOT_ROTATED", old)
+    assert len(hit) == 1 and "ACME" in hit[0].observation
+    ctx = ScanContext(connection_id="c", tenant_id="t", resources=[old], config={"mft_credential_max_age_days": 100000})
+    assert fire("MFT.TRANSFER.CREDENTIAL_NOT_ROTATED", old, ctx) == []
+
+
+def test_credential_not_rotated_silent_without_date_or_when_disabled():
+    assert fire("MFT.TRANSFER.CREDENTIAL_NOT_ROTATED", _acct()) == []
+    assert fire("MFT.TRANSFER.CREDENTIAL_NOT_ROTATED",
+                _acct(credential_created_at="2020-01-01", enabled=False)) == []
+
+
+def test_account_unused_fires_after_six_months_only():
+    assert len(fire("MFT.TRANSFER.ACCOUNT_UNUSED", _acct(last_login_at="2024-01-01T00:00:00Z"))) == 1
+    assert fire("MFT.TRANSFER.ACCOUNT_UNUSED", _acct()) == []

@@ -22,7 +22,7 @@ FIX = json.loads(
 
 
 def test_automation_systems_set():
-    assert AUTOMATION_SYSTEMS == {"n8n", "zapier", "workato", "boomi", "mulesoft", "mcp", "airflow"}
+    assert AUTOMATION_SYSTEMS == {"n8n", "zapier", "make", "workato", "boomi", "mulesoft", "mcp", "airflow"}
 
 
 def test_builders_label_automation_by_system():

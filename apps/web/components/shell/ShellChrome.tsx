@@ -1,27 +1,18 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import Link from 'next/link';
-import type { Route } from 'next';
 import { usePathname } from 'next/navigation';
 
 import { ScanStrip } from '@/components/ScanStrip';
 import { createClient } from '@/lib/supabase/client';
 import { switchTenantAction } from '@/app/(app)/tenant-actions';
 import { gradeColor, type Posture } from '@/lib/posture';
-import {
-  IconOverview,
-  IconFindings,
-  IconSystems,
-  IconIdentities,
-  IconCompliance,
-  IconSettings,
-  IconMenu,
-  IconClose,
-  type IconProps,
-} from '@/components/ui/icons';
+import { IconChevronRight, IconMenu, IconClose } from '@/components/ui/icons';
+import { NAV_ITEMS, PLATFORM_ITEMS, SETTINGS_ITEM, isActive, type NavItem } from './nav';
+import { CommandPalette } from './CommandPalette';
+import { NavProgress } from './NavProgress';
 import { ThemeToggle } from './ThemeToggle';
-import { GlobalSearch } from './GlobalSearch';
 import { UserMenu } from './UserMenu';
 
 /* The app shell — the persistent chrome every authed route inherits: a six-item left sidebar, a
@@ -53,39 +44,6 @@ import { UserMenu } from './UserMenu';
  * never breaks. The nav is defined here (not passed in) so the icon components never cross the
  * RSC boundary.
  */
-
-type NavItem = {
-  href: Route;
-  label: string;
-  Icon: (p: IconProps) => React.JSX.Element;
-  exact?: boolean;
-  /** Sibling routes that belong to this item — a section whose tabs are separate routes must
-   * stay highlighted on every one of them, or the sidebar denies where the user is. */
-  also?: Route[];
-};
-
-const NAV_ITEMS: NavItem[] = [
-  { href: '/', label: 'Overview', Icon: IconOverview, exact: true },
-  { href: '/findings', label: 'Findings', Icon: IconFindings },
-  { href: '/access', label: 'Access', Icon: IconIdentities },
-  { href: '/estate', label: 'Estate', Icon: IconSystems },
-  { href: '/compliance', label: 'Compliance', Icon: IconCompliance },
-];
-
-const SETTINGS_ITEM: NavItem = { href: '/settings', label: 'Settings', Icon: IconSettings };
-
-// The operator's view — rendered only for super admins (courtesy; every /admin page and the
-// definer functions behind it re-check server-side).
-const PLATFORM_ITEMS: NavItem[] = [
-  { href: '/admin', label: 'Organizations', Icon: IconSystems, exact: true },
-  { href: '/admin/users', label: 'Users', Icon: IconIdentities },
-];
-
-function isActive(pathname: string, item: NavItem): boolean {
-  const under = (base: string) => pathname === base || pathname.startsWith(`${base}/`);
-  if (item.exact) return pathname === item.href;
-  return under(item.href) || (item.also?.some(under) ?? false);
-}
 
 export function ShellChrome({
   tenantName,
@@ -131,26 +89,98 @@ export function ShellChrome({
     return () => clearInterval(t);
   }, []);
 
-  const NavList = () => (
+  // Which sections are expanded in the sidebar. A section opens by default while you are in it;
+  // an explicit open/close is remembered per browser. Read after mount so the server render and
+  // the first client render agree (no hydration mismatch).
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('vs-nav-expanded') || '{}');
+      if (saved && typeof saved === 'object') setExpanded(saved);
+    } catch {
+      /* private mode or corrupt value: defaults apply */
+    }
+  }, []);
+  const toggle = (href: string, open: boolean) => {
+    setExpanded((prev) => {
+      const next = { ...prev, [href]: !open };
+      try {
+        localStorage.setItem('vs-nav-expanded', JSON.stringify(next));
+      } catch {
+        /* not persisted: fine */
+      }
+      return next;
+    });
+  };
+
+  // Built as an element, not an inner component: an inner component is a new type every render,
+  // which remounts the whole list and kills the expand/collapse transition mid-flight.
+  const navList = (
     <nav aria-label="Primary" className="vs-nav">
       <div className="vs-nav-group">
         <ul className="vs-nav-list">
-          {NAV_ITEMS.map((item) => {
+          {NAV_ITEMS.map((item: NavItem) => {
             const active = isActive(pathname, item);
+            const open = item.children ? (expanded[item.href] ?? active) : false;
+            const subId = `vs-navsub-${item.label.toLowerCase()}`;
             return (
               <li key={item.href}>
-                <Link
-                  href={item.href}
-                  className="vs-navitem"
-                  data-active={active || undefined}
-                  aria-current={active ? 'page' : undefined}
-                  onClick={() => setMobileOpen(false)}
-                >
-                  <span aria-hidden="true" className="vs-navitem-icon">
-                    <item.Icon size={18} />
-                  </span>
-                  <span className="vs-nav-label">{item.label}</span>
-                </Link>
+                <div className="vs-navrow">
+                  <Link
+                    href={item.href}
+                    className="vs-navitem"
+                    data-active={active || undefined}
+                    aria-current={active && pathname === item.href ? 'page' : undefined}
+                    onClick={() => setMobileOpen(false)}
+                  >
+                    <span aria-hidden="true" className="vs-navitem-icon">
+                      <item.Icon size={18} />
+                    </span>
+                    <span className="vs-nav-label">{item.label}</span>
+                  </Link>
+                  {item.children && (
+                    <button
+                      type="button"
+                      className="vs-navtoggle"
+                      aria-expanded={open}
+                      aria-controls={subId}
+                      aria-label={`${open ? 'Collapse' : 'Expand'} ${item.label}`}
+                      onClick={() => toggle(item.href, open)}
+                    >
+                      <IconChevronRight size={14} />
+                    </button>
+                  )}
+                </div>
+                {item.children && (
+                  <div className="vs-navsub-wrap" data-open={open || undefined}>
+                    <ul className="vs-navsub-list" id={subId} inert={!open}>
+                      {item.children.map((child) => {
+                        // The landing route is active only on itself; a deeper route also on
+                        // its own sub-pages (a finding, a resource).
+                        const landing = child.href === item.href;
+                        const deeper = item.children!.some(
+                          (c) => c.href !== item.href && (pathname === c.href || pathname.startsWith(`${c.href}/`)),
+                        );
+                        const childActive = landing
+                          ? active && !deeper
+                          : pathname === child.href || pathname.startsWith(`${child.href}/`);
+                        return (
+                          <li key={child.href}>
+                            <Link
+                              href={child.href}
+                              className="vs-navsub"
+                              data-active={childActive || undefined}
+                              aria-current={childActive ? 'page' : undefined}
+                              onClick={() => setMobileOpen(false)}
+                            >
+                              {child.label}
+                            </Link>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
               </li>
             );
           })}
@@ -221,6 +251,9 @@ export function ShellChrome({
         </Link>
       </div>
 
+      <Suspense fallback={null}>
+        <NavProgress />
+      </Suspense>
       <header className="vs-topbar">
         <div className="vs-topbar-left">
           <button
@@ -270,7 +303,7 @@ export function ShellChrome({
             </span>
           )}
           <div className="vs-topbar-search">
-            <GlobalSearch />
+            <CommandPalette admin={isSuperAdmin} />
           </div>
         </div>
 
@@ -284,7 +317,7 @@ export function ShellChrome({
 
       {/* Sidebar — a rail on desktop, an icon rail on tablet, an off-canvas drawer on mobile. */}
       <aside className="vs-sidebar" data-open={mobileOpen || undefined}>
-        <NavList />
+        {navList}
       </aside>
 
       {mobileOpen && <div className="vs-scrim" onClick={() => setMobileOpen(false)} aria-hidden="true" />}

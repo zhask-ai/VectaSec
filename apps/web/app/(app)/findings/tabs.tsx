@@ -7,7 +7,9 @@ import { RouteTabs } from '@/components/ui/route-tabs';
 
 const TABS: { href: Route; label: string; exact?: boolean }[] = [
   { href: '/findings', label: 'All findings', exact: true },
-  { href: '/findings/paths', label: 'Priority paths' },
+  { href: '/findings/paths', label: 'Attack paths' },
+  { href: '/findings/breach-day', label: 'Breach day' },
+  { href: '/findings/canaries', label: 'Canaries' },
 ];
 
 export function FindingsTabs() {

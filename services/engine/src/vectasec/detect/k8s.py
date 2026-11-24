@@ -193,6 +193,167 @@ def ns_no_authz_policy(r, ctx) -> list:
     )]
 
 
+# ── Istio: JWT (RequestAuthentication) ───────────────────────────────────────
+def _labels_compatible(a: dict, b: dict) -> bool:
+    """True when two matchLabels selectors could pick the same workload (no key disagrees)."""
+    return all(b.get(k) == v for k, v in a.items() if k in b)
+
+
+def _requires_request_principal(spec: dict) -> bool:
+    """Does this AuthorizationPolicy make a request WITHOUT a valid JWT fail? An ALLOW rule that
+    names requestPrincipals, a DENY rule on notRequestPrincipals, or any rule conditioned on a
+    request.auth.* claim. Read generously: any of these counts, so the rule never fires on a
+    policy set that does enforce."""
+    action = str(spec.get("action") or "ALLOW").upper()
+    for rule in spec.get("rules") or []:
+        for f in rule.get("from") or []:
+            src = f.get("source") or {}
+            if action == "ALLOW" and src.get("requestPrincipals"):
+                return True
+            if action == "DENY" and src.get("notRequestPrincipals"):
+                return True
+        for w in rule.get("when") or []:
+            if str(w.get("key") or "").startswith("request.auth."):
+                return True
+    return False
+
+
+@detector(kinds=["mesh_request_authentication"], rule_id="K8S.MESH.JWT_NOT_ENFORCED", severity="high",
+          title="Istio validates JWTs but never requires one")
+def jwt_not_enforced(r, ctx) -> list:
+    """Istio semantics: a RequestAuthentication only REJECTS requests whose token is invalid. A
+    request with NO token is accepted, unless an AuthorizationPolicy on the same workloads
+    requires a request principal. Teams add the RequestAuthentication, see bad tokens fail, and
+    believe the API needs a login. It does not."""
+    raw = r.raw or {}
+    spec = _spec(r)
+    if not spec.get("jwtRules"):
+        return []
+    if _outcome(ctx, "istio_authorization_policies") != "ok":
+        return []       # unread policies are K8S.COLLECT.FORBIDDEN's finding, not a hit here
+    c = _cluster(ctx)
+    root = ((c.raw or {}).get("istio_root_namespace") if c else None) or "istio-system"
+    ns = raw.get("namespace")
+    ra_labels = ((spec.get("selector") or {}).get("matchLabels")) or {}
+    for p in ctx.of_kind("mesh_authorization_policy"):
+        praw = p.raw or {}
+        if praw.get("namespace") not in (ns, root):
+            continue
+        pspec = _spec(p)
+        if pspec.get("targetRef") or pspec.get("targetRefs"):
+            covers = True   # gateway-attached policy: cannot match labels, assume it covers
+        else:
+            plabels = ((pspec.get("selector") or {}).get("matchLabels")) or {}
+            covers = _labels_compatible(plabels, ra_labels)
+        if covers and _requires_request_principal(pspec):
+            return []
+    issuers = sorted({str(j.get("issuer") or "?") for j in spec.get("jwtRules") or []})
+    scope = (f"workloads {ra_labels}" if ra_labels else "every workload") + f" in namespace {ns}"
+    return [Hit(
+        observation=(f"istio RequestAuthentication '{raw.get('name')}' validates JWTs from "
+                     f"{', '.join(issuers)} for {scope}, but no AuthorizationPolicy there requires a "
+                     "request principal, so a request with no token at all is let through"),
+        remediation=("Add an AuthorizationPolicy on the same workloads that denies requests without "
+                     "a principal, for example action DENY with rules[].from[].source."
+                     "notRequestPrincipals: [\"*\"], or an ALLOW policy whose rules list "
+                     "requestPrincipals. A RequestAuthentication alone only rejects bad tokens."),
+        detail=f"jwtRules={len(spec.get('jwtRules') or [])} issuers={issuers} enforcing_policies=0",
+        source_ref={"crd": "security.istio.io/RequestAuthentication", "name": raw.get("name"),
+                    "namespace": ns, "field": "spec.jwtRules"},
+    )]
+
+
+_GATEWAY_LABEL_VALUES = ("ingressgateway", "istio-ingressgateway")
+
+
+def _is_gateway_policy(spec: dict) -> bool:
+    """Policy attached to the ingress gateway rather than to the backend workloads."""
+    for ref in [spec.get("targetRef") or {}, *(spec.get("targetRefs") or [])]:
+        if str(ref.get("kind") or "") == "Gateway":
+            return True
+    labels = ((spec.get("selector") or {}).get("matchLabels")) or {}
+    return any(str(v) in _GATEWAY_LABEL_VALUES or "ingressgateway" in str(v) for v in labels.values())
+
+
+def _guards_callers(spec: dict) -> bool:
+    """Does this policy restrict who may call (beyond allow-all)? Default-deny (`spec: {}`),
+    any DENY/CUSTOM policy, or an ALLOW rule with a `from` or `when` constraint."""
+    action = str(spec.get("action") or "ALLOW").upper()
+    rules = spec.get("rules")
+    if action == "ALLOW" and not rules:
+        return True                       # {} = deny all
+    if action in ("DENY", "CUSTOM"):
+        return True
+    return any((r or {}).get("from") or (r or {}).get("when") for r in rules or [])
+
+
+def _dest_namespaces(vs_raw: dict) -> set:
+    ns = vs_raw.get("namespace")
+    out = set()
+    spec = vs_raw.get("spec") or {}
+    for proto in ("http", "tcp", "tls"):
+        for route in spec.get(proto) or []:
+            for d in route.get("route") or []:
+                host = str(((d or {}).get("destination") or {}).get("host") or "")
+                parts = host.split(".")
+                if not host or "*" in host:
+                    continue
+                if len(parts) == 1:
+                    out.add(ns)
+                elif len(parts) >= 2 and (len(parts) == 2 or parts[2] == "svc"):
+                    out.add(parts[1])
+    return {n for n in out if n}
+
+
+@detector(kinds=["mesh_virtual_service"], rule_id="K8S.MESH.AUTH_ONLY_AT_GATEWAY", severity="medium",
+          title="Login is checked only at the Istio gateway; in-cluster callers skip it")
+def auth_only_at_gateway(r, ctx) -> list:
+    """The common Istio set-up: JWT required by a policy on the ingress gateway, and nothing on
+    the backend. Traffic from the internet is checked; any pod inside the cluster can call the
+    backend service directly and is never asked for a token."""
+    raw = r.raw or {}
+    spec = _spec(r)
+    if not [g for g in spec.get("gateways") or [] if g != "mesh"]:
+        return []
+    if _outcome(ctx, "istio_authorization_policies") != "ok":
+        return []
+    policies = list(ctx.of_kind("mesh_authorization_policy"))
+    gw = [p for p in policies if _is_gateway_policy(_spec(p)) and _requires_request_principal(_spec(p))]
+    if not gw:
+        return []
+    c = _cluster(ctx)
+    root = ((c.raw or {}).get("istio_root_namespace") if c else None) or "istio-system"
+    unguarded = []
+    for ns in sorted(_dest_namespaces(raw)):
+        guarded = False
+        for p in policies:
+            pspec, pns = _spec(p), (p.raw or {}).get("namespace")
+            if _is_gateway_policy(pspec):
+                continue
+            if pns == ns or (pns == root and not pspec.get("selector")):
+                if _guards_callers(pspec):
+                    guarded = True
+                    break
+        if not guarded:
+            unguarded.append(ns)
+    if not unguarded:
+        return []
+    names = ", ".join(sorted({(p.raw or {}).get("name") or "?" for p in gw}))
+    return [Hit(
+        observation=(f"VirtualService '{raw.get('name')}' sends gateway traffic to namespace(s) "
+                     f"{', '.join(unguarded)}. A login is required only at the ingress gateway "
+                     f"(policy {names}); those namespaces have no AuthorizationPolicy, so a pod inside "
+                     "the cluster can call the services directly without any token"),
+        remediation=("Put the check on the backend too: apply the RequestAuthentication and a DENY "
+                     "policy with notRequestPrincipals: [\"*\"] (or an ALLOW policy listing the gateway's "
+                     "service account and the callers you expect) in each backend namespace. A gateway "
+                     "check protects the front door only."),
+        detail=f"unguarded_namespaces={unguarded} gateway_policies={names}",
+        source_ref={"crd": "networking.istio.io/VirtualService", "name": raw.get("name"),
+                    "namespace": raw.get("namespace")},
+    )]
+
+
 # ── Istio: DestinationRule / Gateway ─────────────────────────────────────────
 @detector(kinds=["mesh_destination_rule"], rule_id="K8S.MESH.DR_TLS_DISABLE", severity="high",
           title="Istio DestinationRule disables TLS to a destination")

@@ -1300,19 +1300,19 @@ MCP_RULES = {
 
 
 def test_every_mcp_rule_is_auto_registered_exactly_once():
-    got = [x.rule_id for x in DETECTORS if x.rule_id.startswith("MCP.")]
+    got = [x.rule_id for x in DETECTORS if x.rule_id.startswith("MCP.") and not x.rule_id.startswith("MCP.CLIENTCONFIG.")]
     assert sorted(got) == sorted(MCP_RULES)
 
 
 def test_registered_severities_are_valid():
     for x in DETECTORS:
-        if x.rule_id.startswith("MCP."):
+        if x.rule_id.startswith("MCP.") and not x.rule_id.startswith("MCP.CLIENTCONFIG."):
             assert x.severity in ("info", "low", "medium", "high", "critical")
             assert x.kinds in (("mcp_server",), ("mcp_tool",))
 
 
 def _mcp_detectors(kind):
-    return [x for x in DETECTORS if x.rule_id.startswith("MCP.") and kind in x.kinds]
+    return [x for x in DETECTORS if x.rule_id.startswith("MCP.") and not x.rule_id.startswith("MCP.CLIENTCONFIG.") and kind in x.kinds]
 
 
 def test_server_detectors_degrade_on_unreachable_target():

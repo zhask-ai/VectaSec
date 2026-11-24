@@ -452,8 +452,15 @@ def parse_iac(files: dict, *, unreadable: dict | None = None) -> Collected:
         workloads: list[tuple[str, dict, str]] = []
 
         extras: dict[str, tuple[list, list]] = {}      # workload name → (principals, secrets)
+        from .mcp_client import looks_like_mcp_client_config, parse_mcp_client_config
+        mcp_servers: list = []
         try:
-            if _CONNECT_HINT.search(text or ""):
+            if looks_like_mcp_client_config(filename, (text or "")[:4096]):
+                kind_guess = "mcp-client-config"
+                mcp_servers, err = parse_mcp_client_config(filename, text or "")
+                if err:
+                    parsed_ok, parse_error = False, err
+            elif _CONNECT_HINT.search(text or ""):
                 kind_guess = "kafka-connect"
                 doc = json.loads(text)
                 cfg = doc.get("config") if isinstance(doc.get("config"), dict) else doc
@@ -525,6 +532,10 @@ def parse_iac(files: dict, *, unreadable: dict | None = None) -> Collected:
         ))
 
         file_res = resources[-1]
+        file_res.raw["workload_count"] += len(mcp_servers)
+        for m in mcp_servers:
+            resources.append(m)
+            edges.append(Edge(src_ext_id=file_ext, dst_ext_id=m.ext_id, kind="declares"))
         file_principals: list[dict] = []
         for wname, spec, source in workloads:
             ep, es = extras.get(wname, ([], []))
@@ -565,6 +576,9 @@ _MAX_FILES = 500
 
 
 def _looks_like_iac(path: str, head: str) -> bool:
+    from .mcp_client import looks_like_mcp_client_config
+    if looks_like_mcp_client_config(path, head):
+        return True
     base = os.path.basename(path)
     if _COMPOSE_NAMES.search(path):
         return True
@@ -581,7 +595,9 @@ def _walk(root: str) -> tuple[dict, dict]:
     files: dict[str, str] = {}
     unreadable: dict[str, str] = {}
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
+        from .mcp_client import MCP_CONFIG_DIRS
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS
+                       and (not d.startswith(".") or d in MCP_CONFIG_DIRS)]
         for fn in filenames:
             if len(files) >= _MAX_FILES:
                 return files, unreadable

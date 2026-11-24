@@ -37,7 +37,7 @@ from ..registry import ConnectorField, connector
 # snapshot section keys, grouped by the stack they witness. Presence = the API group answered
 # (ok) or exists-but-denied (forbidden); a 404 means the CRDs are simply not installed.
 _ISTIO_KEYS = ("istio_peer_authentications", "istio_authorization_policies",
-               "istio_destination_rules", "istio_gateways", "istio_virtual_services")
+               "istio_request_authentications", "istio_destination_rules", "istio_gateways", "istio_virtual_services")
 _LINKERD_KEYS = ("linkerd_servers", "linkerd_server_authorizations")
 _GWAPI_KEYS = ("gateway_classes", "gateways", "http_routes")
 _CORE_KEYS = ("namespaces", "services", "service_accounts", "sa_token_secrets", "ingresses",
@@ -397,6 +397,7 @@ def _build_resources(snapshot: dict, root_namespace: str = "istio-system") -> Co
           extra=lambda n, ns, spec: {
               "mesh_wide": ns == root_namespace and not spec.get("selector")})
     _mesh("mesh_authorization_policy", "istio_authorization_policies", "mesh-authz")
+    _mesh("mesh_request_authentication", "istio_request_authentications", "mesh-ra")
     _mesh("mesh_destination_rule", "istio_destination_rules", "mesh-dr")
     _mesh("mesh_gateway", "istio_gateways", "mesh-gw")
     _mesh("mesh_virtual_service", "istio_virtual_services", "mesh-vs")
@@ -404,7 +405,7 @@ def _build_resources(snapshot: dict, root_namespace: str = "istio-system") -> Co
     # policy → namespace edges (the "what governs this namespace" lens in the graph)
     ns_exts = {r.ext_id for r in resources if r.kind == "k8s_namespace"}
     for r in resources:
-        if r.kind in ("mesh_peer_authentication", "mesh_authorization_policy"):
+        if r.kind in ("mesh_peer_authentication", "mesh_authorization_policy", "mesh_request_authentication"):
             dst = f"k8s-ns-{(r.raw or {}).get('namespace')}"
             if dst in ns_exts:
                 edges.append(Edge(src_ext_id=r.ext_id, dst_ext_id=dst, kind="applies_to"))
@@ -595,6 +596,8 @@ def collect(config: dict) -> Collected:
                                            "peerauthentications"),
         "istio_authorization_policies": _crd("security.istio.io", ("v1", "v1beta1"),
                                              "authorizationpolicies"),
+        "istio_request_authentications": _crd("security.istio.io", ("v1", "v1beta1"),
+                                              "requestauthentications"),
         "istio_destination_rules": _crd("networking.istio.io", ("v1", "v1beta1", "v1alpha3"),
                                         "destinationrules"),
         "istio_gateways": _crd("networking.istio.io", ("v1", "v1beta1", "v1alpha3"), "gateways"),

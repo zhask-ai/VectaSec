@@ -4,6 +4,12 @@ import { notFound } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { SEVERITY_RANK, type Json, type Severity, type FindingStatus } from '@/lib/types';
 import { Breadcrumbs } from '@/components/ui/breadcrumbs';
+import { canEdit, getOwnMembership } from '@/lib/role';
+import { ResourceHistory } from '../../changes/history-cards';
+import { UsageCard } from './usage-card';
+import { OwnerCard } from './owner-card';
+import { WhoCan } from './who-can';
+import { AiReview } from './ai-review';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { Chip } from '@/components/ui/chip';
 import { EmptyState } from '@/components/ui/empty-state';
@@ -81,6 +87,8 @@ export default async function AssetDetailPage({
   const radius = sp.radius === '2' ? 2 : sp.radius === '3' ? 3 : 1;
 
   const supabase = await createClient();
+  // Courtesy only: the review action and the engine re-check the role themselves.
+  const editable = canEdit((await getOwnMembership())?.role ?? null);
 
   const [resourceRes, findingsRes, edgesRes] = await Promise.all([
     supabase
@@ -507,6 +515,31 @@ export default async function AssetDetailPage({
               </div>
             </>
           )}
+        </CardBody>
+      </Card>
+
+      {resource.kind === 'identity' && (
+        <OwnerCard
+          resourceId={resource.id}
+          extId={resource.ext_id}
+          inferred={typeof (resource.labels as Record<string, unknown>)?.owner_label === 'string' ? ((resource.labels as Record<string, string>).owner_label as string) : null}
+          editable={editable}
+        />
+      )}
+
+      <WhoCan resourceId={resource.id} kind={resource.kind} />
+
+      <UsageCard resourceId={resource.id} kind={resource.kind} />
+
+      <ResourceHistory resourceId={resource.id} />
+
+      <Card>
+        <CardHeader>
+          <CardTitle>AI review</CardTitle>
+          <CardMeta>suggestions, not findings</CardMeta>
+        </CardHeader>
+        <CardBody>
+          <AiReview resourceId={resource.id} editable={editable} />
         </CardBody>
       </Card>
 

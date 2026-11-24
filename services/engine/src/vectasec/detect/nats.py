@@ -283,3 +283,32 @@ def jetstream_authz_cve(r, ctx) -> list:
         detail=f"version={version}",
         source_ref={"api": "/varz", "field": "version", "cve": "CVE-2025-30215"},
     )]
+
+
+@detector(kinds=["nats_account"], rule_id="NATS.PERMISSION.EMPTY_LIST_UNRESTRICTED", severity="high",
+          title="A NATS permission list that looks like a lock-down grants everything")
+def empty_list_unrestricted(r, ctx) -> list:
+    """`publish: []` or `{allow: []}` reads like "may publish nothing"; NATS treats it as "no
+    list", which means the user may publish anywhere (docs.nats.io, Authorization). The common
+    intent was to block, so this is reported as the trap it is."""
+    hits = []
+    acct = (r.raw or {}).get("name")
+    for u in (r.raw or {}).get("users") or []:
+        perms = u.get("permissions") or {}
+        for direction in ("publish", "subscribe"):
+            if direction not in perms:
+                continue
+            spec = perms[direction]
+            empty = spec in ([], {}, None, "") or (isinstance(spec, dict) and not spec.get("allow")
+                                                   and not spec.get("deny"))
+            if not empty:
+                continue
+            hits.append(Hit(
+                observation=f"NATS user '{acct}/{u.get('user')}' has `{direction}` set to an empty list "
+                            f"({spec!r}); NATS treats an empty list as no list, so this user may "
+                            f"{direction} on every subject in account '{acct}'",
+                remediation=(f"To block all {direction}s, write `{direction}: {{ deny: [\">\"] }}`. To "
+                             f"allow only some subjects, list them under `allow`."),
+                source_ref={"account": acct, "user": u.get("user"), "direction": direction},
+            ))
+    return hits

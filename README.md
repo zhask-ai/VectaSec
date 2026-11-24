@@ -152,6 +152,18 @@ pipeline, scheduler, collector protocol.
 │       ├── graph_engine.py        Toxic-combination correlation (attack paths)
 │       ├── remediation.py         Guided-fix library (per-rule snippets)
 │       ├── exposure.py            External exposure scan + DNS ownership gate
+│       ├── assistant.py           AI: cited Q&A, change explanation, quote-verified review, digest opening
+│       ├── ai_core.py             Provider-neutral JSON completion over the Anthropic → OpenAI → Gemini chain
+│       ├── connect/mcp_client.py  MCP client configs in repos (.mcp.json, .cursor/mcp.json, …); secrets fingerprinted only
+│       ├── effective.py           Effective access by each system's own rules (Kafka, RabbitMQ, Redis)
+│       ├── breach.py              Breach-day briefs: advisory matched to stored inventory, rotation order
+│       ├── leaver.py              Leaver report: what one person owns and what depends on it
+│       ├── impact.py              Fix preview ("what breaks") and least-privilege dry runs
+│       ├── canary.py              Decoy URLs; only the token hash is stored
+│       ├── benchmark.py           Integration-Layer Benchmark generated from the detector registry
+│       ├── flows.py               Toxic flows, MCP agent reach, sensitive-data map
+│       ├── proof.py               Proof mode: one read-only pre-auth probe per finding, never a credential
+│       ├── timemachine.py         Configuration history: scan diff, as-of view, change report
 │       ├── digest.py              Weekly change digest
 │       ├── notify.py              Slack / Teams / email / webhook / Jira / SIEM / Vanta / Drata
 │       ├── report.py              OSCAL, CSV, executive summary, access register
@@ -199,7 +211,8 @@ the engine environment and `apps/web/.env.local`.
 Apply every file in `supabase/migrations/` in filename order (Supabase SQL editor, `psql`, or
 `supabase db push`). The first migration seeds a Demo tenant the CLI defaults to, so you can scan
 before you have users. The `20261017*` migrations add the verify loop, digests, exposure scans
-and the Zapier Vault entry.
+and the Zapier Vault entry; the `20261123*` migrations add change history, proofs, breach briefs
+and canaries; `20261124000001` adds confirmed identity owners.
 
 ### 3. Start the dev targets
 
@@ -284,11 +297,12 @@ Six pages. Design laws (tokens only, colour never the only signal, say what is t
 
 | Page | What it answers |
 |---|---|
+| **Ask** | A plain-language question about the workspace, answered from stored records with links to each one (or a plain search when no AI provider is configured). |
 | **Overview** | Posture score and trend, what changed this week, what to do now, a first-ten-minutes checklist, compliance strip, recent scans. |
-| **Findings** | The queue, grouped by rule and ordered by severity, with facets for severity, status, assessment and system, lenses for supply chain / credential lifecycle / over-broad access, and the **Priority paths** tab. A finding page shows evidence, triage, the guided fix and Verify. |
-| **Access** | The register: identity × system × owner × last seen × sensitive data × flags × grants × risk, with filters and the CSV / Markdown register export. **Live connections** shows runtime evidence and the observation window. |
-| **Estate** | **Connected** (health, cadence, scan history drawer, actions), **Unmonitored** (discovery results and the external exposure scan), **Inventory** (every resource, blast radius), **What we can assess** (the shelf and the enterprise tier). |
-| **Compliance** | **Controls** per framework with attestation, **Reports & exports** (OSCAL, CSV, executive summary, SBOM, VEX, licensing). |
+| **Findings** | The queue, grouped by rule and ordered by severity, with facets for severity, status, assessment and system, lenses for supply chain / credential lifecycle / over-broad access, the **Priority paths** tab, **Breach day** (match an advisory or vendor breach to the stored inventory and get a rotation order) and **Canaries** (decoy URLs that alert when called). A finding page shows evidence, **Proof** (one read-only pre-authentication request that shows the finding is reachable, with the transcript), **When this opened**, triage, the guided fix and Verify. |
+| **Access** | The register: identity × system × owner × last seen × sensitive data × flags × grants × risk, with filters and the CSV / Markdown register export. **Live connections** shows runtime evidence and the observation window. **Right-size** compares each identity's grants with what it was seen using and shows a dry-run change. **Leavers** lists everything one person owns and what keeps running on their authority. **Data & agents** shows toxic flows across automations, what MCP servers can reach, and who can read sensitive data. |
+| **Estate** | **Connected** (health, cadence, scan history drawer, actions), **Unmonitored** (discovery results and the external exposure scan), **Inventory** (every resource, blast radius, per-resource change history), **History** (the Time machine: what changed between scans with before and after values, the estate as recorded on a past date, and the access-and-change report), **What we can assess** (the shelf and the enterprise tier). |
+| **Compliance** | **Controls** per framework with attestation, **Benchmark** (the generated Integration-Layer Benchmark per system, with your result), **Reports & exports** (OSCAL, CSV, executive summary, SBOM, VEX, licensing). |
 | **Settings** | General, members and roles, integrations and routing rules (including the weekly digest). |
 
 Old routes (`/connections`, `/identities`, `/attack-paths`, `/scans`, `/supply-chain`, …)
@@ -304,9 +318,15 @@ Main groups:
 | Group | Endpoints |
 |---|---|
 | Connections & scans | `POST/PATCH/DELETE /connections`, `POST /connections/{id}/scan`, `/test`, `POST /scans`, `GET /scans/{id}`, `GET /connectors` |
-| Findings | `POST /findings/{id}/status`, `/assign`, `/triage`, `GET /findings/{id}/fix`, `POST /findings/{id}/verify`, `POST /suppressions` |
+| Findings | `POST /findings/{id}/status`, `/assign`, `/triage`, `GET /findings/{id}/fix`, `POST /findings/{id}/verify`, `GET /findings/{id}/proof`, `POST /findings/{id}/prove`, `POST /suppressions` |
 | Compliance & reports | `GET /compliance/{framework}`, `POST /compliance/{fw}/{control}/attest`, `GET /reports/{oscal,csv,summary,sbom,vex,access-register}`, `GET /licensing` |
 | Exposure scan | `POST /exposure/targets`, `POST /exposure/targets/{id}/verify`, `POST /exposure/targets/{id}/scan`, `GET /exposure/targets`, `GET /exposure/scans/{id}` |
+| Time machine | `GET /timeline/as-of?at=YYYY-MM-DD`, `GET /reports/changes?format=csv\|md\|json&days=30` (or `since` / `until`) |
+| Breach day & canaries | `POST /breach-briefs`, `GET /reports/breach-brief?id=`, `POST /canaries`, `POST /canaries/{id}/revoke`, public `ANY /c/{token}` |
+| Access analysis | `GET /findings/{id}/impact`, `GET /access/least-privilege`, `GET /people`, `GET /people/report?person=`, `GET /access/flows` |
+| Benchmark | `GET /benchmark`, `GET /reports/benchmark?system=&blank=` |
+| AI assistant | `POST /assistant/ask`, `GET /assistant/explain-changes?days=`, `POST /assistant/review/{resource_id}`, `GET /assistant/status` |
+| Effective access | `GET /access/who-can/{resource_id}`, `GET /access/usage/{resource_id}?format=json\|csv`, `POST /access/owner` |
 | Digest & integrations | `POST /digests/run`, `GET /digests`, `GET/POST/DELETE /integrations`, `/integrations/{id}/test`, `GET/POST/DELETE /routing-rules` |
 | Tenancy & platform | `/members`, `/admin/*`, `/collector/*`, `GET /graph/blast-radius/{resource_id}` |
 
@@ -331,6 +351,16 @@ CLI (`uv run vectasec --help`): `doctor`, `rules`, `connections add|test|rm`, `s
 - **Secrets never land in the data plane.** Connection credentials live in Vault; connectors
   copy no credential material into resources; IaC secrets become fingerprints; the exposure scan
   publishes product / version / port only.
+- **AI may relate facts, never introduce them.** Every AI output is checked by code before it is
+  shown: answers must cite numbered stored facts, change explanations must cite recorded changes,
+  review suggestions must quote a value the engine finds at the stated config path, and the
+  digest opening may only use numbers present in the computed digest. Anything that fails is
+  discarded and the deterministic result is shown, labelled. AI suggestions are never findings.
+- **History is scan-to-scan, and says so.** Each scan compares what it collected with the
+  previous state and appends to `resource_changes` (added / removed / modified / returned, with
+  masked before and after values and telemetry filtered out). It proves what changed and the two
+  scans it changed between; it names who only where the system's API returns an author. It is
+  not the system's audit log.
 - **Absence is never evidence.** A clean scan cannot write a compliance `pass`; "last seen" says
   *unknown* where no source collects it, never *unused*; a denied API call is a recorded coverage
   gap, not silence.

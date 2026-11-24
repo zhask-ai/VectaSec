@@ -22,40 +22,19 @@ export type RouteTab = { href: Route; label: string; badge?: ReactNode; exact?: 
 export function RouteTabs({ tabs, 'aria-label': ariaLabel }: { tabs: RouteTab[]; 'aria-label': string }) {
   const pathname = usePathname();
 
+  // Styling lives in globals.css (.vs-rtabs): hover states, the sliding underline and the
+  // horizontal scroll a long strip needs at narrow widths cannot be inline styles.
   return (
-    <nav aria-label={ariaLabel} style={{ borderBottom: '1px solid var(--border)' }}>
-      <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', gap: 'var(--space-1)' }}>
+    <nav aria-label={ariaLabel} className="vs-rtabs">
+      <ul className="vs-rtabs-list">
         {tabs.map((tab) => {
           const active = tab.exact ? pathname === tab.href : pathname.startsWith(tab.href);
           return (
             <li key={tab.href}>
-              <Link
-                href={tab.href}
-                aria-current={active ? 'page' : undefined}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 'var(--space-2)',
-                  height: 'var(--row-default)',
-                  padding: '0 var(--space-3)',
-                  fontSize: 'var(--text-sm)',
-                  fontWeight: active ? 600 : 400,
-                  color: active ? 'var(--text-primary)' : 'var(--text-secondary)',
-                  textDecoration: 'none',
-                  borderBottom: `2px solid ${active ? 'var(--accent)' : 'transparent'}`,
-                  marginBottom: -1,
-                }}
-              >
+              <Link href={tab.href} aria-current={active ? 'page' : undefined} className="vs-rtab">
                 {tab.label}
                 {tab.badge != null && (
-                  <span
-                    data-numeric
-                    style={{
-                      fontSize: 'var(--text-2xs)',
-                      color: 'var(--text-muted)',
-                      fontWeight: 500,
-                    }}
-                  >
+                  <span data-numeric style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)', fontWeight: 500 }}>
                     {tab.badge}
                   </span>
                 )}

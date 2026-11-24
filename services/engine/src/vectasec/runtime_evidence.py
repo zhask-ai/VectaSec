@@ -159,6 +159,9 @@ def record_runtime(conn, tenant_id: str, connection_id: str, scan_id: str) -> di
                 (tenant_id, connection_id, principal, resource_ext, source, peer,
                  json.dumps({"connections": raw.get("connections"),
                              "commands": raw.get("commands"),
+                             # Kafka consumer groups: the topics their members are assigned, so
+                             # "who read this topic" can be answered per topic (impact.usage_history).
+                             "topics": sorted(raw.get("topics") or [])[:200] or None,
                              "auth_mechanisms": raw.get("auth_mechanisms"),
                              "scan_id": str(scan_id)})),
             )

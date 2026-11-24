@@ -80,7 +80,7 @@ const SENS_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
 // Mirrors graph_engine._PUBLIC_KEYS — the exposure vocabulary connectors put in labels.
 const EXPOSURE_KEYS = ['public', 'internet_reachable', 'internet_exposed', 'exposed', 'bind_all', 'public_access'];
 // Mirrors identity.AUTOMATION_SYSTEMS — identities held by an automation or agent platform.
-const AUTOMATION_SYSTEMS = new Set(['n8n', 'zapier', 'workato', 'boomi', 'mulesoft', 'mcp', 'airflow']);
+const AUTOMATION_SYSTEMS = new Set(['n8n', 'zapier', 'make', 'workato', 'boomi', 'mulesoft', 'mcp', 'airflow']);
 const IDLE_DAYS = 90; // mirrors detect/credential_lifecycle.py _IDLE_DAYS
 
 /** Days since an ISO timestamp, or null when unparseable. */
@@ -174,7 +174,7 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
 
   const supabase = await createClient();
 
-  const [countRes, identitiesRes, credsRes, grantsRes, evidenceRes, gitRes] = await Promise.all([
+  const [countRes, identitiesRes, credsRes, grantsRes, evidenceRes, gitRes, ownersRes] = await Promise.all([
     supabase.from('resources').select('*', { count: 'exact', head: true }).eq('kind', 'identity'),
     supabase
       .from('resources')
@@ -190,7 +190,14 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
     // "Also in git": the IaC connector records principal NAMES it finds in manifests (never the
     // paired secret) as labels.principals. Matching identity names against them is the join.
     supabase.from('resources').select('id, name, labels').not('labels->>principals', 'is', null).limit(ROW_CAP),
+    // Owners a person confirmed (and when). Wins over an inferred owner tag. Absent on databases
+    // without migration 20261124000001; the page then shows inferred owners only.
+    supabase.from('identity_owners').select('identity_ext_id, owner, verified_at').limit(ROW_CAP),
   ]);
+  const confirmedOwners = new Map<string, { owner: string; verified_at: string }>();
+  for (const o of (ownersRes.error ? [] : (ownersRes.data ?? [])) as { identity_ext_id: string; owner: string; verified_at: string }[]) {
+    confirmedOwners.set(o.identity_ext_id, o);
+  }
 
   const gitPrincipals = new Map<string, string[]>(); // lower-cased principal → manifest names
   for (const r of (gitRes.error ? [] : (gitRes.data ?? [])) as unknown as ResourceRow[]) {
@@ -346,7 +353,8 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
       scope: scopeOf(idr),
       connector: idr.connections ?? null,
       isDefault: isDefault(idr.name) || lbl(idr, 'shared') === 'true',
-      owner: lbl(idr, 'owner_label') || null,
+      owner: confirmedOwners.get(idr.ext_id)?.owner || lbl(idr, 'owner_label') || null,
+      ownerVerifiedAt: confirmedOwners.get(idr.ext_id)?.verified_at ?? null,
       lastSeen,
       sensitivity,
       exposed,
@@ -617,7 +625,12 @@ export default async function IdentitiesPage({ searchParams }: { searchParams: S
                     </TD>
                     <TD>
                       {d.owner ? (
-                        <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-primary)' }}>{d.owner}</span>
+                        <span style={{ display: 'grid', gap: 1 }}>
+                          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-primary)' }}>{d.owner}</span>
+                          <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }}>
+                            {d.ownerVerifiedAt ? `confirmed ${d.ownerVerifiedAt.slice(0, 10)}` : 'inferred'}
+                          </span>
+                        </span>
                       ) : (
                         <span style={{ fontSize: 'var(--text-2xs)', color: 'var(--text-muted)' }} title="No owner tag or annotation on this principal">no owner</span>
                       )}
@@ -721,14 +734,14 @@ function LastSeenCell({ seen }: { seen: IdentityDetail['lastSeen'] }) {
  * route, so they work without JS and carry the caller's own session. */
 function RegisterExport() {
   return (
-    <span style={{ display: 'inline-flex', gap: 'var(--space-2)', alignItems: 'center' }}>
+    <>
       <a href="/api/reports/register-csv" className="vs-actionbtn" title="Access register as CSV (one row per identity)">
         Register · CSV
       </a>
       <a href="/api/reports/register-md" className="vs-actionbtn" title="Access register as a Markdown document with the control mapping">
-        Register · auditor PDF-ready
+        Register · for auditors
       </a>
-    </span>
+    </>
   );
 }
 

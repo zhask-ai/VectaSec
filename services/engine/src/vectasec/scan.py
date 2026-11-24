@@ -193,6 +193,43 @@ def _persist_edges(cur, tenant_id: str, connection_id: str, collected: Collected
     return n
 
 
+def _snapshot_before(cur, connection_id: str):
+    """The connection's resources as they are BEFORE this scan overwrites them — the Time
+    machine's "before" side (timemachine.py). None when it could not be read.
+
+    Savepoint for the reason _persist_scan documents at its compliance step: in Postgres a
+    failed statement aborts the transaction, and history is not worth a scan. A database that
+    has not had migration 20261123000001 applied still scans; it just records no changes.
+    """
+    from . import timemachine
+    cur.execute("savepoint tm_before")
+    try:
+        previous = timemachine.load_previous(cur, connection_id)
+        cur.execute("release savepoint tm_before")
+        return previous
+    except Exception:  # pragma: no cover - defensive
+        cur.execute("rollback to savepoint tm_before")
+        return None
+
+
+def _record_changes(cur, tenant_id: str, connection_id: str, scan_id: str, previous,
+                    resources, ext_to_id: dict, *, compare_raw: bool) -> dict:
+    """Write this scan's resource_changes rows; returns {"changes": {...}} for the scan stats,
+    or {"changes_error": ...} — never raises (same savepoint contract as _snapshot_before)."""
+    if previous is None:
+        return {"changes_error": "previous state could not be read"}
+    from . import timemachine
+    cur.execute("savepoint tm_record")
+    try:
+        counts = timemachine.record_changes(cur, tenant_id, connection_id, scan_id, previous,
+                                            resources, ext_to_id, compare_raw=compare_raw)
+        cur.execute("release savepoint tm_record")
+        return {"changes": counts}
+    except Exception as e:  # pragma: no cover - defensive
+        cur.execute("rollback to savepoint tm_record")
+        return {"changes_error": f"{type(e).__name__}: {e}"}
+
+
 VERIFY_OPEN_STATUSES = ("open", "triaged", "in_progress", "accepted")
 
 
@@ -621,6 +658,7 @@ def persist_pushed(conn, tenant_id: str, connection_id: str, scan_id: str, paylo
 
     with conn.cursor() as cur:
         # Resources: metadata only, raw is '{}' — the collector gives raw no route out, by design.
+        previous = _snapshot_before(cur, connection_id)
         ext_to_id: dict[str, str] = {}
         seen: list[str] = []
         for r in resources:
@@ -641,6 +679,10 @@ def persist_pushed(conn, tenant_id: str, connection_id: str, scan_id: str, paylo
                 "update resources set stale=true where connection_id=%s and not (ext_id = any(%s))",
                 (connection_id, seen),
             )
+
+        # Time machine: labels only — raw configuration never leaves the collector.
+        change_stats = _record_changes(cur, tenant_id, connection_id, scan_id, previous,
+                                       resources, ext_to_id, compare_raw=False)
 
         # Edges.
         cur.execute("delete from edges where src_resource_id in "
@@ -712,6 +754,7 @@ def persist_pushed(conn, tenant_id: str, connection_id: str, scan_id: str, paylo
             "collector": payload.get("collector_version"),
             "collector_stats": payload.get("stats"),
         }
+        stats.update(change_stats)
         # Verify loop — same step, same transaction as the local path (_persist_scan).
         stats.update(_settle_verifications(cur, tenant_id, connection_id, scan_id, set(groups)))
         from .compliance import map as compliance
@@ -741,7 +784,10 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
                   config: dict, collected: Collected, t0: float) -> dict:
     """The single write transaction: resources, edges, findings, evidence, stats."""
     with conn.cursor() as cur:
+        previous = _snapshot_before(cur, connection_id)
         ext_to_id = _persist_resources(cur, tenant_id, connection_id, collected)
+        change_stats = _record_changes(cur, tenant_id, connection_id, scan_id, previous,
+                                       collected.resources, ext_to_id, compare_raw=True)
         n_edges = _persist_edges(cur, tenant_id, connection_id, collected, ext_to_id)
 
         ctx = ScanContext(connection_id=connection_id, tenant_id=tenant_id,
@@ -842,6 +888,7 @@ def _persist_scan(conn, tenant_id: str, connection_id: str, scan_id: str,
             "detectors_run": len(DETECTORS),
             "duration_ms": int((time.time() - t0) * 1000),
         }
+        stats.update(change_stats)
         # Verify loop: resolve what a human asked us to check and this scan no longer emits;
         # clear the request on what it still does. Never touches a finding nobody asked about.
         stats.update(_settle_verifications(cur, tenant_id, connection_id, scan_id, emitted))

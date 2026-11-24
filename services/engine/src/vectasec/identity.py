@@ -63,7 +63,7 @@ def derive_identities(type_: str, collected: Collected) -> Collected:
 # from this label on every identity / credential / grant, so the console never has to know which
 # connector a row came from. A tag of "automation" on the identity sets it too, for connectors
 # (Kafka, Kong, …) whose principal is used by an automation even though the system is not one.
-AUTOMATION_SYSTEMS = {"n8n", "zapier", "workato", "boomi", "mulesoft", "mcp", "airflow"}
+AUTOMATION_SYSTEMS = {"n8n", "zapier", "make", "workato", "boomi", "mulesoft", "mcp", "airflow"}
 
 
 def _is_automation(system: str, tags: list | None = None) -> bool:

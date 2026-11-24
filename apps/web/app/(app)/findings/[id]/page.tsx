@@ -1,6 +1,9 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
+import { ImpactCard } from './impact-card';
+import { ProofCard } from './proof-card';
+import { OpenedWhen } from '../../estate/changes/history-cards';
 import { Card, CardBody, CardHeader, CardMeta, CardTitle } from '@/components/ui/card';
 import { Page } from '@/components/ui/page';
 import { SeverityBadge } from '@/components/ui/severity';
@@ -82,10 +85,16 @@ export default async function FindingPage({ params }: PageProps<'/findings/[id]'
           <TypePanels finding={finding} />
           <ChainCard finding={finding} />
           <Evidence items={finding.evidence} finding={finding} />
+          {/* Proof mode: one read-only pre-auth request that shows the finding is reachable. */}
+          <ProofCard finding={finding} editable={editable} />
+          {/* Time machine: the scan-to-scan change that opened this, where one was recorded. */}
+          <OpenedWhen findingId={finding.id} />
           <Triage finding={finding} editable={editable} />
           {/* Guided fix + Verify replaces the bare remediation card: exact per-system steps from
               the engine's fix library (falling back to the rule text) and the rescan-to-close
               loop. */}
+          {/* What the fix would touch, before the fix itself. */}
+          <ImpactCard finding={finding} />
           <GuidedFix finding={finding} editable={editable} />
         </div>
 

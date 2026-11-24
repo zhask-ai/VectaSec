@@ -27,6 +27,7 @@ EXPECTED_RULES = {
     "AIRFLOW.CONFIG.TEST_CONNECTION_ENABLED", "AIRFLOW.TRANSPORT.NO_TLS",
     "AIRFLOW.AUTH.DEFAULT_ADMIN_USER", "AIRFLOW.DAG.SECRET_IN_PARAMS",
     "AIRFLOW.CONNECTION.STORED_SECRET", "AIRFLOW.VERSION.KNOWN_CVE",
+    "AIRFLOW.CONNECTION.READABLE_BY_ALL_DAG_AUTHORS",
 }
 
 
@@ -310,3 +311,27 @@ def test_no_detector_raises_on_degraded_instance():
     for x in DETECTORS:
         if x.rule_id.startswith("AIRFLOW.") and x.kinds == ("airflow_instance",):
             x.fn(r, ctx())
+
+
+# ── AIRFLOW.CONNECTION.READABLE_BY_ALL_DAG_AUTHORS ─────────────────────────
+def _conn(cid, **over) -> Resource:
+    raw = {"connection_id": cid, "conn_type": "postgres", "has_password": True,
+           "secret_extra_keys": [], "instance_ext_id": INST_EXT}
+    raw.update(over)
+    return Resource(kind="airflow_connection", name=cid, ext_id=f"airflow-conn-{cid}", raw=raw)
+
+
+def _isolation(inst, conns):
+    cx = ScanContext(connection_id="c", tenant_id="t", resources=[inst, *conns], config={})
+    return a.connections_shared_by_all_dags(inst, cx)
+
+
+def test_connection_isolation_info_fires_with_dags_and_secret_connections():
+    hits = _isolation(instance(dag_count=4, connection_count=2), [_conn("warehouse"), _conn("s3", has_password=False)])
+    assert len(hits) == 1 and "1 connection" in hits[0].observation and "4 DAG" in hits[0].observation
+
+
+def test_connection_isolation_silent_without_dags_or_secrets():
+    assert _isolation(instance(dag_count=0), [_conn("warehouse")]) == []
+    assert _isolation(instance(dag_count=3), [_conn("s3", has_password=False)]) == []
+    assert _isolation(instance(dag_count=3), [_conn("x", instance_ext_id="other")]) == []

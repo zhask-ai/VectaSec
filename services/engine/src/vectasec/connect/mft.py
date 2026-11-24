@@ -263,6 +263,9 @@ def parse_transfer_account(server_ext: str, host, acct: dict) -> Resource:
             "is_default": bool(acct.get("is_default")),
             "enabled": acct.get("enabled", True),
             "endpoint": acct.get("endpoint"),   # the listener it transfers over, by name
+            # Optional dates from the operator export (ISO 8601). Absent = not judged.
+            "credential_created_at": acct.get("credential_created_at") or acct.get("key_created_at"),
+            "last_login_at": acct.get("last_login_at") or acct.get("last_login"),
             "server_ext": server_ext,
         },
     )
@@ -397,8 +400,16 @@ def _read_admin_api(base_url: str, token, product: str, config: dict) -> dict:
     admin_export shape (dict): keyed by base_url or product, or a bare dict with keys:
         {"default_admin_present": bool,
          "endpoints": [{type, name, ...}], "transfer_accounts": [{username, ...}]}
+    A transfer account may also carry `credential_created_at` (when its SSH key or password was
+    set) and `last_login_at`, both ISO 8601; the key-age and unused-account rules read them.
     """
     export = config.get("admin_export") or {}
+    if isinstance(export, str):      # pasted as JSON text in the console form
+        try:
+            import json as _json
+            export = _json.loads(export) if export.strip() else {}
+        except ValueError:
+            export = {}
     if isinstance(export, dict):
         data = export.get(base_url) or export.get(product)
         if data is None and ("endpoints" in export or "transfer_accounts" in export):

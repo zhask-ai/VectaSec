@@ -584,3 +584,77 @@ def test_every_fired_hit_has_remediation_and_observation():
                 for h in (d.fn(r, ctx) or []):
                     assert h.observation.strip(), d.rule_id
                     assert h.remediation.strip(), d.rule_id
+
+
+# ── K8S.MESH.JWT_NOT_ENFORCED ────────────────────────────────────────────────
+def _jwt_snap(policies, ra_selector=None):
+    ra_spec = {"jwtRules": [{"issuer": "https://auth.acme.io"}]}
+    if ra_selector:
+        ra_spec["selector"] = {"matchLabels": ra_selector}
+    return S(namespaces=[{"metadata": m("istio-system")},
+                         {"metadata": m("api", labels={"istio-injection": "enabled"})}],
+             istio_request_authentications=[{"metadata": m("jwt", "api"), "spec": ra_spec}],
+             istio_authorization_policies=policies)
+
+
+def test_jwt_without_requiring_policy_fires():
+    hits = hits_for("K8S.MESH.JWT_NOT_ENFORCED", build(_jwt_snap([])).resources)
+    assert len(hits) == 1 and "no token" in hits[0].observation
+    # A policy that does not mention request principals does not enforce either.
+    other = [{"metadata": m("allow-ns", "api"),
+              "spec": {"rules": [{"from": [{"source": {"namespaces": ["web"]}}]}]}}]
+    assert len(hits_for("K8S.MESH.JWT_NOT_ENFORCED", build(_jwt_snap(other)).resources)) == 1
+
+
+def test_jwt_with_deny_not_request_principals_is_silent():
+    deny = [{"metadata": m("require-jwt", "api"), "spec": {
+        "action": "DENY", "rules": [{"from": [{"source": {"notRequestPrincipals": ["*"]}}]}]}}]
+    assert hits_for("K8S.MESH.JWT_NOT_ENFORCED", build(_jwt_snap(deny)).resources) == []
+    allow = [{"metadata": m("allow-jwt", "api"), "spec": {
+        "selector": {"matchLabels": {"app": "orders"}},
+        "rules": [{"from": [{"source": {"requestPrincipals": ["https://auth.acme.io/*"]}}]}]}}]
+    assert hits_for("K8S.MESH.JWT_NOT_ENFORCED",
+                    build(_jwt_snap(allow, {"app": "orders"})).resources) == []
+
+
+def test_jwt_policy_on_other_workload_does_not_count():
+    other_app = [{"metadata": m("allow-jwt", "api"), "spec": {
+        "selector": {"matchLabels": {"app": "billing"}},
+        "rules": [{"from": [{"source": {"requestPrincipals": ["*"]}}]}]}}]
+    assert len(hits_for("K8S.MESH.JWT_NOT_ENFORCED",
+                        build(_jwt_snap(other_app, {"app": "orders"})).resources)) == 1
+
+
+def test_jwt_rule_silent_when_policies_unreadable():
+    snap = _jwt_snap([])
+    snap["istio_authorization_policies"] = forbidden()
+    assert hits_for("K8S.MESH.JWT_NOT_ENFORCED", build(snap).resources) == []
+
+
+# ── K8S.MESH.AUTH_ONLY_AT_GATEWAY ────────────────────────────────────────────
+_GW_JWT = {"metadata": m("require-jwt", "istio-system"), "spec": {
+    "selector": {"matchLabels": {"istio": "ingressgateway"}}, "action": "DENY",
+    "rules": [{"from": [{"source": {"notRequestPrincipals": ["*"]}}]}]}}
+
+
+def _gw_snap(policies):
+    return S(namespaces=[{"metadata": m("istio-system")},
+                         {"metadata": m("shop", labels={"istio-injection": "enabled"})}],
+             istio_virtual_services=[{"metadata": m("shop-vs", "shop"), "spec": {
+                 "gateways": ["istio-system/public-gw"], "hosts": ["shop.acme.io"],
+                 "http": [{"route": [{"destination": {"host": "orders.shop.svc.cluster.local"}}]}]}}],
+             istio_authorization_policies=policies)
+
+
+def test_gateway_only_auth_fires_when_backend_unguarded():
+    hits = hits_for("K8S.MESH.AUTH_ONLY_AT_GATEWAY", build(_gw_snap([_GW_JWT])).resources)
+    assert len(hits) == 1 and "shop" in hits[0].observation
+
+
+def test_gateway_only_auth_silent_when_backend_has_policy_or_no_gateway_jwt():
+    backend = {"metadata": m("shop-callers", "shop"), "spec": {
+        "rules": [{"from": [{"source": {"principals": ["cluster.local/ns/istio-system/sa/gw"]}}]}]}}
+    assert hits_for("K8S.MESH.AUTH_ONLY_AT_GATEWAY", build(_gw_snap([_GW_JWT, backend])).resources) == []
+    assert hits_for("K8S.MESH.AUTH_ONLY_AT_GATEWAY", build(_gw_snap([])).resources) == []
+    deny_all = {"metadata": m("deny", "shop"), "spec": {}}
+    assert hits_for("K8S.MESH.AUTH_ONLY_AT_GATEWAY", build(_gw_snap([_GW_JWT, deny_all])).resources) == []

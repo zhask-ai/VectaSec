@@ -42,7 +42,7 @@ export function Toolbar({
         {children}
       </div>
       {end && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>{end}</div>
+        <div className="vs-toolbar-end" style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)', flexWrap: 'wrap' }}>{end}</div>
       )}
     </div>
   );

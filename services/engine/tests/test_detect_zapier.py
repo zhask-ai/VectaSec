@@ -22,6 +22,7 @@ EXPECTED_RULES = {
     "ZAPIER.CONNECTION.OWNER_LEFT_OR_UNKNOWN",
     "ZAPIER.ACCOUNT.NOT_ASSESSED",
     "ZAPIER.ZAP.PAUSED_WITH_LIVE_CONNECTION",
+    "ZAPIER.CONNECTION.UNUSED",
 }
 
 
@@ -177,3 +178,26 @@ def test_paused_rule_silent_for_enabled_zap_and_for_paused_zap_with_only_expired
 
 def test_detector_module_exports_its_functions():
     assert callable(d.webhook_trigger_unauthenticated) and callable(d.account_not_assessed)
+
+
+# ══ CONNECTION.UNUSED ═════════════════════════════════════════════════════════
+def _conns(col):
+    return [r for r in col.resources if r.kind == "zapier_connection"]
+
+
+def test_unused_connection_fires_only_when_live_and_unreferenced():
+    unused = {"id": "auth-orphan", "title": "Old Stripe", "is_expired": False,
+              "app": {"id": "app-stripe", "key": "StripeCLIAPI", "title": "Stripe"}}
+    col = _col(auths_raw=[*[a for p in FIX["authentications"].values() for a in p["data"]], unused])
+    hits = fire("ZAPIER.CONNECTION.UNUSED", res("zapier_connection", "auth-orphan", col), col)
+    assert len(hits) == 1 and "not referenced by any Zap" in hits[0].observation
+    for c in _conns(col):
+        if c.raw.get("used_by_zaps") or c.raw.get("is_expired"):
+            assert fire("ZAPIER.CONNECTION.UNUSED", c, col) == []
+
+
+def test_unused_is_not_claimed_when_the_zap_list_was_not_read():
+    unused = {"id": "auth-orphan", "title": "Old Stripe", "is_expired": False, "app": {"id": "s", "title": "Stripe"}}
+    col = _col(auths_raw=[unused], zaps_raw=[], outcomes={"profile": {"outcome": "ok"},
+               "zaps": {"outcome": "forbidden"}, "authentications": {"outcome": "ok"}})
+    assert fire("ZAPIER.CONNECTION.UNUSED", res("zapier_connection", "auth-orphan", col), col) == []

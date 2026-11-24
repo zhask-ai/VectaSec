@@ -268,6 +268,9 @@ def render_digest_text(d: dict) -> str:
     sc = d.get("scans") or {}
     un = d.get("unknowns") or {}
     lines = [f"VectaSec weekly digest {_period(d)}", ""]
+    ai_text = ((d.get("ai_summary") or {}).get("text") or "").strip()
+    if ai_text:
+        lines += [ai_text, "(Opening written by AI; every number in it was checked against the figures below.)", ""]
     lines.append(f"Posture: {_posture_line(d.get('posture') or {})}")
     lines.append(f"Scans: {sc.get('total', 0)} run, {sc.get('failed', 0)} failed")
     lines.append("")
@@ -320,6 +323,12 @@ def render_digest_slack(d: dict) -> dict:
         ]},
     ]
 
+    ai_text = ((d.get("ai_summary") or {}).get("text") or "").strip()
+    if ai_text:
+        blocks.insert(1, {"type": "section", "text": {"type": "mrkdwn", "text": ai_text}})
+        blocks.insert(2, {"type": "context", "elements": [{
+            "type": "mrkdwn", "text": "Written by AI; every number was checked against the figures below."}]})
+
     def section(title: str, items: list[str]) -> None:
         if items:
             blocks.append({"type": "section", "text": {
@@ -349,7 +358,8 @@ def _last_period_end(cur, tenant_id: str):
     return row[0] if row else None
 
 
-def send_digest(conn, tenant_id: str, *, since=None, until=None, client=None) -> dict:
+def send_digest(conn, tenant_id: str, *, since=None, until=None, client=None,
+                summarize: bool = True) -> dict:
     """Compose the window, deliver to every enabled routing rule whose notify_on names
     weekly_digest (destination types DIGEST_TYPES), record the run in `digests`.
 
@@ -364,6 +374,15 @@ def send_digest(conn, tenant_id: str, *, since=None, until=None, client=None) ->
             last = _last_period_end(cur, tenant_id)
             since_dt = _as_dt(last) if last else until_dt - DEFAULT_WINDOW
         digest = compose_digest(cur, tenant_id, since_dt, until_dt)
+        # An AI-written opening, only when a provider is configured. Every number in it must
+        # appear in the computed digest or it is dropped (assistant.digest_summary); the digest
+        # itself never depends on it.
+        from . import ai_core
+        if summarize and ai_core.available():
+            from .assistant import digest_summary
+            summary = digest_summary(digest)
+            if summary["ai_used"]:
+                digest["ai_summary"] = summary
 
         cur.execute(
             """/* digest:rules */

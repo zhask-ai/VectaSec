@@ -245,3 +245,30 @@ export async function verifyFindingAction(_prev: ActionState, form: FormData): P
   revalidatePath('/estate');
   return { ok: true, message: 'Rescan queued. If the next scan no longer sees this issue, the finding is resolved automatically and the verification is recorded in the audit trail.' };
 }
+
+/* Proof mode. Asks the engine to make ONE read-only, pre-authentication request against this
+ * finding's own target and record what came back. The engine derives the target from the
+ * connection; nothing in this form can aim it elsewhere. Synchronous (a few seconds at most),
+ * so the verdict is on the next render. */
+export async function proveFindingAction(_prev: ActionState, form: FormData): Promise<ActionState> {
+  const findingId = str(form, 'findingId');
+  const a = await authorize(findingId);
+  if (!a) return { ok: false, message: DENIED };
+
+  const res = await enginePost<{ verdict: string; target: string | null }>(
+    `/findings/${findingId}/prove`,
+    {},
+    { tenantId: a.ctx.tenantId, actor: a.actor },
+    15_000,
+  );
+  if (!res.ok) return { ok: false, message: res.message };
+
+  revalidateFinding(findingId);
+  const said: Record<string, string> = {
+    proven: 'Proven: the request succeeded without credentials. The transcript is recorded below and in the evidence.',
+    not_reproduced: 'Not reproduced: the target answered and did not let the request through.',
+    unreachable: 'The engine could not reach the target, so this neither proves nor rules out the finding.',
+    unsupported: 'This rule has no safe proof.',
+  };
+  return { ok: true, message: said[res.data.verdict] ?? 'Recorded.' };
+}

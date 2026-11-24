@@ -2,6 +2,9 @@ import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // The floating dev badge sat on top of the sidebar's lower items. Errors still surface in the
+  // dev overlay; only the always-on indicator is hidden.
+  devIndicators: false,
   typedRoutes: true,
   // The console went from fifteen navigation items to six (docs/vectasec-smb-strategy-2026-10.md
   // §3). Every old route keeps resolving so a link pasted into a ticket or a Slack thread last

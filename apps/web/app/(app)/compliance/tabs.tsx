@@ -7,6 +7,7 @@ import { RouteTabs } from '@/components/ui/route-tabs';
 
 const TABS: { href: Route; label: string; exact?: boolean }[] = [
   { href: '/compliance', label: 'Controls', exact: true },
+  { href: '/compliance/benchmark', label: 'Benchmark' },
   { href: '/compliance/reports', label: 'Reports & exports' },
 ];
 

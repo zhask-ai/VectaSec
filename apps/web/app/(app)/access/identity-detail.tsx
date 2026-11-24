@@ -58,8 +58,10 @@ export type IdentityDetail = {
   scope: 'external' | 'internal' | 'unknown';
   connector: { type: string; name: string } | null;
   isDefault: boolean;
-  /** Owner label inferred from a tag / annotation on the principal (null when none). */
+  /** Owner: confirmed by a person (identity_owners) or inferred from a tag / annotation. */
   owner: string | null;
+  /** When a person last confirmed the owner; null when the owner is only inferred or unknown. */
+  ownerVerifiedAt: string | null;
   /** Last-seen signal, with its provenance. `unknown` = no source collects it for this system. */
   lastSeen: { state: 'seen' | 'never' | 'unknown'; at: string | null; source: string };
   /** Highest naming-inferred sensitivity across this identity's grants ('' when none). */
@@ -144,7 +146,8 @@ export function IdentityDetailButton({ detail }: { detail: IdentityDetail }) {
             {d.automation && <Chip tone="info">held by an automation</Chip>}
           </div>
           <p style={metaLine}>
-            Owner: {d.owner ?? 'no owner tag'} · Last seen:{' '}
+            Owner: {d.owner ?? 'no owner tag'}
+            {d.ownerVerifiedAt ? ` (confirmed ${d.ownerVerifiedAt.slice(0, 10)})` : d.owner ? ' (inferred)' : ''} · Last seen:{' '}
             {d.lastSeen.state === 'seen'
               ? `${d.lastSeen.at} (${d.lastSeen.source})`
               : d.lastSeen.state === 'never'
